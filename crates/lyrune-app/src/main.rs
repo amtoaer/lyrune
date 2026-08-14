@@ -1,6 +1,7 @@
 mod app;
 mod cache;
 mod credentials;
+mod library;
 mod player;
 
 use app::LyruneView;

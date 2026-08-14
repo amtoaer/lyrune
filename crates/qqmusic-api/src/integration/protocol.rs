@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
@@ -7,7 +8,9 @@ use reqwest::header::{COOKIE, REFERER};
 use serde_json::{Map, Value, json};
 use sha1::{Digest as _, Sha1};
 
-use super::{QqCredential, Quality, Track};
+use super::{
+    PlaylistPage, QqCredential, Quality, Track, UserPlaylist, UserPlaylistId, UserProfile,
+};
 
 const API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
 const PROFILE_URL: &str = "https://c6.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg";
@@ -66,38 +69,152 @@ impl ProtocolClient {
         Ok(credential)
     }
 
-    pub async fn liked_tracks(&self, credential: &QqCredential, limit: u64) -> Result<Vec<Track>> {
-        let data = self
+    pub async fn user_profile(&self, credential: &QqCredential) -> Result<UserProfile> {
+        let profile = match self
             .call(
-                "music.srfDissInfo.DissInfo",
-                "CgiGetDiss",
-                json!({
-                    "disstid": 0,
-                    "dirid": 201,
-                    "tag": true,
-                    "song_begin": 0,
-                    "song_num": limit.clamp(1, 100),
-                    "userinfo": true,
-                    "orderlist": true,
-                    "enc_host_uin": credential.encrypted_uin,
-                }),
+                "music.UserInfo.userInfoServer",
+                "GetLoginUserInfo",
+                json!({}),
                 credential,
                 None,
             )
             .await
-            .context("无法加载 QQ 音乐“我喜欢”")?;
+        {
+            Ok(profile) => profile,
+            Err(_) => self.fetch_legacy_profile(credential).await?,
+        };
 
-        let songs = data
-            .get("songlist")
-            .and_then(Value::as_array)
+        let nickname = find_string_recursively(
+            &profile,
+            &["nickname", "nick", "name", "userName"],
+        )
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "QQ 音乐用户".to_owned());
+        let avatar_url =
+            find_string_recursively(&profile, &["avatarUrl", "headurl", "headUrl", "logo"])
+                .filter(|value| !value.trim().is_empty())
+                .map(force_https);
+        let id = find_string_recursively(
+            &profile,
+            &["str_musicid", "musicid", "music_id", "uin"],
+        )
+        .filter(|value| value != "0")
+        .unwrap_or_else(|| credential.music_id.to_string());
+
+        Ok(UserProfile {
+            id,
+            nickname,
+            avatar_url,
+        })
+    }
+
+    pub async fn user_playlists(&self, credential: &QqCredential) -> Result<Vec<UserPlaylist>> {
+        let liked_data = self
+            .playlist_data(credential, &UserPlaylistId::Liked, 0, 1)
+            .await
+            .context("无法读取“我喜欢”概要")?;
+        let mut liked = playlist_from_detail(&liked_data, UserPlaylist::liked());
+        liked.track_count =
+            integer_field(&liked_data, &["total_song_num", "total"]).unwrap_or_default();
+
+        let created_data = self
+            .call(
+                "music.musicasset.PlaylistBaseRead",
+                "GetPlaylistByUin",
+                json!({ "uin": credential.music_id.to_string() }),
+                credential,
+                None,
+            )
+            .await
+            .context("无法加载用户创建的 QQ 音乐歌单")?;
+        let created = find_array_recursively(&created_data, &["v_playlist", "playlist"])
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(parse_created_playlist)
+            .collect::<Vec<_>>();
+
+        let mut favorites = Vec::new();
+        let mut offset = 0_u64;
+        loop {
+            let data = self
+                .call(
+                    "music.musicasset.PlaylistFavRead",
+                    "CgiGetPlaylistFavInfo",
+                    json!({
+                        "uin": credential.encrypted_uin,
+                        "offset": offset,
+                        "size": 100,
+                    }),
+                    credential,
+                    None,
+                )
+                .await
+                .context("无法加载用户收藏的 QQ 音乐歌单")?;
+            let page = find_array_recursively(&data, &["v_list", "playlist"])
+                .cloned()
+                .unwrap_or_default();
+            favorites.extend(page.iter().filter_map(parse_favorite_playlist));
+            let has_more = bool_field(&data, &["hasmore", "has_more"]).unwrap_or(false);
+            if !has_more || page.is_empty() {
+                break;
+            }
+            offset = offset.saturating_add(page.len() as u64);
+        }
+
+        let mut seen = HashSet::new();
+        let mut playlists = Vec::with_capacity(1 + created.len() + favorites.len());
+        seen.insert(liked.id.clone());
+        playlists.push(liked);
+        for playlist in created.into_iter().chain(favorites) {
+            if seen.insert(playlist.id.clone()) {
+                playlists.push(playlist);
+            }
+        }
+        Ok(playlists)
+    }
+
+    pub async fn playlist_page(
+        &self,
+        credential: &QqCredential,
+        playlist: &UserPlaylist,
+        offset: u64,
+        limit: u64,
+    ) -> Result<PlaylistPage> {
+        let limit = limit.clamp(1, 100);
+        let data = self
+            .playlist_data(credential, &playlist.id, offset, limit)
+            .await
+            .with_context(|| format!("无法加载 QQ 音乐歌单“{}”", playlist.title))?;
+        let songs = find_array_recursively(&data, &["songlist"])
             .cloned()
             .unwrap_or_default();
-
-        songs
+        let tracks = songs
             .iter()
             .map(parse_track)
             .collect::<Result<Vec<_>>>()
-            .context("QQ 音乐“我喜欢”的歌曲数据格式发生了变化")
+            .with_context(|| format!("QQ 音乐歌单“{}”的数据格式发生了变化", playlist.title))?;
+        let total = integer_field(&data, &["total_song_num", "total"])
+            .unwrap_or_else(|| offset.saturating_add(tracks.len() as u64));
+        let next_offset = offset.saturating_add(tracks.len() as u64);
+        let has_more = bool_field(&data, &["hasmore", "has_more"])
+            .unwrap_or(next_offset < total)
+            && !tracks.is_empty();
+
+        Ok(PlaylistPage {
+            playlist: playlist_from_detail(&data, playlist.clone()),
+            tracks,
+            total,
+            has_more,
+            next_offset,
+        })
+    }
+
+    pub async fn liked_tracks(&self, credential: &QqCredential, limit: u64) -> Result<Vec<Track>> {
+        Ok(self
+            .playlist_page(credential, &UserPlaylist::liked(), 0, limit)
+            .await?
+            .tracks)
     }
 
     pub async fn playback_url(
@@ -161,6 +278,43 @@ impl ProtocolClient {
         ))
     }
 
+    async fn playlist_data(
+        &self,
+        credential: &QqCredential,
+        id: &UserPlaylistId,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Value> {
+        let (diss_id, dir_id, encrypted_uin) = match id {
+            UserPlaylistId::Liked => (0, 201, Some(credential.encrypted_uin.as_str())),
+            UserPlaylistId::Created { tid, .. } => (*tid, 0, None),
+            UserPlaylistId::Favorite { diss_id } => (*diss_id, 0, None),
+        };
+        let mut param = json!({
+            "disstid": diss_id,
+            "dirid": dir_id,
+            "tag": true,
+            "song_begin": offset,
+            "song_num": limit.clamp(1, 100),
+            "userinfo": true,
+            "orderlist": true,
+        });
+        if let Some(encrypted_uin) = encrypted_uin {
+            param
+                .as_object_mut()
+                .expect("playlist params are always an object")
+                .insert("enc_host_uin".to_owned(), encrypted_uin.into());
+        }
+        self.call(
+            "music.srfDissInfo.DissInfo",
+            "CgiGetDiss",
+            param,
+            credential,
+            None,
+        )
+        .await
+    }
+
     async fn refresh_full_credential(&self, credential: &QqCredential) -> Result<Value> {
         self.call(
             "music.login.LoginServer",
@@ -179,7 +333,14 @@ impl ProtocolClient {
     }
 
     async fn fetch_encrypted_uin(&self, credential: &QqCredential) -> Result<String> {
-        let response = self
+        let response = self.fetch_legacy_profile(credential).await?;
+        find_string_recursively(&response, &["encryptUin", "encrypt_uin"])
+            .filter(|value| !value.trim().is_empty())
+            .context("QQ 音乐用户资料没有包含加密用户标识")
+    }
+
+    async fn fetch_legacy_profile(&self, credential: &QqCredential) -> Result<Value> {
+        self
             .client
             .get(PROFILE_URL)
             .header(COOKIE, credential.cookie())
@@ -201,11 +362,7 @@ impl ProtocolClient {
             .context("QQ 音乐用户资料接口拒绝了请求")?
             .json::<Value>()
             .await
-            .context("QQ 音乐用户资料不是有效 JSON")?;
-
-        find_string_recursively(&response, &["encryptUin", "encrypt_uin"])
-            .filter(|value| !value.trim().is_empty())
-            .context("QQ 音乐用户资料没有包含加密用户标识")
+            .context("QQ 音乐用户资料不是有效 JSON")
     }
 
     async fn call(
@@ -314,7 +471,8 @@ fn apply_credential_response(credential: &mut QqCredential, data: &Value) {
 }
 
 fn parse_track(value: &Value) -> Result<Track> {
-    let value = value
+    let wrapper = value;
+    let value = wrapper
         .get("songInfo")
         .or_else(|| value.get("track"))
         .unwrap_or(value);
@@ -344,15 +502,97 @@ fn parse_track(value: &Value) -> Result<Track> {
         .unwrap_or_default();
     let album = value.get("album").unwrap_or(&Value::Null);
     let album_name = string_field(album, &["name", "title"]).unwrap_or_default();
+    let album_mid = string_field(album, &["mid", "pmid", "albumMid", "albummid"])
+        .or_else(|| string_field(value, &["albumMid", "albummid"]))
+        .unwrap_or_default();
+    let cover_url = string_field(album, &["coverUrl", "picUrl", "picurl"])
+        .filter(|value| !value.is_empty())
+        .map(force_https)
+        .or_else(|| album_cover_url(&album_mid));
 
     Ok(Track {
+        song_id: integer_field(value, &["id", "songid", "songId"]),
         mid,
         media_mid,
         title,
         artists,
         album: album_name,
+        album_mid,
+        cover_url,
         duration_seconds: integer_field(value, &["interval"]).unwrap_or_default(),
+        added_at: integer_field(wrapper, &["addTime", "add_time"]).map(|value| value as i64),
     })
+}
+
+fn parse_created_playlist(value: &Value) -> Option<UserPlaylist> {
+    let tid = integer_field(value, &["tid", "id", "dissid"])?;
+    let dir_id = integer_field(value, &["dirId", "dirid"]).unwrap_or_default();
+    if dir_id == 201 {
+        return None;
+    }
+    parse_playlist_summary(value, UserPlaylistId::Created { tid, dir_id })
+}
+
+fn parse_favorite_playlist(value: &Value) -> Option<UserPlaylist> {
+    let diss_id = integer_field(value, &["dissid", "tid", "id"])?;
+    parse_playlist_summary(value, UserPlaylistId::Favorite { diss_id })
+}
+
+fn parse_playlist_summary(value: &Value, id: UserPlaylistId) -> Option<UserPlaylist> {
+    let title = string_field(value, &["dirName", "dirname", "dissname", "title", "name"])
+        .filter(|value| !value.trim().is_empty())?;
+    let cover_url = string_field(
+        value,
+        &["bigpicUrl", "picUrl", "picurl", "coverUrl", "logo"],
+    )
+    .filter(|value| !value.trim().is_empty())
+    .map(force_https);
+    Some(UserPlaylist {
+        id,
+        title,
+        cover_url,
+        description: string_field(value, &["desc", "description"]).unwrap_or_default(),
+        owner: string_field(value, &["nick", "nickname", "creatorName"]).unwrap_or_default(),
+        track_count: integer_field(value, &["songNum", "songnum", "total_song_num"])
+            .unwrap_or_default(),
+    })
+}
+
+fn playlist_from_detail(data: &Value, fallback: UserPlaylist) -> UserPlaylist {
+    let Some(info) = find_object_recursively(data, &["dirinfo", "info"]) else {
+        return fallback;
+    };
+    let value = Value::Object(info.clone());
+    let mut playlist =
+        parse_playlist_summary(&value, fallback.id.clone()).unwrap_or_else(|| fallback.clone());
+    if playlist.cover_url.is_none() {
+        playlist.cover_url = fallback.cover_url;
+    }
+    if playlist.description.is_empty() {
+        playlist.description = fallback.description;
+    }
+    if playlist.owner.is_empty() {
+        playlist.owner = fallback.owner;
+    }
+    if playlist.track_count == 0 {
+        playlist.track_count = fallback.track_count;
+    }
+    playlist
+}
+
+fn album_cover_url(album_mid: &str) -> Option<String> {
+    (!album_mid.trim().is_empty()).then(|| {
+        format!(
+            "https://y.gtimg.cn/music/photo_new/T002R300x300M000{}.jpg?max_age=2592000",
+            album_mid.trim()
+        )
+    })
+}
+
+fn force_https(url: String) -> String {
+    url.strip_prefix("http://")
+        .map(|url| format!("https://{url}"))
+        .unwrap_or(url)
 }
 
 fn playback_filename(track: &Track, quality: Quality) -> String {
@@ -383,10 +623,73 @@ fn integer_field(value: &Value, keys: &[&str]) -> Option<u64> {
         })
 }
 
+fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
+    let object = value.as_object()?;
+    keys.iter()
+        .find_map(|key| object.get(*key))
+        .and_then(|value| match value {
+            Value::Bool(value) => Some(*value),
+            Value::Number(value) => value.as_u64().map(|value| value != 0),
+            Value::String(value) => match value.as_str() {
+                "1" | "true" | "TRUE" => Some(true),
+                "0" | "false" | "FALSE" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        })
+}
+
 fn value_to_string(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
         Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn find_array_recursively<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Vec<Value>> {
+    match value {
+        Value::Object(object) => object
+            .iter()
+            .find_map(|(key, value)| {
+                keys.iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+                    .then(|| value.as_array())
+                    .flatten()
+            })
+            .or_else(|| {
+                object
+                    .values()
+                    .find_map(|value| find_array_recursively(value, keys))
+            }),
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_array_recursively(value, keys)),
+        _ => None,
+    }
+}
+
+fn find_object_recursively<'a>(
+    value: &'a Value,
+    keys: &[&str],
+) -> Option<&'a Map<String, Value>> {
+    match value {
+        Value::Object(object) => object
+            .iter()
+            .find_map(|(key, value)| {
+                keys.iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+                    .then(|| value.as_object())
+                    .flatten()
+            })
+            .or_else(|| {
+                object
+                    .values()
+                    .find_map(|value| find_object_recursively(value, keys))
+            }),
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_object_recursively(value, keys)),
         _ => None,
     }
 }

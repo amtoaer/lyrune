@@ -75,14 +75,64 @@ fn new_client_guid() -> String {
     Uuid::new_v4().simple().to_string().to_ascii_uppercase()
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
+pub struct UserProfile {
+    pub id: String,
+    pub nickname: String,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum UserPlaylistId {
+    Liked,
+    Created { tid: u64, dir_id: u64 },
+    Favorite { diss_id: u64 },
+}
+
+#[derive(Clone, Debug)]
+pub struct UserPlaylist {
+    pub id: UserPlaylistId,
+    pub title: String,
+    pub cover_url: Option<String>,
+    pub description: String,
+    pub owner: String,
+    pub track_count: u64,
+}
+
+impl UserPlaylist {
+    pub fn liked() -> Self {
+        Self {
+            id: UserPlaylistId::Liked,
+            title: "我喜欢".to_owned(),
+            cover_url: None,
+            description: "QQ 音乐中已收藏的歌曲".to_owned(),
+            owner: String::new(),
+            track_count: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PlaylistPage {
+    pub playlist: UserPlaylist,
+    pub tracks: Vec<Track>,
+    pub total: u64,
+    pub has_more: bool,
+    pub next_offset: u64,
+}
+
+#[derive(Clone, Debug)]
 pub struct Track {
+    pub song_id: Option<u64>,
     pub mid: String,
     pub media_mid: String,
     pub title: String,
     pub artists: String,
     pub album: String,
+    pub album_mid: String,
+    pub cover_url: Option<String>,
     pub duration_seconds: u64,
+    pub added_at: Option<i64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

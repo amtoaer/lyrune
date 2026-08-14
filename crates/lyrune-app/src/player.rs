@@ -22,11 +22,11 @@ impl PreparedPlayback {
         let builder = Decoder::builder()
             .with_data(BufReader::new(stream.source))
             .with_hint(stream.format_hint)
-            .with_seekable(false);
+            .with_seekable(true);
         let decoder = match stream.content_length {
             Some(content_length) => builder
                 .with_byte_len(content_length)
-                .with_seekable(false)
+                .with_seekable(true)
                 .build(),
             None => builder.build(),
         }
@@ -71,10 +71,11 @@ impl AudioPlayer {
             cancellation,
             ..
         } = playback;
-        if resume_at.is_zero() {
-            self.player.append(decoder);
-        } else {
-            self.player.append(decoder.skip_duration(resume_at));
+        self.player.append(decoder);
+        if !resume_at.is_zero() {
+            self.player
+                .try_seek(resume_at)
+                .context("无法跳转到恢复播放位置")?;
         }
         *self
             .active_stream
@@ -100,6 +101,20 @@ impl AudioPlayer {
 
     pub fn position(&self) -> Duration {
         self.player.get_pos()
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.player.set_volume(volume.clamp(0.0, 1.0));
+    }
+
+    pub fn seek(&self, position: Duration) -> Result<()> {
+        self.player
+            .try_seek(position)
+            .context("当前音频流无法跳转")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.player.empty()
     }
 
     pub fn stop(&self) {

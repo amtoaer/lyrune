@@ -754,12 +754,16 @@ mod tests {
 
     fn track(mid: &str, media_mid: &str, title: &str) -> Track {
         Track {
+            song_id: None,
             mid: mid.to_owned(),
             media_mid: media_mid.to_owned(),
             title: title.to_owned(),
             artists: String::new(),
             album: String::new(),
+            album_mid: String::new(),
+            cover_url: None,
             duration_seconds: 0,
+            added_at: None,
         }
     }
 

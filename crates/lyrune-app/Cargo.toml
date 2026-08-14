@@ -1,0 +1,28 @@
+[package]
+name = "lyrune"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-channel.workspace = true
+bytes.workspace = true
+directories.workspace = true
+futures-util.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-platform.workspace = true
+hex.workspace = true
+keyring.workspace = true
+qqmusic-api.workspace = true
+reqwest.workspace = true
+rodio.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+stream-download.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

@@ -1,6 +1,17 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use gpui::{AnyElement, Hsla, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, img};
+
+static LYRUNE_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
+    Arc::new(Image::from_bytes(
+        ImageFormat::Svg,
+        crate::tray::ICON_SVG.to_vec(),
+    ))
+});
+
+pub fn lyrune_icon(size: Pixels) -> AnyElement {
+    img(LYRUNE_ICON.clone()).size(size).into_any_element()
+}
 
 #[derive(Clone, Copy)]
 pub enum MediaIcon {

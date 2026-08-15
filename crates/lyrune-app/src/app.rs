@@ -22,8 +22,12 @@ use crate::cache::AudioCache;
 use crate::credentials::CredentialStore;
 use crate::design::{self, ColorTheme};
 use crate::http::cached_image_source;
-use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
+use crate::icons::{MediaIcon, lyrune_icon, media_icon, media_icon_hsla};
 use crate::library::{PlaylistListDelegate, TrackTableDelegate, format_duration, playlist_cover};
+#[cfg(target_os = "linux")]
+use crate::mpris::{
+    MprisCommand, MprisHandle, MprisLoopStatus, MprisPlaybackStatus, MprisSnapshot, MprisTrack,
+};
 use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::settings::{
     AppSettings, CdnCacheStore, LibraryCache, LibraryCacheStore, PersistedLibraryView,
@@ -34,6 +38,8 @@ use qqmusic_api::integration::{
     LoginEvent, PlaylistPage, ProtocolClient, QqCredential, Quality, Track, UserPlaylist,
     UserPlaylistId, UserProfile, refresh_credential, run_qr_login,
 };
+#[cfg(target_os = "linux")]
+use xxhash_rust::xxh3::xxh3_128;
 
 const PAGE_SIZE: u64 = 100;
 const PROGRESS_TICK: Duration = Duration::from_millis(250);
@@ -49,12 +55,33 @@ fn progress_slider_state(value: f32) -> SliderState {
         .default_value(value)
 }
 
+fn volume_slider_state(value: f32) -> SliderState {
+    SliderState::new()
+        .min(0.)
+        .max(1.)
+        .step(0.01)
+        .default_value(value)
+}
+
 fn progress_fraction(position: Duration, duration: Duration) -> f32 {
     if duration.is_zero() {
         0.
     } else {
         (position.as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn duration_micros(duration: Duration) -> i64 {
+    duration.as_micros().min(i64::MAX as u128) as i64
+}
+
+#[cfg(target_os = "linux")]
+fn mpris_track_id(track_mid: &str) -> String {
+    format!(
+        "/dev/lyrune/track/id_{:032x}",
+        xxh3_128(track_mid.as_bytes())
+    )
 }
 
 fn unix_timestamp_secs() -> u64 {
@@ -240,6 +267,8 @@ pub struct LyruneView {
     account_menu_open: bool,
     _subscriptions: Vec<Subscription>,
     _window_subscription: Option<Subscription>,
+    #[cfg(target_os = "linux")]
+    mpris: Option<MprisHandle>,
 }
 
 impl LyruneView {
@@ -302,13 +331,7 @@ impl LyruneView {
                 .sortable(false)
         });
         let progress_slider = cx.new(|_| progress_slider_state(0.));
-        let volume_slider = cx.new(|_| {
-            SliderState::new()
-                .min(0.)
-                .max(1.)
-                .step(0.01)
-                .default_value(settings.volume)
-        });
+        let volume_slider = cx.new(|_| volume_slider_state(settings.volume));
 
         let subscriptions = vec![
             cx.subscribe(&playlist_list, |this, _, event: &ListEvent, cx| {
@@ -419,6 +442,8 @@ impl LyruneView {
             account_menu_open: false,
             _subscriptions: subscriptions,
             _window_subscription: None,
+            #[cfg(target_os = "linux")]
+            mpris: None,
         };
         view.attach_window(window, cx);
         view.start_cdn_maintenance();
@@ -435,14 +460,16 @@ impl LyruneView {
                 this.settings.window_size = Some(PersistedWindowSize { width, height });
             }
         }));
+        self.sync_progress_slider(window, cx);
+        self.start_window_tick(window, cx);
     }
 
-    pub(crate) fn start_background_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_window_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(PROGRESS_TICK).await;
                 if this
-                    .update_in(cx, |this, window, cx| this.tick(window, cx))
+                    .update_in(cx, |this, window, cx| this.sync_progress_slider(window, cx))
                     .is_err()
                 {
                     break;
@@ -452,8 +479,66 @@ impl LyruneView {
         .detach();
     }
 
+    pub(crate) fn start_background_tick(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PROGRESS_TICK).await;
+                if this.update(cx, |this, cx| this.tick(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn window_size(&self) -> Option<PersistedWindowSize> {
         self.settings.window_size
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn attach_mpris(&mut self, mpris: MprisHandle) {
+        self.mpris = Some(mpris);
+        self.sync_mpris(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn handle_mpris_command(&mut self, command: MprisCommand, cx: &mut Context<Self>) {
+        match command {
+            MprisCommand::Raise | MprisCommand::Quit => {}
+            MprisCommand::Next => self.play_next(false, cx),
+            MprisCommand::Previous => self.play_previous(cx),
+            MprisCommand::Pause => self.pause_playback(cx),
+            MprisCommand::PlayPause => self.toggle_playback(cx),
+            MprisCommand::Stop => self.stop_playback(cx),
+            MprisCommand::Play => self.play(cx),
+            MprisCommand::Seek(offset) => self.seek_by(offset, cx),
+            MprisCommand::SetPosition { track_id, position } => {
+                self.set_mpris_position(&track_id, position, cx);
+            }
+            MprisCommand::SetLoopStatus(status) => {
+                self.repeat_mode = match status {
+                    MprisLoopStatus::None => RepeatMode::Off,
+                    MprisLoopStatus::Track => RepeatMode::One,
+                    MprisLoopStatus::Playlist => RepeatMode::All,
+                };
+                self.sync_mpris(false);
+                cx.notify();
+            }
+            MprisCommand::SetShuffle(shuffle) => {
+                self.shuffle = shuffle;
+                self.sync_mpris(false);
+                cx.notify();
+            }
+            MprisCommand::SetVolume(volume) => {
+                let volume = volume.clamp(0., 1.) as f32;
+                self.volume_slider.update(cx, |slider, cx| {
+                    *slider = volume_slider_state(volume);
+                    cx.notify();
+                });
+                self.set_volume(volume, cx);
+                self.persist_settings();
+            }
+        }
     }
 
     fn restore_credential(&mut self, cx: &mut Context<Self>) {
@@ -1249,6 +1334,8 @@ impl LyruneView {
         });
         self.persist_current_playback();
         self.sync_table_playback_state(cx);
+        #[cfg(target_os = "linux")]
+        self.sync_mpris(!same_track && !resume_at.is_zero());
         cx.notify();
 
         let title = track.title.clone();
@@ -1403,6 +1490,8 @@ impl LyruneView {
                         }
                     }
                     this.sync_table_playback_state(cx);
+                    #[cfg(target_os = "linux")]
+                    this.sync_mpris(false);
                     cx.notify();
                 });
                 if finished {
@@ -1426,6 +1515,11 @@ impl LyruneView {
         let Some(audio) = &self.audio else {
             return;
         };
+        if !self.playback_started || audio.is_empty() {
+            let index = self.current_track.expect("current track was checked above");
+            self.start_playback(index, Duration::ZERO, None, true, cx);
+            return;
+        }
         let playing = audio.toggle();
         self.status = StatusMessage::info(if playing {
             "继续播放".to_owned()
@@ -1434,6 +1528,63 @@ impl LyruneView {
         });
         self.persist_current_playback();
         self.sync_table_playback_state(cx);
+        #[cfg(target_os = "linux")]
+        self.sync_mpris(false);
+        cx.notify();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn play(&mut self, cx: &mut Context<Self>) {
+        if self.loading_track.is_some() {
+            return;
+        }
+        let Some(index) = self.current_track else {
+            if !self.track_table.read(cx).delegate().tracks().is_empty() {
+                self.select_track(0, cx);
+            }
+            return;
+        };
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        if !self.playback_started || audio.is_empty() {
+            self.start_playback(index, Duration::ZERO, None, true, cx);
+        } else if !audio.is_playing() {
+            self.toggle_playback(cx);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pause_playback(&mut self, cx: &mut Context<Self>) {
+        if self.loading_track.is_none() && self.audio.as_ref().is_some_and(AudioPlayer::is_playing)
+        {
+            self.toggle_playback(cx);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stop_playback(&mut self, cx: &mut Context<Self>) {
+        if self.current_track.is_none() {
+            return;
+        }
+        self.play_generation = self.play_generation.wrapping_add(1);
+        if let Some(audio) = &self.audio {
+            audio.stop();
+        }
+        self.loading_track = None;
+        self.loading_autoplay = false;
+        self.resolving_qualities = false;
+        self.playback_started = false;
+        self.position = Duration::ZERO;
+        self.seek_preview = None;
+        self.progress_slider.update(cx, |slider, cx| {
+            *slider = progress_slider_state(0.);
+            cx.notify();
+        });
+        self.status = StatusMessage::info("已停止播放");
+        self.persist_current_playback();
+        self.sync_table_playback_state(cx);
+        self.sync_mpris(false);
         cx.notify();
     }
 
@@ -1446,6 +1597,51 @@ impl LyruneView {
             .map_or(target, |duration| target.min(duration));
         let autoplay = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
         self.start_playback(index, target, Some(self.active_quality), autoplay, cx);
+        #[cfg(target_os = "linux")]
+        self.sync_mpris(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn seek_by(&mut self, offset_micros: i64, cx: &mut Context<Self>) {
+        if self.loading_track.is_some() || !self.playback_started {
+            return;
+        }
+        let Some(duration) = self.current_duration() else {
+            return;
+        };
+        let position = self
+            .audio
+            .as_ref()
+            .map(AudioPlayer::position)
+            .unwrap_or(self.position);
+        let target_micros = duration_micros(position) as i128 + offset_micros as i128;
+        let target_micros = target_micros.clamp(0, i64::MAX as i128) as i64;
+        if target_micros >= duration_micros(duration) {
+            self.play_next(false, cx);
+        } else {
+            self.seek_to(Duration::from_micros(target_micros as u64), cx);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_mpris_position(&mut self, track_id: &str, position_micros: i64, cx: &mut Context<Self>) {
+        if self.loading_track.is_some() || !self.playback_started {
+            return;
+        }
+        let Some(track) = self.current_track_data() else {
+            return;
+        };
+        if track_id != mpris_track_id(&track.mid) || position_micros < 0 {
+            return;
+        }
+        let duration_micros = track
+            .duration_seconds
+            .saturating_mul(1_000_000)
+            .min(i64::MAX as u64) as i64;
+        if position_micros >= duration_micros {
+            return;
+        }
+        self.seek_to(Duration::from_micros(position_micros as u64), cx);
     }
 
     fn play_previous(&mut self, cx: &mut Context<Self>) {
@@ -1501,6 +1697,8 @@ impl LyruneView {
             self.position = self.current_duration().unwrap_or_default();
             self.status = StatusMessage::info("当前播放队列已结束");
             self.persist_current_playback();
+            #[cfg(target_os = "linux")]
+            self.sync_mpris(false);
             cx.notify();
         }
     }
@@ -1526,6 +1724,8 @@ impl LyruneView {
         if let Some(audio) = &self.audio {
             audio.set_volume(self.settings.volume);
         }
+        #[cfg(target_os = "linux")]
+        self.sync_mpris(false);
         cx.notify();
     }
 
@@ -1619,7 +1819,7 @@ impl LyruneView {
         let Some(track_mid) = self.current_track_data().map(|track| track.mid.clone()) else {
             return;
         };
-        let position = if self.loading_track.is_some() {
+        let position = if self.loading_track.is_some() || !self.playback_started {
             self.position
         } else {
             self.audio
@@ -1686,21 +1886,99 @@ impl LyruneView {
         });
     }
 
-    fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    #[cfg(target_os = "linux")]
+    fn mpris_snapshot(&self) -> MprisSnapshot {
+        let audio_available = self.audio.is_some();
+        let loading = self.loading_track.is_some();
+        let playback_status = if loading || !self.playback_started {
+            MprisPlaybackStatus::Stopped
+        } else if self.audio.as_ref().is_some_and(AudioPlayer::is_playing) {
+            MprisPlaybackStatus::Playing
+        } else {
+            MprisPlaybackStatus::Paused
+        };
+        let (queue_len, current_index) = self
+            .playback_queue
+            .as_ref()
+            .map_or((0, None), |queue| (queue.tracks.len(), self.current_track));
+        let can_go_next = audio_available
+            && current_index.is_some_and(|index| {
+                (self.shuffle && queue_len > 1)
+                    || index + 1 < queue_len
+                    || (self.repeat_mode == RepeatMode::All && queue_len > 0)
+            });
+        let can_go_previous = audio_available
+            && current_index.is_some_and(|index| {
+                self.position >= Duration::from_secs(3)
+                    || index > 0
+                    || (self.repeat_mode == RepeatMode::All && queue_len > 0)
+            });
+        let track = self.current_track_data().map(|track| MprisTrack {
+            id: mpris_track_id(&track.mid),
+            title: track.title.clone(),
+            artists: if track.artists.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![track.artists.clone()]
+            },
+            album: (!track.album.trim().is_empty()).then(|| track.album.clone()),
+            art_url: track.cover_url.clone().filter(|url| !url.trim().is_empty()),
+            length_micros: track
+                .duration_seconds
+                .saturating_mul(1_000_000)
+                .min(i64::MAX as u64) as i64,
+        });
+        let has_track = track.is_some();
+        MprisSnapshot {
+            playback_status,
+            loop_status: match self.repeat_mode {
+                RepeatMode::Off => MprisLoopStatus::None,
+                RepeatMode::All => MprisLoopStatus::Playlist,
+                RepeatMode::One => MprisLoopStatus::Track,
+            },
+            shuffle: self.shuffle,
+            volume: self.settings.volume as f64,
+            position_micros: duration_micros(self.position),
+            track,
+            can_go_next,
+            can_go_previous,
+            can_play: has_track && audio_available && !loading,
+            can_pause: has_track && audio_available && !loading && self.playback_started,
+            can_seek: has_track && audio_available && !loading && self.playback_started,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sync_mpris(&self, seeked: bool) {
+        let Some(mpris) = &self.mpris else {
+            return;
+        };
+        let snapshot = self.mpris_snapshot();
+        if seeked {
+            mpris.seeked(snapshot);
+        } else {
+            mpris.update(snapshot);
+        }
+    }
+
+    fn sync_progress_slider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.seek_preview.is_none() {
-            if self.loading_track.is_none() {
-                self.position = self
-                    .audio
-                    .as_ref()
-                    .map(AudioPlayer::position)
-                    .unwrap_or_default();
-            }
             let progress = self
                 .current_duration()
                 .map_or(0., |duration| progress_fraction(self.position, duration));
             self.progress_slider.update(cx, |slider, cx| {
                 slider.set_value(progress, window, cx);
             });
+        }
+    }
+
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.seek_preview.is_none() && self.loading_track.is_none() && self.playback_started {
+            self.position = self
+                .audio
+                .as_ref()
+                .map(AudioPlayer::position)
+                .unwrap_or_default();
         }
 
         let ended = self.playback_started
@@ -1715,6 +1993,8 @@ impl LyruneView {
         {
             self.persist_current_playback();
         }
+        #[cfg(target_os = "linux")]
+        self.sync_mpris(false);
         cx.notify();
     }
 
@@ -1761,6 +2041,8 @@ impl LyruneView {
         self.position = Duration::ZERO;
         self.account_menu_open = false;
         self.clear_persisted_playback();
+        #[cfg(target_os = "linux")]
+        self.sync_mpris(false);
         self.playlist_list.update(cx, |list, cx| {
             list.delegate_mut().clear();
             cx.notify();
@@ -1820,19 +2102,7 @@ impl LyruneView {
                     .border_color(theme.border)
                     .bg(theme.group_box)
                     .shadow_lg()
-                    .child(
-                        div()
-                            .size(px(46.))
-                            .rounded(theme.radius_lg)
-                            .bg(theme.primary)
-                            .text_color(theme.primary_foreground)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_xl()
-                            .font_bold()
-                            .child("L"),
-                    )
+                    .child(lyrune_icon(px(46.)))
                     .child(div().text_2xl().font_bold().child("登录 Lyrune"))
                     .child(
                         div()
@@ -1961,18 +2231,7 @@ impl LyruneView {
                     .h(px(64.))
                     .px_5()
                     .gap_3()
-                    .child(
-                        div()
-                            .size(px(34.))
-                            .rounded(px(10.))
-                            .bg(theme.primary)
-                            .text_color(theme.primary_foreground)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .font_semibold()
-                            .child("L"),
-                    )
+                    .child(lyrune_icon(px(34.)))
                     .child(
                         v_flex()
                             .gap_0p5()

@@ -39,6 +39,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 keyring = "4.1.6"
 ksni = { version = "0.3.6", features = ["blocking"] }
 md5 = "0.8"
+mpris-server = { version = "0.10.0", default-features = false, features = ["tokio"] }
 qrcode = "0.14.1"
 qqmusic-api = { package = "netease-qq-music-api", path = "crates/qqmusic-api" }
 rand = "0.10"
@@ -52,6 +53,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "stream",
     "zstd",
 ] }
+resvg = "0.46"
 rodio = "0.22.2"
 rumqttc = { version = "0.25.1", default-features = false }
 rustls = { version = "0.23.43", default-features = false, features = [

@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_channel::Sender;
 
 const ICON_SIZE: u32 = 64;
+pub(crate) const ICON_SVG: &[u8] = include_bytes!("../assets/lyrune.svg");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrayCommand {
@@ -10,37 +11,25 @@ pub enum TrayCommand {
 }
 
 fn icon_rgba() -> Vec<u8> {
-    const BACKGROUND: [u8; 4] = [0x89, 0xb4, 0xfa, 0xff];
-    const FOREGROUND: [u8; 4] = [0x1e, 0x1e, 0x2e, 0xff];
-    const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
+    let tree = resvg::usvg::Tree::from_data(ICON_SVG, &resvg::usvg::Options::default())
+        .expect("parse Lyrune tray icon");
+    let mut pixmap =
+        resvg::tiny_skia::Pixmap::new(ICON_SIZE, ICON_SIZE).expect("allocate Lyrune tray icon");
+    let scale = ICON_SIZE as f32 / tree.size().width();
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
 
-    let mut pixels = Vec::with_capacity((ICON_SIZE * ICON_SIZE * 4) as usize);
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let dx = if x < 16 {
-                16 - x
-            } else if x > 47 {
-                x - 47
-            } else {
-                0
-            };
-            let dy = if y < 16 {
-                16 - y
-            } else if y > 47 {
-                y - 47
-            } else {
-                0
-            };
-            let in_background = dx * dx + dy * dy <= 12 * 12;
-            let in_letter = (25..=31).contains(&x) && (18..=44).contains(&y)
-                || (25..=43).contains(&x) && (38..=44).contains(&y);
-            pixels.extend_from_slice(if in_letter {
-                &FOREGROUND
-            } else if in_background {
-                &BACKGROUND
-            } else {
-                &TRANSPARENT
-            });
+    let mut pixels = pixmap.take();
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u16::from(pixel[3]);
+        if alpha == 0 || alpha == 255 {
+            continue;
+        }
+        for channel in &mut pixel[..3] {
+            *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
         }
     }
     pixels
@@ -220,8 +209,14 @@ mod tests {
             &icon[start..start + 4]
         };
         assert_eq!(pixel(0, 0), [0, 0, 0, 0]);
-        assert_eq!(pixel(32, 32), [0x89, 0xb4, 0xfa, 0xff]);
-        assert_eq!(pixel(28, 28), [0x1e, 0x1e, 0x2e, 0xff]);
-        assert_eq!(pixel(39, 41), [0x1e, 0x1e, 0x2e, 0xff]);
+        assert_eq!(pixel(32, 32)[3], 255);
+        assert!(
+            icon.chunks_exact(4)
+                .filter(|pixel| pixel[3] == 255)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 8
+        );
     }
 }

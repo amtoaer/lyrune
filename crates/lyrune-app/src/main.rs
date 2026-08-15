@@ -5,8 +5,11 @@ mod design;
 mod http;
 mod icons;
 mod library;
+#[cfg(target_os = "linux")]
+mod mpris;
 mod player;
 mod settings;
+mod single_instance;
 mod singleflight;
 mod tray;
 
@@ -64,6 +67,14 @@ struct TrayState {
 
 impl Global for TrayState {}
 
+#[cfg(target_os = "linux")]
+struct MprisState {
+    _service: mpris::MprisService,
+}
+
+#[cfg(target_os = "linux")]
+impl Global for MprisState {}
+
 fn open_restored_window(
     view: Entity<LyruneView>,
     cx: &mut App,
@@ -99,10 +110,21 @@ fn show_main_window(state: &Rc<RefCell<MainWindowState>>, cx: &mut App) {
 }
 
 fn main() {
+    let instance = match single_instance::acquire() {
+        Ok(single_instance::InstanceClaim::Primary(instance)) => instance,
+        Ok(single_instance::InstanceClaim::Secondary) => return,
+        Err(error) => {
+            eprintln!("无法建立 Lyrune 单例：{error:#}");
+            return;
+        }
+    };
+    let instance_commands = instance.commands();
+
     let _ = rustls::crypto::ring::default_provider().install_default();
     let http_client = http::client().expect("create image HTTP client");
     gpui_platform::application()
         .with_http_client(http_client)
+        .with_quit_mode(QuitMode::Explicit)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
             let settings = SettingsStore::load().unwrap_or_default();
@@ -118,23 +140,6 @@ fn main() {
                     false
                 }
             };
-
-            let keepalive_window = tray_available.then(|| {
-                cx.open_window(
-                    WindowOptions {
-                        titlebar: None,
-                        focus: false,
-                        show: false,
-                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                            point(px(0.), px(0.)),
-                            size(px(1.), px(1.)),
-                        ))),
-                        ..Default::default()
-                    },
-                    |_, cx| cx.new(|_| EmptyView),
-                )
-                .expect("open tray keepalive window")
-            });
 
             let view_slot = Rc::new(RefCell::new(None));
             let view_slot_for_window = view_slot.clone();
@@ -153,19 +158,7 @@ fn main() {
                 .take()
                 .expect("Lyrune view was created with its window");
 
-            if let Some(keepalive_window) = keepalive_window {
-                keepalive_window
-                    .update(cx, |_, window, cx| {
-                        view.update(cx, |view, cx| view.start_background_tick(window, cx));
-                    })
-                    .expect("start tray playback lifecycle");
-            } else {
-                window_handle
-                    .update(cx, |_, window, cx| {
-                        view.update(cx, |view, cx| view.start_background_tick(window, cx));
-                    })
-                    .expect("start playback lifecycle");
-            }
+            view.update(cx, |view, cx| view.start_background_tick(cx));
 
             let main_window = Rc::new(RefCell::new(MainWindowState {
                 view,
@@ -186,6 +179,53 @@ fn main() {
             })
             .detach();
 
+            let main_window_for_instance = main_window.clone();
+            cx.spawn(async move |cx| {
+                while let Ok(command) = instance_commands.recv().await {
+                    match command {
+                        single_instance::InstanceCommand::Show => {
+                            let _ = cx.update(|cx| show_main_window(&main_window_for_instance, cx));
+                        }
+                    }
+                }
+            })
+            .detach();
+
+            #[cfg(target_os = "linux")]
+            match mpris::install() {
+                Ok((service, mpris_events)) => {
+                    let mpris_handle = service.handle();
+                    main_window.borrow().view.update(cx, |view, _| {
+                        view.attach_mpris(mpris_handle);
+                    });
+                    cx.set_global(MprisState { _service: service });
+
+                    let main_window_for_mpris = main_window.clone();
+                    cx.spawn(async move |cx| {
+                        while let Ok(command) = mpris_events.recv().await {
+                            let quitting = matches!(command, mpris::MprisCommand::Quit);
+                            cx.update(|cx| match command {
+                                mpris::MprisCommand::Raise => {
+                                    show_main_window(&main_window_for_mpris, cx);
+                                }
+                                mpris::MprisCommand::Quit => cx.quit(),
+                                command => {
+                                    let view = main_window_for_mpris.borrow().view.clone();
+                                    view.update(cx, |view, cx| {
+                                        view.handle_mpris_command(command, cx);
+                                    });
+                                }
+                            });
+                            if quitting {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                }
+                Err(error) => eprintln!("MPRIS 服务不可用：{error:#}"),
+            }
+
             let main_window_for_tray = main_window;
             cx.spawn(async move |cx| {
                 while let Ok(command) = tray_events.recv().await {
@@ -204,4 +244,6 @@ fn main() {
 
             cx.activate(true);
         });
+
+    drop(instance);
 }

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lyrune
+Comment=Fast native QQ Music desktop client
+Exec=lyrune
+Icon=lyrune
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=Music;Audio;Player;QQ Music;
+StartupNotify=true
+StartupWMClass=lyrune

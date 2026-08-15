@@ -101,6 +101,16 @@ Linux 还需要：
 
 如果系统钥匙串不可用，应用会保留本次登录供当前进程使用，但不会把凭据降级保存为明文。
 
+Arch Linux 可以使用 `packaging/arch/PKGBUILD` 从最新源码构建并安装：
+
+```bash
+mkdir -p dist/arch
+cd packaging/arch
+PKGDEST="$(realpath ../../dist/arch)" makepkg -si
+```
+
+生成的包名为 `lyrune-git`，同时会安装应用菜单项和 SVG 图标。
+
 ## 数据与缓存
 
 Lyrune 使用系统标准目录保存数据。在 Linux 上主要包括：
@@ -142,6 +152,6 @@ Lyrune 使用系统标准目录保存数据。在 Linux 上主要包括：
 - 当前只实现 QQ 音乐 App 扫码，不包含微信扫码。
 - MPRIS 仅适用于 Linux；不同桌面环境对托盘和媒体控件的展示可能不同。
 - 音频缓存暂未实现容量上限和 LRU 清理。
-- 项目目前主要在 Linux / Wayland 环境开发和验证，尚未提供正式安装包。
+- 项目目前主要在 Linux / Wayland 环境开发和验证；Arch Linux 提供源码构建包，尚未发布预编译包。
 
 > Lyrune 是非官方客户端，与腾讯及 QQ 音乐无隶属或认可关系。请遵守当地法律、QQ 音乐服务条款及内容授权要求。

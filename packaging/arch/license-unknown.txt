@@ -1,0 +1,5 @@
+Upstream license status
+
+As of 2026-08-15, Lyrune's original source code does not declare a license.
+Assume full copyright remains with the author. Third-party components retain
+their own licenses; see THIRD_PARTY_NOTICES.md for those notices.

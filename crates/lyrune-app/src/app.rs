@@ -1791,6 +1791,14 @@ impl LyruneView {
         cx.notify();
     }
 
+    fn dismiss_popovers(&mut self, cx: &mut Context<Self>) {
+        if self.account_menu_open || self.quality_menu_open {
+            self.account_menu_open = false;
+            self.quality_menu_open = false;
+            cx.notify();
+        }
+    }
+
     fn persist_settings(&self) {
         let _ = SettingsStore::save(&self.settings);
     }
@@ -2172,6 +2180,7 @@ impl LyruneView {
                     .tooltip(name.clone())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.account_menu_open = !this.account_menu_open;
+                        this.quality_menu_open = false;
                         cx.notify();
                     }))
                     .child(avatar),
@@ -2567,6 +2576,7 @@ impl LyruneView {
                     .disabled(!has_track || self.available_qualities.is_empty())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.quality_menu_open = !this.quality_menu_open;
+                        this.account_menu_open = false;
                         cx.notify();
                     })),
             )
@@ -2945,6 +2955,7 @@ impl LyruneView {
         let theme = cx.theme().clone();
         let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);
+        let popover_open = self.account_menu_open || self.quality_menu_open;
         self.track_table.update(cx, |table, cx| {
             if table.delegate_mut().set_compact(compact) {
                 table.refresh(cx);
@@ -2989,6 +3000,7 @@ impl LyruneView {
             )
             .child(self.render_playlist_content(compact, narrow, cx));
         v_flex()
+            .relative()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
@@ -3016,6 +3028,18 @@ impl LyruneView {
                 ),
             )
             .child(self.render_player_bar(compact, narrow, cx))
+            .when(popover_open, |this| {
+                this.child(
+                    deferred(
+                        div()
+                            .id("popover-dismiss-layer")
+                            .absolute()
+                            .inset_0()
+                            .on_click(cx.listener(|this, _, _, cx| this.dismiss_popovers(cx))),
+                    )
+                    .with_priority(5),
+                )
+            })
             .into_any_element()
     }
 }

@@ -214,7 +214,9 @@ impl MqttWebSocket {
             }
         }
 
-        Err(MusicClientError::TencentMqttLogin("unreachable redirect state".to_owned()))
+        Err(MusicClientError::TencentMqttLogin(
+            "unreachable redirect state".to_owned(),
+        ))
     }
 
     async fn open(path: &str) -> MusicClientResult<Self> {
@@ -224,9 +226,18 @@ impl MqttWebSocket {
         })?;
 
         let headers = request.headers_mut();
-        headers.insert("Sec-WebSocket-Protocol", "mqtt".parse().expect("valid static header"));
-        headers.insert("Origin", "https://y.qq.com".parse().expect("valid static header"));
-        headers.insert("Referer", "https://y.qq.com/".parse().expect("valid static header"));
+        headers.insert(
+            "Sec-WebSocket-Protocol",
+            "mqtt".parse().expect("valid static header"),
+        );
+        headers.insert(
+            "Origin",
+            "https://y.qq.com".parse().expect("valid static header"),
+        );
+        headers.insert(
+            "Referer",
+            "https://y.qq.com/".parse().expect("valid static header"),
+        );
         headers.insert(
             "User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
@@ -244,7 +255,10 @@ impl MqttWebSocket {
                 MusicClientError::TencentMqttLogin(format!("websocket connect failed: {err}"))
             })?;
 
-        Ok(Self { stream, pending_event: None })
+        Ok(Self {
+            stream,
+            pending_event: None,
+        })
     }
 
     async fn connect_mqtt(&mut self, qrcode_id: &str) -> MusicClientResult<ConnectHandshake> {
@@ -299,9 +313,9 @@ impl MqttWebSocket {
                 };
                 Ok(ConnectHandshake::Redirect(server_reference))
             }
-            code => {
-                Err(MusicClientError::TencentMqttLogin(format!("mqtt connect rejected: {code:?}")))
-            }
+            code => Err(MusicClientError::TencentMqttLogin(format!(
+                "mqtt connect rejected: {code:?}"
+            ))),
         }
     }
 
@@ -427,9 +441,12 @@ impl MqttWebSocket {
             MusicClientError::TencentMqttLogin(format!("encode mqtt packet failed: {err}"))
         })?;
 
-        self.stream.send(Message::Binary(bytes.freeze())).await.map_err(|err| {
-            MusicClientError::TencentMqttLogin(format!("send mqtt packet failed: {err}"))
-        })
+        self.stream
+            .send(Message::Binary(bytes.freeze()))
+            .await
+            .map_err(|err| {
+                MusicClientError::TencentMqttLogin(format!("send mqtt packet failed: {err}"))
+            })
     }
 }
 
@@ -467,13 +484,18 @@ fn parse_cookies_event(payload: &[u8]) -> Option<MqttLoginEvent> {
     let payload: Value = serde_json::from_slice(payload).ok()?;
     let cookies = payload.get("cookies")?.as_object()?;
 
-    let music_id = extract_cookie_value(cookies, "qqmusic_uin")?.parse::<u64>().ok()?;
+    let music_id = extract_cookie_value(cookies, "qqmusic_uin")?
+        .parse::<u64>()
+        .ok()?;
     let music_key = extract_cookie_value(cookies, "qqmusic_key")?;
     if music_key.is_empty() {
         return Some(MqttLoginEvent::LoginFailed);
     }
 
-    Some(MqttLoginEvent::Cookies { music_id, music_key })
+    Some(MqttLoginEvent::Cookies {
+        music_id,
+        music_key,
+    })
 }
 
 fn extract_cookie_value(cookies: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
@@ -548,7 +570,10 @@ mod tests {
     #[test]
     fn parse_scanned_event() {
         let publish = mock_publish("scanned", b"{}");
-        assert_eq!(parse_publish_event(&publish), Some(MqttLoginEvent::WaitingConfirm));
+        assert_eq!(
+            parse_publish_event(&publish),
+            Some(MqttLoginEvent::WaitingConfirm)
+        );
     }
 
     #[test]
@@ -559,13 +584,19 @@ mod tests {
         );
         assert_eq!(
             parse_publish_event(&publish),
-            Some(MqttLoginEvent::Cookies { music_id: 10001, music_key: "Q_H_L_test".to_owned() })
+            Some(MqttLoginEvent::Cookies {
+                music_id: 10001,
+                music_key: "Q_H_L_test".to_owned()
+            })
         );
     }
 
     #[test]
     fn parse_invalid_cookies_as_login_failed() {
         let publish = mock_publish("cookies", br#"{"cookies":{}}"#);
-        assert_eq!(parse_publish_event(&publish), Some(MqttLoginEvent::LoginFailed));
+        assert_eq!(
+            parse_publish_event(&publish),
+            Some(MqttLoginEvent::LoginFailed)
+        );
     }
 }

@@ -125,8 +125,18 @@ impl<'a> PlaybackRequest<'a, PlaybackLyricKind> {
         let id = require_id(self.id.as_deref())?;
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
-            Platform::Netease => self.client.netease.get_lyric(id, netease_token(self.token)).await,
-            Platform::Tencent => self.client.tencent.get_lyric(id, tencent_token(self.token)).await,
+            Platform::Netease => {
+                self.client
+                    .netease
+                    .get_lyric(id, netease_token(self.token))
+                    .await
+            }
+            Platform::Tencent => {
+                self.client
+                    .tencent
+                    .get_lyric(id, tencent_token(self.token))
+                    .await
+            }
         }
     }
 }
@@ -166,8 +176,18 @@ impl<'a> PlaybackRequest<'a, PlaybackUrlKind> {
         let tencent_token_ref = tencent_token(self.token);
         let level = self.level;
         match self.platform {
-            Platform::Netease => self.client.netease.get_url(id, level, netease_token_ref).await,
-            Platform::Tencent => self.client.tencent.get_url(id, level, tencent_token_ref).await,
+            Platform::Netease => {
+                self.client
+                    .netease
+                    .get_url(id, level, netease_token_ref)
+                    .await
+            }
+            Platform::Tencent => {
+                self.client
+                    .tencent
+                    .get_url(id, level, tencent_token_ref)
+                    .await
+            }
         }
     }
 }

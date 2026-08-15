@@ -174,10 +174,16 @@ impl<'a> DiscoverRequest<'a, DiscoverSearchSuggestsKind> {
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
             Platform::Netease => {
-                self.client.netease.get_search_suggests(keyword, netease_token(self.token)).await
+                self.client
+                    .netease
+                    .get_search_suggests(keyword, netease_token(self.token))
+                    .await
             }
             Platform::Tencent => {
-                self.client.tencent.get_search_suggests(keyword, tencent_token(self.token)).await
+                self.client
+                    .tencent
+                    .get_search_suggests(keyword, tencent_token(self.token))
+                    .await
             }
         }
     }
@@ -199,8 +205,18 @@ impl<'a> DiscoverRequest<'a, DiscoverHotkeyKind> {
     pub async fn send(self) -> MusicClientResult<HotkeyResult> {
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
-            Platform::Netease => self.client.netease.get_hotkey(netease_token(self.token)).await,
-            Platform::Tencent => self.client.tencent.get_hotkey(tencent_token(self.token)).await,
+            Platform::Netease => {
+                self.client
+                    .netease
+                    .get_hotkey(netease_token(self.token))
+                    .await
+            }
+            Platform::Tencent => {
+                self.client
+                    .tencent
+                    .get_hotkey(tencent_token(self.token))
+                    .await
+            }
         }
     }
 }
@@ -222,10 +238,16 @@ impl<'a> DiscoverRequest<'a, DiscoverRecommendPlaylistKind> {
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
             Platform::Netease => {
-                self.client.netease.get_recommend_playlist(netease_token(self.token)).await
+                self.client
+                    .netease
+                    .get_recommend_playlist(netease_token(self.token))
+                    .await
             }
             Platform::Tencent => {
-                self.client.tencent.get_recommend_playlist(tencent_token(self.token)).await
+                self.client
+                    .tencent
+                    .get_recommend_playlist(tencent_token(self.token))
+                    .await
             }
         }
     }
@@ -247,8 +269,18 @@ impl<'a> DiscoverRequest<'a, DiscoverToplistListKind> {
     pub async fn send(self) -> MusicClientResult<ToplistListResult> {
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
-            Platform::Netease => self.client.netease.get_toplist(netease_token(self.token)).await,
-            Platform::Tencent => self.client.tencent.get_toplist(tencent_token(self.token)).await,
+            Platform::Netease => {
+                self.client
+                    .netease
+                    .get_toplist(netease_token(self.token))
+                    .await
+            }
+            Platform::Tencent => {
+                self.client
+                    .tencent
+                    .get_toplist(tencent_token(self.token))
+                    .await
+            }
         }
     }
 }
@@ -270,10 +302,16 @@ impl<'a> DiscoverRequest<'a, DiscoverPlaylistCategoriesKind> {
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
             Platform::Netease => {
-                self.client.netease.get_playlist_categories(netease_token(self.token)).await
+                self.client
+                    .netease
+                    .get_playlist_categories(netease_token(self.token))
+                    .await
             }
             Platform::Tencent => {
-                self.client.tencent.get_playlist_categories(tencent_token(self.token)).await
+                self.client
+                    .tencent
+                    .get_playlist_categories(tencent_token(self.token))
+                    .await
             }
         }
     }

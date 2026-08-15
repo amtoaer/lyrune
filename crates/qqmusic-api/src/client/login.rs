@@ -155,7 +155,13 @@ impl<'a, K> LoginRequest<'a, K> {
 
 impl<'a> LoginRequest<'a, LoginKind> {
     pub(super) fn new(client: &'a MusicClient) -> Self {
-        Self { client, platform: Platform::Netease, key: None, token: None, _kind: PhantomData }
+        Self {
+            client,
+            platform: Platform::Netease,
+            key: None,
+            token: None,
+            _kind: PhantomData,
+        }
     }
 }
 
@@ -198,7 +204,11 @@ impl<'a> LoginRequest<'a, LoginSessionKind> {
                 LoginSessionState::Tencent(Box::new(TencentLoginSession::new(qr.qr_key.as_str())))
             }
         };
-        Ok(LoginSession { client: self.client, qr, state })
+        Ok(LoginSession {
+            client: self.client,
+            qr,
+            state,
+        })
     }
 }
 
@@ -231,14 +241,22 @@ impl<'a> LoginRequest<'a, LoginRefreshKind> {
                     .token
                     .and_then(LoginTokenRef::as_netease)
                     .ok_or(MusicClientError::MissingRefreshToken)?;
-                self.client.netease.refresh_login_token(token).await.map(LoginToken::Netease)
+                self.client
+                    .netease
+                    .refresh_login_token(token)
+                    .await
+                    .map(LoginToken::Netease)
             }
             Platform::Tencent => {
                 let token = self
                     .token
                     .and_then(LoginTokenRef::as_tencent)
                     .ok_or(MusicClientError::MissingRefreshToken)?;
-                self.client.tencent.refresh_login_token(token).await.map(LoginToken::Tencent)
+                self.client
+                    .tencent
+                    .refresh_login_token(token)
+                    .await
+                    .map(LoginToken::Tencent)
             }
         }
     }

@@ -22,8 +22,9 @@ const SEARCH_ID_N_MAX: u64 = 4_194_304;
 const DAY_MILLIS: u64 = 24 * 60 * 60 * 1000;
 const SIGN_PART_1_INDEXES: [usize; 8] = [23, 14, 6, 36, 16, 40, 7, 19];
 const SIGN_PART_2_INDEXES: [usize; 8] = [16, 1, 32, 12, 19, 27, 8, 5];
-const SIGN_SCRAMBLE_VALUES: [u8; 20] =
-    [89, 39, 179, 150, 218, 82, 58, 252, 177, 52, 186, 123, 120, 64, 242, 133, 143, 161, 121, 179];
+const SIGN_SCRAMBLE_VALUES: [u8; 20] = [
+    89, 39, 179, 150, 218, 82, 58, 252, 177, 52, 186, 123, 120, 64, 242, 133, 143, 161, 121, 179,
+];
 
 pub fn get_guid() -> String {
     let mut rng = rand::rng();
@@ -55,7 +56,10 @@ pub fn get_search_id() -> String {
     let e = rng.random_range(1_u64..=20);
     let t = e * SEARCH_ID_E_BASE;
     let n = rng.random_range(0_u64..=SEARCH_ID_N_MAX) * SEARCH_ID_N_BASE;
-    let r = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
+    let r = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
         % DAY_MILLIS as u128) as u64;
     (t + n + r).to_string()
 }
@@ -74,8 +78,10 @@ pub fn sign(request: &Value) -> String {
         .filter(|&idx| idx < hash_bytes.len())
         .map(|idx| hash_bytes[idx] as char)
         .collect();
-    let part2: String =
-        SIGN_PART_2_INDEXES.into_iter().map(|idx| hash_bytes[idx] as char).collect();
+    let part2: String = SIGN_PART_2_INDEXES
+        .into_iter()
+        .map(|idx| hash_bytes[idx] as char)
+        .collect();
 
     let mut scrambled = [0_u8; 20];
     for (i, &value) in SIGN_SCRAMBLE_VALUES.iter().enumerate() {

@@ -400,7 +400,12 @@ impl NeteaseLoginToken {
         csrf: impl Into<String>,
         expires_at: Option<i64>,
     ) -> Self {
-        Self { music_u: music_u.into(), music_r_u: music_r_u.into(), csrf: csrf.into(), expires_at }
+        Self {
+            music_u: music_u.into(),
+            music_r_u: music_r_u.into(),
+            csrf: csrf.into(),
+            expires_at,
+        }
     }
 
     /// 返回过期时间戳（秒）。
@@ -427,7 +432,10 @@ impl NeteaseLoginToken {
     ///
     /// 与 [`Self::to_cookie`] 相比会附带 `MUSIC_R_U`。
     pub fn to_refresh_cookie(&self) -> String {
-        format!("MUSIC_U={}; MUSIC_R_U={}; __csrf={}", self.music_u, self.music_r_u, self.csrf)
+        format!(
+            "MUSIC_U={}; MUSIC_R_U={}; __csrf={}",
+            self.music_u, self.music_r_u, self.csrf
+        )
     }
 }
 

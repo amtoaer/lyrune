@@ -149,10 +149,16 @@ impl<'a> PlaylistRequest<'a, PlaylistDetailKind> {
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
             Platform::Netease => {
-                self.client.netease.playlist_detail(id, netease_token(self.token)).await
+                self.client
+                    .netease
+                    .playlist_detail(id, netease_token(self.token))
+                    .await
             }
             Platform::Tencent => {
-                self.client.tencent.playlist_detail(id, tencent_token(self.token)).await
+                self.client
+                    .tencent
+                    .playlist_detail(id, tencent_token(self.token))
+                    .await
             }
         }
     }
@@ -174,10 +180,16 @@ impl<'a> PlaylistRequest<'a, PlaylistCategoriesKind> {
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
             Platform::Netease => {
-                self.client.netease.get_playlist_categories(netease_token(self.token)).await
+                self.client
+                    .netease
+                    .get_playlist_categories(netease_token(self.token))
+                    .await
             }
             Platform::Tencent => {
-                self.client.tencent.get_playlist_categories(tencent_token(self.token)).await
+                self.client
+                    .tencent
+                    .get_playlist_categories(tencent_token(self.token))
+                    .await
             }
         }
     }

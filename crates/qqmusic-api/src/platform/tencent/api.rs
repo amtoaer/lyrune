@@ -559,8 +559,9 @@ impl TencentClient {
         token: Option<&TencentLoginToken>,
     ) -> MusicClientResult<PlaylistListResult> {
         let page = Self::page_num(offset, limit);
-        let category_id =
-            cat.parse::<u64>().map_err(|_| MusicClientError::InvalidCategoryId(cat.to_owned()))?;
+        let category_id = cat
+            .parse::<u64>()
+            .map_err(|_| MusicClientError::InvalidCategoryId(cat.to_owned()))?;
         let response = self
             .post::<TSonglistListResponse>(
                 json!({
@@ -614,7 +615,10 @@ impl TencentClient {
             MqttLoginEvent::QrCodeExpired => Ok(LoginStatus::QrCodeExpired),
             MqttLoginEvent::Canceled => Err(MusicClientError::TencentLoginCanceled),
             MqttLoginEvent::LoginFailed => Err(MusicClientError::TencentLoginFailed),
-            MqttLoginEvent::Cookies { music_id, music_key } => self
+            MqttLoginEvent::Cookies {
+                music_id,
+                music_key,
+            } => self
                 .login_with_mobile_ticket(qrcode_id, music_id, music_key.as_str())
                 .await
                 .map(LoginToken::Tencent)

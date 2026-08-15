@@ -76,7 +76,10 @@ fn normalize_lrc_line(line: &str) -> Option<String> {
 
 /// 规范化带时间戳歌词，仅保留包含有效时间标签的行。
 fn normalize_timestamp_lyric(raw: String) -> String {
-    raw.lines().filter_map(normalize_lrc_line).collect::<Vec<_>>().join("\n")
+    raw.lines()
+        .filter_map(normalize_lrc_line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

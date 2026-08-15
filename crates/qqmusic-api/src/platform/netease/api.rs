@@ -31,8 +31,7 @@ static EAPI_HEADER_JSON: LazyLock<String> = LazyLock::new(|| {
     .to_string()
 });
 
-const EAPI_COOKIE_SUFFIX: &str =
-    "os=pc; appver=3.1.17.204416; deviceId=121F1C01530F5AF886E1F0A37F597AE2C460EEBDB025AA7649CC; \
+const EAPI_COOKIE_SUFFIX: &str = "os=pc; appver=3.1.17.204416; deviceId=121F1C01530F5AF886E1F0A37F597AE2C460EEBDB025AA7649CC; \
      osver=Microsoft-Windows-10-Professional-build-19045-64bit; \
      clientSign=18:C0:4D:B9:8F:FE@@@\
      453832335F384641365F424635335F303030315F303031425F343434415F343643365F333638332@@@@@@\
@@ -379,8 +378,9 @@ impl NeteaseClient {
         &self,
         token: Option<&NeteaseLoginToken>,
     ) -> MusicClientResult<ToplistListResult> {
-        let response =
-            self.post::<NToplistResponse>("/api/toplist/detail/v2", json!({}), token).await?;
+        let response = self
+            .post::<NToplistResponse>("/api/toplist/detail/v2", json!({}), token)
+            .await?;
         Ok(response.into())
     }
 
@@ -457,7 +457,9 @@ impl NeteaseClient {
                 .map(LoginToken::Netease)
                 .map(LoginStatus::Success)
                 .ok_or(MusicClientError::NeteaseLoginTokenInvalid),
-            _ => Err(MusicClientError::NeteaseUnexpectedLoginStatus(response.code)),
+            _ => Err(MusicClientError::NeteaseUnexpectedLoginStatus(
+                response.code,
+            )),
         }
     }
 
@@ -534,12 +536,18 @@ fn parse_login_token(headers: &HeaderMap) -> Option<NeteaseLoginToken> {
     // Some successful QR logins return MUSIC_U + __csrf without MUSIC_R_U.
     // Keep the login flow successful and use MUSIC_U as refresh fallback.
     let music_r_u = music_r_u.unwrap_or_else(|| music_u.clone());
-    Some(NeteaseLoginToken::new(music_u, music_r_u, csrf?, expires_at))
+    Some(NeteaseLoginToken::new(
+        music_u, music_r_u, csrf?, expires_at,
+    ))
 }
 
 fn parse_csrf_expiry(cookie: &Cookie<'_>) -> Option<i64> {
     if let Some(max_age) = cookie.max_age() {
-        return OffsetDateTime::now_utc().checked_add(max_age).map(OffsetDateTime::unix_timestamp);
+        return OffsetDateTime::now_utc()
+            .checked_add(max_age)
+            .map(OffsetDateTime::unix_timestamp);
     }
-    cookie.expires_datetime().map(OffsetDateTime::unix_timestamp)
+    cookie
+        .expires_datetime()
+        .map(OffsetDateTime::unix_timestamp)
 }

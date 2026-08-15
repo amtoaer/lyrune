@@ -57,7 +57,10 @@ pub enum MusicClientError {
     #[error(
         "token platform mismatch: expected `{expected_platform}`, got `{token_platform}` token"
     )]
-    AuthTokenPlatformMismatch { expected_platform: &'static str, token_platform: &'static str },
+    AuthTokenPlatformMismatch {
+        expected_platform: &'static str,
+        token_platform: &'static str,
+    },
 }
 
 /// 音乐客户端统一结果类型。

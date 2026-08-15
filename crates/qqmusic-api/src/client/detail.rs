@@ -147,7 +147,9 @@ impl<'a> DetailRequest<'a, DetailKind> {
 impl<'a> DetailRequest<'a, DetailSongKind> {
     /// 设置单个歌曲 ID（支持 [`MusicIdInput`]，必填且不能为空）。
     pub fn id(mut self, id: impl MusicIdInput) -> Self {
-        self.song_ids.get_or_insert_with(Vec::new).push(id.into_id_string());
+        self.song_ids
+            .get_or_insert_with(Vec::new)
+            .push(id.into_id_string());
         self
     }
 
@@ -184,10 +186,16 @@ impl<'a> DetailRequest<'a, DetailSongKind> {
         };
         match self.platform {
             Platform::Netease => {
-                self.client.netease.songs_detail(ids, netease_token(self.token)).await
+                self.client
+                    .netease
+                    .songs_detail(ids, netease_token(self.token))
+                    .await
             }
             Platform::Tencent => {
-                self.client.tencent.songs_detail(ids, tencent_token(self.token)).await
+                self.client
+                    .tencent
+                    .songs_detail(ids, tencent_token(self.token))
+                    .await
             }
         }
     }
@@ -272,10 +280,16 @@ impl<'a> DetailRequest<'a, DetailAlbumKind> {
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
             Platform::Netease => {
-                self.client.netease.album_detail(id, netease_token(self.token)).await
+                self.client
+                    .netease
+                    .album_detail(id, netease_token(self.token))
+                    .await
             }
             Platform::Tencent => {
-                self.client.tencent.album_detail(id, tencent_token(self.token)).await
+                self.client
+                    .tencent
+                    .album_detail(id, tencent_token(self.token))
+                    .await
             }
         }
     }
@@ -303,14 +317,23 @@ impl<'a> DetailRequest<'a, DetailPlaylistKind> {
     /// - [`MusicClientError::AuthTokenPlatformMismatch`] - token 所属平台与请求平台不匹配
     /// - [`MusicClientError::NetworkError`] - 网络请求失败
     pub async fn send(self) -> MusicClientResult<PlaylistDetailResult> {
-        let id = self.numeric_id.transpose()?.ok_or(MusicClientError::MissingId)?;
+        let id = self
+            .numeric_id
+            .transpose()?
+            .ok_or(MusicClientError::MissingId)?;
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
             Platform::Netease => {
-                self.client.netease.playlist_detail(id, netease_token(self.token)).await
+                self.client
+                    .netease
+                    .playlist_detail(id, netease_token(self.token))
+                    .await
             }
             Platform::Tencent => {
-                self.client.tencent.playlist_detail(id, tencent_token(self.token)).await
+                self.client
+                    .tencent
+                    .playlist_detail(id, tencent_token(self.token))
+                    .await
             }
         }
     }
@@ -341,14 +364,23 @@ impl<'a> DetailRequest<'a, DetailToplistKind> {
     /// - [`MusicClientError::AuthTokenPlatformMismatch`] - token 所属平台与请求平台不匹配
     /// - [`MusicClientError::NetworkError`] - 网络请求失败
     pub async fn send(self) -> MusicClientResult<PlaylistDetailResult> {
-        let id = self.numeric_id.transpose()?.ok_or(MusicClientError::MissingId)?;
+        let id = self
+            .numeric_id
+            .transpose()?
+            .ok_or(MusicClientError::MissingId)?;
         validate_auth_platform(self.platform, self.token)?;
         match self.platform {
             Platform::Netease => {
-                self.client.netease.playlist_detail(id, netease_token(self.token)).await
+                self.client
+                    .netease
+                    .playlist_detail(id, netease_token(self.token))
+                    .await
             }
             Platform::Tencent => {
-                self.client.tencent.toplist_detail(id, tencent_token(self.token)).await
+                self.client
+                    .tencent
+                    .toplist_detail(id, tencent_token(self.token))
+                    .await
             }
         }
     }

@@ -45,7 +45,10 @@ fn tencent_playback_url(purl: &str) -> String {
         return purl.to_string();
     }
 
-    format!("https://isure.stream.qqmusic.qq.com/{}", purl.trim_start_matches('/'))
+    format!(
+        "https://isure.stream.qqmusic.qq.com/{}",
+        purl.trim_start_matches('/')
+    )
 }
 
 fn parse_song_quality(filename: &str) -> SongQuality {
@@ -81,7 +84,10 @@ struct TSongSinger {
 
 impl From<TSongSinger> for SongArtist {
     fn from(value: TSongSinger) -> Self {
-        Self { id: value.mid, name: value.name }
+        Self {
+            id: value.mid,
+            name: value.name,
+        }
     }
 }
 
@@ -98,7 +104,10 @@ impl From<TSong> for Song {
             id: value.mid,
             name: value.name,
             artists: collect_into(value.singer),
-            album: SongAlbum { id: value.album.mid, name: value.album.name },
+            album: SongAlbum {
+                id: value.album.mid,
+                name: value.album.name,
+            },
             pic_url: tencent_album_pic_url(value.album.pmid.as_str()),
         }
     }
@@ -115,7 +124,11 @@ struct TSinger {
 
 impl From<TSinger> for Artist {
     fn from(value: TSinger) -> Self {
-        Self { id: value.singer_mid, name: value.singer_name, pic_url: value.singer_pic }
+        Self {
+            id: value.singer_mid,
+            name: value.singer_name,
+            pic_url: value.singer_pic,
+        }
     }
 }
 
@@ -137,7 +150,10 @@ impl From<TAlbum> for Album {
             id: value.album_mid,
             name: value.album_name,
             pic_url: value.album_pic,
-            artist: AlbumArtist { id: value.singer_mid, name: value.singer_name },
+            artist: AlbumArtist {
+                id: value.singer_mid,
+                name: value.singer_name,
+            },
         }
     }
 }
@@ -151,7 +167,11 @@ struct TSonglist {
 
 impl From<TSonglist> for Playlist {
     fn from(value: TSonglist) -> Self {
-        Self { id: value.dissid, name: value.dissname, pic_url: value.imgurl }
+        Self {
+            id: value.dissid,
+            name: value.dissname,
+            pic_url: value.imgurl,
+        }
     }
 }
 
@@ -208,28 +228,40 @@ struct TSearchMeta {
 impl From<TSearchResponse> for SearchSongResult {
     fn from(value: TSearchResponse) -> Self {
         let data = value.result.data;
-        Self { songs: collect_into(data.body.song.list), more: data.meta.nextpage > 0 }
+        Self {
+            songs: collect_into(data.body.song.list),
+            more: data.meta.nextpage > 0,
+        }
     }
 }
 
 impl From<TSearchResponse> for SearchArtistResult {
     fn from(value: TSearchResponse) -> Self {
         let data = value.result.data;
-        Self { artists: collect_into(data.body.singer.list), more: data.meta.nextpage > 0 }
+        Self {
+            artists: collect_into(data.body.singer.list),
+            more: data.meta.nextpage > 0,
+        }
     }
 }
 
 impl From<TSearchResponse> for SearchAlbumResult {
     fn from(value: TSearchResponse) -> Self {
         let data = value.result.data;
-        Self { albums: collect_into(data.body.album.list), more: data.meta.nextpage > 0 }
+        Self {
+            albums: collect_into(data.body.album.list),
+            more: data.meta.nextpage > 0,
+        }
     }
 }
 
 impl From<TSearchResponse> for SearchPlaylistResult {
     fn from(value: TSearchResponse) -> Self {
         let data = value.result.data;
-        Self { playlists: collect_into(data.body.songlist.list), more: data.meta.nextpage > 0 }
+        Self {
+            playlists: collect_into(data.body.songlist.list),
+            more: data.meta.nextpage > 0,
+        }
     }
 }
 
@@ -256,7 +288,15 @@ struct TSearchSuggestItem {
 
 impl From<TSearchSuggestResponse> for SearchSuggestResult {
     fn from(value: TSearchSuggestResponse) -> Self {
-        Self { suggests: value.result.data.items.into_iter().map(|item| item.hint).collect() }
+        Self {
+            suggests: value
+                .result
+                .data
+                .items
+                .into_iter()
+                .map(|item| item.hint)
+                .collect(),
+        }
     }
 }
 
@@ -278,7 +318,9 @@ struct TSongsDetailData {
 
 impl From<TSongsDetailResponse> for SongsDetailResult {
     fn from(value: TSongsDetailResponse) -> Self {
-        Self { songs: collect_into(value.result.data.tracks) }
+        Self {
+            songs: collect_into(value.result.data.tracks),
+        }
     }
 }
 
@@ -350,7 +392,10 @@ impl From<TSingerSongItem> for Song {
 
 impl TSingerDetailResponse {
     pub(super) fn into_with(self, end: u64) -> ArtistDetailResult {
-        let TSingerDetailResponse { singer_info, singer_songs } = self;
+        let TSingerDetailResponse {
+            singer_info,
+            singer_songs,
+        } = self;
 
         let total_num = singer_songs.data.total_num;
         let songs = collect_into(singer_songs.data.song_list);
@@ -505,7 +550,11 @@ impl TLyricResponse {
             .map(decode_base64_text)
             .map(super::super::normalize_timestamp_lyric)
             .and_then(to_optional_string);
-        LyricResult { id: id.to_string(), lyric, trans_lyric }
+        LyricResult {
+            id: id.to_string(),
+            lyric,
+            trans_lyric,
+        }
     }
 }
 
@@ -538,13 +587,18 @@ impl From<TUrlResponse> for UrlResult {
         let first = midurlinfo.next();
 
         // 优先使用首项：请求顺序已经按期望音质排序，首项命中即可直接返回。
-        if let Some(item) =
-            first.as_ref().filter(|item| item.purl.as_deref().is_some_and(|purl| !purl.is_empty()))
+        if let Some(item) = first
+            .as_ref()
+            .filter(|item| item.purl.as_deref().is_some_and(|purl| !purl.is_empty()))
         {
             return Self {
                 id: item.songmid.clone(),
                 level: parse_song_quality(item.filename.as_str()),
-                url: item.purl.as_deref().map(tencent_playback_url).unwrap_or_default(),
+                url: item
+                    .purl
+                    .as_deref()
+                    .map(tencent_playback_url)
+                    .unwrap_or_default(),
             };
         }
 
@@ -554,7 +608,11 @@ impl From<TUrlResponse> for UrlResult {
             return Self {
                 id: item.songmid,
                 level: parse_song_quality(item.filename.as_str()),
-                url: item.purl.as_deref().map(tencent_playback_url).unwrap_or_default(),
+                url: item
+                    .purl
+                    .as_deref()
+                    .map(tencent_playback_url)
+                    .unwrap_or_default(),
             };
         }
 
@@ -562,9 +620,17 @@ impl From<TUrlResponse> for UrlResult {
             Some(item) => Self {
                 id: item.songmid,
                 level: parse_song_quality(item.filename.as_str()),
-                url: item.purl.as_deref().map(tencent_playback_url).unwrap_or_default(),
+                url: item
+                    .purl
+                    .as_deref()
+                    .map(tencent_playback_url)
+                    .unwrap_or_default(),
             },
-            None => Self { id: "0".to_string(), level: SongQuality::Standard, url: String::new() },
+            None => Self {
+                id: "0".to_string(),
+                level: SongQuality::Standard,
+                url: String::new(),
+            },
         }
     }
 }
@@ -640,7 +706,11 @@ struct TRecommendSonglistCard {
 
 impl From<TRecommendSonglistCard> for Playlist {
     fn from(value: TRecommendSonglistCard) -> Self {
-        Self { id: value.id, name: value.title, pic_url: value.cover }
+        Self {
+            id: value.id,
+            name: value.title,
+            pic_url: value.cover,
+        }
     }
 }
 
@@ -703,7 +773,10 @@ struct TToplistSong {
 
 impl From<TToplistSong> for ToplistTrack {
     fn from(value: TToplistSong) -> Self {
-        Self { artist: value.singer_name, title: value.title }
+        Self {
+            artist: value.singer_name,
+            title: value.title,
+        }
     }
 }
 
@@ -713,7 +786,11 @@ impl From<TToplistItem> for Toplist {
             id: value.top_id.to_string(),
             name: value.title,
             pic_url: to_optional_string(value.head_pic_url),
-            tracks: if value.song.is_empty() { None } else { Some(collect_into(value.song)) },
+            tracks: if value.song.is_empty() {
+                None
+            } else {
+                Some(collect_into(value.song))
+            },
         }
     }
 }
@@ -860,7 +937,11 @@ struct TSonglistCover {
 
 impl From<TSonglistInfo> for Playlist {
     fn from(value: TSonglistInfo) -> Self {
-        Self { id: value.tid.to_string(), name: value.title, pic_url: value.cover.default_url }
+        Self {
+            id: value.tid.to_string(),
+            name: value.title,
+            pic_url: value.cover.default_url,
+        }
     }
 }
 
@@ -868,7 +949,11 @@ impl TSonglistListResponse {
     pub(super) fn into_with(self, category: &str, end: u64) -> PlaylistListResult {
         let content = self.result.data.content;
         PlaylistListResult {
-            playlists: content.v_item.into_iter().map(|item| item.basic.into()).collect(),
+            playlists: content
+                .v_item
+                .into_iter()
+                .map(|item| item.basic.into())
+                .collect(),
             more: content.total_cnt > end,
             category: category.to_string(),
         }
@@ -895,7 +980,10 @@ struct TLoginQrData {
 
 impl From<TLoginQrResponse> for LoginQrResult {
     fn from(value: TLoginQrResponse) -> Self {
-        Self { qr_code: value.result.data.qrcode, qr_key: value.result.data.qrcode_id }
+        Self {
+            qr_code: value.result.data.qrcode,
+            qr_key: value.result.data.qrcode_id,
+        }
     }
 }
 

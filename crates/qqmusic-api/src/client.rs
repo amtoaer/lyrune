@@ -113,7 +113,10 @@ impl MusicClient {
         // `reqwest` is intentionally built with `rustls-no-provider`. Install
         // ring here so this crate also works outside the Lyrune executable.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        Self { netease: NeteaseClient::new(), tencent: TencentClient::new() }
+        Self {
+            netease: NeteaseClient::new(),
+            tencent: TencentClient::new(),
+        }
     }
 
     /// 创建搜索域请求构建器。

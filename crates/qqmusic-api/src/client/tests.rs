@@ -8,44 +8,73 @@ mod section_validation {
     #[tokio::test(flavor = "current_thread")]
     async fn search_requires_keyword() {
         let client = MusicClient::new();
-        let err = client.search().send().await.expect_err("missing keyword should fail");
+        let err = client
+            .search()
+            .send()
+            .await
+            .expect_err("missing keyword should fail");
         assert!(matches!(err, MusicClientError::MissingKeyword));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn search_rejects_empty_keyword() {
         let client = MusicClient::new();
-        let err =
-            client.search().keyword("   ").send().await.expect_err("empty keyword should fail");
+        let err = client
+            .search()
+            .keyword("   ")
+            .send()
+            .await
+            .expect_err("empty keyword should fail");
         assert!(matches!(err, MusicClientError::MissingKeyword));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn detail_requires_id() {
         let client = MusicClient::new();
-        let err = client.detail().artist().send().await.expect_err("missing id should fail");
+        let err = client
+            .detail()
+            .artist()
+            .send()
+            .await
+            .expect_err("missing id should fail");
         assert!(matches!(err, MusicClientError::MissingId));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn detail_rejects_empty_id() {
         let client = MusicClient::new();
-        let err =
-            client.detail().artist().id("   ").send().await.expect_err("empty id should fail");
+        let err = client
+            .detail()
+            .artist()
+            .id("   ")
+            .send()
+            .await
+            .expect_err("empty id should fail");
         assert!(matches!(err, MusicClientError::MissingId));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn detail_album_rejects_empty_id() {
         let client = MusicClient::new();
-        let err = client.detail().album().id("").send().await.expect_err("empty id should fail");
+        let err = client
+            .detail()
+            .album()
+            .id("")
+            .send()
+            .await
+            .expect_err("empty id should fail");
         assert!(matches!(err, MusicClientError::MissingId));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn detail_toplist_requires_id() {
         let client = MusicClient::new();
-        let err = client.detail().toplist().send().await.expect_err("missing id should fail");
+        let err = client
+            .detail()
+            .toplist()
+            .send()
+            .await
+            .expect_err("missing id should fail");
         assert!(matches!(err, MusicClientError::MissingId));
     }
 
@@ -78,7 +107,12 @@ mod section_validation {
     #[tokio::test(flavor = "current_thread")]
     async fn detail_song_requires_id() {
         let client = MusicClient::new();
-        let err = client.detail().song().send().await.expect_err("missing id should fail");
+        let err = client
+            .detail()
+            .song()
+            .send()
+            .await
+            .expect_err("missing id should fail");
         assert!(matches!(err, MusicClientError::MissingId));
     }
 
@@ -123,23 +157,36 @@ mod section_validation {
     #[tokio::test(flavor = "current_thread")]
     async fn search_suggests_requires_keyword() {
         let client = MusicClient::new();
-        let err =
-            client.discover().suggests().send().await.expect_err("missing keyword should fail");
+        let err = client
+            .discover()
+            .suggests()
+            .send()
+            .await
+            .expect_err("missing keyword should fail");
         assert!(matches!(err, MusicClientError::MissingKeyword));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_refresh_requires_token() {
         let client = MusicClient::new();
-        let err =
-            client.login().refresh().send().await.expect_err("missing refresh token should fail");
+        let err = client
+            .login()
+            .refresh()
+            .send()
+            .await
+            .expect_err("missing refresh token should fail");
         assert!(matches!(err, MusicClientError::MissingRefreshToken));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn playlist_detail_requires_id() {
         let client = MusicClient::new();
-        let err = client.playlist().detail().send().await.expect_err("missing id should fail");
+        let err = client
+            .playlist()
+            .detail()
+            .send()
+            .await
+            .expect_err("missing id should fail");
         assert!(matches!(err, MusicClientError::MissingId));
     }
 
@@ -159,7 +206,12 @@ mod section_validation {
     #[tokio::test(flavor = "current_thread")]
     async fn playlist_list_requires_category() {
         let client = MusicClient::new();
-        let err = client.playlist().list().send().await.expect_err("missing category should fail");
+        let err = client
+            .playlist()
+            .list()
+            .send()
+            .await
+            .expect_err("missing category should fail");
         assert!(matches!(err, MusicClientError::MissingCategory));
     }
 
@@ -179,14 +231,26 @@ mod section_validation {
     #[tokio::test(flavor = "current_thread")]
     async fn playback_lyric_rejects_empty_id() {
         let client = MusicClient::new();
-        let err = client.playback().lyric().id("").send().await.expect_err("empty id should fail");
+        let err = client
+            .playback()
+            .lyric()
+            .id("")
+            .send()
+            .await
+            .expect_err("empty id should fail");
         assert!(matches!(err, MusicClientError::MissingId));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn playback_url_rejects_empty_id() {
         let client = MusicClient::new();
-        let err = client.playback().url().id(" ").send().await.expect_err("empty id should fail");
+        let err = client
+            .playback()
+            .url()
+            .id(" ")
+            .send()
+            .await
+            .expect_err("empty id should fail");
         assert!(matches!(err, MusicClientError::MissingId));
     }
 
@@ -325,7 +389,10 @@ mod section_live_smoke {
             .await
             .expect("search should succeed");
         assert_eq!(response.playlists[0].id, "8814710412");
-        assert_eq!(response.playlists[0].name, "烟雨江南 | 你一句春不晚 我到了真江南");
+        assert_eq!(
+            response.playlists[0].name,
+            "烟雨江南 | 你一句春不晚 我到了真江南"
+        );
         assert!(!response.playlists[0].pic_url.is_empty());
     }
 
@@ -342,8 +409,15 @@ mod section_live_smoke {
             .await
             .expect("search should succeed");
         assert_eq!(response.playlists[0].id, "2665887142");
-        assert_eq!(response.playlists[0].name, "华语歌曲粤语版：除了“江南”还有这些歌");
-        assert!(response.playlists[0].pic_url.starts_with("http://qpic.y.qq.com/music_cover/"));
+        assert_eq!(
+            response.playlists[0].name,
+            "华语歌曲粤语版：除了“江南”还有这些歌"
+        );
+        assert!(
+            response.playlists[0]
+                .pic_url
+                .starts_with("http://qpic.y.qq.com/music_cover/")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -415,7 +489,11 @@ mod section_live_smoke {
         assert_eq!(response.songs[0].album.id, "10770");
         assert_eq!(response.songs[0].album.name, "JJ陆");
         assert_eq!(response.name, "林俊杰");
-        assert!(response.description.starts_with("JJ林俊杰的创作来自最深的情感"))
+        assert!(
+            response
+                .description
+                .starts_with("JJ林俊杰的创作来自最深的情感")
+        )
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -434,7 +512,11 @@ mod section_live_smoke {
         assert_eq!(response.songs[0].album.id, "002g6zv02X7SNi");
         assert_eq!(response.songs[0].album.name, "JJ陆");
         assert_eq!(response.name, "林俊杰");
-        assert!(response.description.starts_with("JJ林俊杰的创作来自最深的情感"))
+        assert!(
+            response
+                .description
+                .starts_with("JJ林俊杰的创作来自最深的情感")
+        )
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -452,7 +534,11 @@ mod section_live_smoke {
         assert_eq!(response.songs[0].id, "108458");
         assert_eq!(response.songs[0].name, "SIXOLOGY");
         assert_eq!(response.name, "JJ陆");
-        assert!(response.description.starts_with("JJ林俊杰 2008最新创作大碟 JJ陆"));
+        assert!(
+            response
+                .description
+                .starts_with("JJ林俊杰 2008最新创作大碟 JJ陆")
+        );
         assert!(!response.pic_url.is_empty())
     }
 
@@ -471,7 +557,11 @@ mod section_live_smoke {
         assert_eq!(response.songs[0].id, "002vb5JD04eGw3");
         assert_eq!(response.songs[0].name, "Sixology");
         assert_eq!(response.name, "JJ陆");
-        assert!(response.description.starts_with("JJ林俊杰 2008最新创作大碟 JJ陆"));
+        assert!(
+            response
+                .description
+                .starts_with("JJ林俊杰 2008最新创作大碟 JJ陆")
+        );
         assert!(!response.pic_url.is_empty())
     }
 
@@ -526,7 +616,10 @@ mod section_live_smoke {
             .await
             .expect("detail should succeed");
         assert_eq!(response.name, "飙升榜");
-        assert_eq!(response.description, "云音乐中每天热度上升最快的100首单曲，每日更新。");
+        assert_eq!(
+            response.description,
+            "云音乐中每天热度上升最快的100首单曲，每日更新。"
+        );
         assert!(!response.pic_url.is_empty())
     }
 
@@ -543,7 +636,11 @@ mod section_live_smoke {
             .await
             .expect("detail should succeed");
         assert_eq!(response.name, "飙升榜");
-        assert!(response.description.starts_with("1. 榜单定义：QQ音乐站内播"));
+        assert!(
+            response
+                .description
+                .starts_with("1. 榜单定义：QQ音乐站内播")
+        );
         assert!(!response.pic_url.is_empty())
     }
 
@@ -579,7 +676,11 @@ mod section_live_smoke {
             .send()
             .await
             .expect("playback should succeed");
-        assert!(response.url.starts_with("https://isure.stream.qqmusic.qq.com/"));
+        assert!(
+            response
+                .url
+                .starts_with("https://isure.stream.qqmusic.qq.com/")
+        );
         assert_eq!(response.level, SongQuality::Standard);
     }
 
@@ -828,7 +929,8 @@ mod section_live_level_url_with_env_login {
 
     fn required_u64_env(name: &str) -> u64 {
         let raw = required_env(name);
-        raw.parse::<u64>().unwrap_or_else(|_| panic!("env `{name}` should be u64, got `{raw}`"))
+        raw.parse::<u64>()
+            .unwrap_or_else(|_| panic!("env `{name}` should be u64, got `{raw}`"))
     }
 
     fn netease_token_from_env() -> NeteaseLoginToken {
@@ -884,9 +986,18 @@ mod section_live_level_url_with_env_login {
             let host = parsed
                 .host_str()
                 .unwrap_or_else(|| panic!("netease level {level:?} returned url without host"));
-            assert!(host.ends_with(".music.126.net"), "unexpected netease host: {host}");
-            assert_eq!(response.level, level, "unexpected level for netease level {level:?}");
-            assert_eq!(response.id, song_id, "unexpected id for netease level {level:?}");
+            assert!(
+                host.ends_with(".music.126.net"),
+                "unexpected netease host: {host}"
+            );
+            assert_eq!(
+                response.level, level,
+                "unexpected level for netease level {level:?}"
+            );
+            assert_eq!(
+                response.id, song_id,
+                "unexpected id for netease level {level:?}"
+            );
         }
     }
 
@@ -923,8 +1034,14 @@ mod section_live_level_url_with_env_login {
             let host = parsed
                 .host_str()
                 .unwrap_or_else(|| panic!("tencent level {level:?} returned url without host"));
-            assert!(host.ends_with("qqmusic.qq.com"), "unexpected tencent host: {host}");
-            assert_eq!(response.id, song_id, "unexpected id for tencent level {level:?}");
+            assert!(
+                host.ends_with("qqmusic.qq.com"),
+                "unexpected tencent host: {host}"
+            );
+            assert_eq!(
+                response.id, song_id,
+                "unexpected id for tencent level {level:?}"
+            );
         }
     }
 }

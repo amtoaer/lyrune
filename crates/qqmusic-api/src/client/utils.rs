@@ -143,7 +143,9 @@ fn parse_digit_u64(id: &str) -> MusicClientResult<u64> {
     if !digit_str.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(MusicClientError::InvalidIdFormat(digit_str.to_owned()));
     }
-    digit_str.parse::<u64>().map_err(|_| MusicClientError::InvalidIdFormat(digit_str.to_owned()))
+    digit_str
+        .parse::<u64>()
+        .map_err(|_| MusicClientError::InvalidIdFormat(digit_str.to_owned()))
 }
 
 pub(crate) fn require_category(category: Option<&str>) -> MusicClientResult<&str> {
@@ -159,19 +161,25 @@ mod tests {
 
     #[test]
     fn music_id_input_try_into_id_u64_accepts_u64_without_parse() {
-        let id = 123_u64.try_into_id_u64().expect("u64 input should be accepted as-is");
+        let id = 123_u64
+            .try_into_id_u64()
+            .expect("u64 input should be accepted as-is");
         assert_eq!(id, 123);
     }
 
     #[test]
     fn music_id_input_try_into_id_u64_accepts_digit_str() {
-        let id = "  456  ".try_into_id_u64().expect("digit string input should be accepted");
+        let id = "  456  "
+            .try_into_id_u64()
+            .expect("digit string input should be accepted");
         assert_eq!(id, 456);
     }
 
     #[test]
     fn music_id_input_try_into_id_u64_rejects_non_digit_str() {
-        let err = "45a".try_into_id_u64().expect_err("non-digit string should be rejected");
+        let err = "45a"
+            .try_into_id_u64()
+            .expect_err("non-digit string should be rejected");
         assert!(matches!(err, MusicClientError::InvalidIdFormat(value) if value == "45a"));
     }
 }

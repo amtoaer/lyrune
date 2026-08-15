@@ -70,9 +70,15 @@ impl From<NSong> for Song {
             artists: value
                 .artists
                 .into_iter()
-                .map(|artist| SongArtist { id: artist.id.to_string(), name: artist.name })
+                .map(|artist| SongArtist {
+                    id: artist.id.to_string(),
+                    name: artist.name,
+                })
                 .collect(),
-            album: SongAlbum { id: value.album.id.to_string(), name: value.album.name },
+            album: SongAlbum {
+                id: value.album.id.to_string(),
+                name: value.album.name,
+            },
             pic_url: value.album.pic_url,
         }
     }
@@ -101,13 +107,20 @@ struct NArtist {
 
 impl From<NSearchArtistResponse> for SearchArtistResult {
     fn from(value: NSearchArtistResponse) -> Self {
-        Self { artists: collect_into(value.result.artists), more: value.result.more }
+        Self {
+            artists: collect_into(value.result.artists),
+            more: value.result.more,
+        }
     }
 }
 
 impl From<NArtist> for Artist {
     fn from(value: NArtist) -> Self {
-        Self { id: value.id.to_string(), name: value.name, pic_url: value.img1v1_url }
+        Self {
+            id: value.id.to_string(),
+            name: value.name,
+            pic_url: value.img1v1_url,
+        }
     }
 }
 
@@ -154,7 +167,10 @@ impl From<NAlbum> for Album {
             id: value.id.to_string(),
             name: value.name,
             pic_url: value.pic_url,
-            artist: AlbumArtist { id: value.artist.id.to_string(), name: value.artist.name },
+            artist: AlbumArtist {
+                id: value.artist.id.to_string(),
+                name: value.artist.name,
+            },
         }
     }
 }
@@ -182,13 +198,20 @@ struct NPlaylist {
 
 impl From<NSearchPlaylistResponse> for SearchPlaylistResult {
     fn from(value: NSearchPlaylistResponse) -> Self {
-        Self { playlists: collect_into(value.result.playlists), more: value.result.more }
+        Self {
+            playlists: collect_into(value.result.playlists),
+            more: value.result.more,
+        }
     }
 }
 
 impl From<NPlaylist> for Playlist {
     fn from(value: NPlaylist) -> Self {
-        Self { id: value.id.to_string(), name: value.name, pic_url: value.pic_url }
+        Self {
+            id: value.id.to_string(),
+            name: value.name,
+            pic_url: value.pic_url,
+        }
     }
 }
 
@@ -210,7 +233,14 @@ struct NSearchSuggestItem {
 
 impl From<NSearchSuggestResponse> for SearchSuggestResult {
     fn from(value: NSearchSuggestResponse) -> Self {
-        Self { suggests: value.data.suggests.into_iter().map(|item| item.keyword).collect() }
+        Self {
+            suggests: value
+                .data
+                .suggests
+                .into_iter()
+                .map(|item| item.keyword)
+                .collect(),
+        }
     }
 }
 
@@ -308,7 +338,11 @@ struct NTrackId {
 
 impl NPlaylistDetailResponse {
     pub(super) fn song_ids(&self) -> Vec<String> {
-        self.playlist.track_ids.iter().map(|item| item.id.to_string()).collect()
+        self.playlist
+            .track_ids
+            .iter()
+            .map(|item| item.id.to_string())
+            .collect()
     }
 
     pub(super) fn into_with_songs(self, songs: Vec<Song>) -> PlaylistDetailResult {
@@ -330,7 +364,9 @@ pub(super) struct NSongDetailResponse {
 
 impl NSongDetailResponse {
     pub(super) fn into_with(self) -> SongsDetailResult {
-        SongsDetailResult { songs: collect_into(self.songs) }
+        SongsDetailResult {
+            songs: collect_into(self.songs),
+        }
     }
 }
 
@@ -355,7 +391,11 @@ impl NLyricResponse {
         LyricResult {
             id: id.to_string(),
             lyric,
-            trans_lyric: if trans_lyric.is_empty() { None } else { Some(trans_lyric) },
+            trans_lyric: if trans_lyric.is_empty() {
+                None
+            } else {
+                Some(trans_lyric)
+            },
         }
     }
 }
@@ -389,9 +429,11 @@ impl From<NUrlResponse> for UrlResult {
                     Some("standard") | Some(_) | None => SongQuality::Standard,
                 },
             },
-            None => {
-                UrlResult { id: 0.to_string(), url: String::new(), level: SongQuality::Standard }
-            }
+            None => UrlResult {
+                id: 0.to_string(),
+                url: String::new(),
+                level: SongQuality::Standard,
+            },
         }
     }
 }
@@ -416,7 +458,14 @@ struct NHotkeyItem {
 
 impl From<NHotkeyResponse> for HotkeyResult {
     fn from(value: NHotkeyResponse) -> Self {
-        Self { hotkey: value.data.item_list.into_iter().map(|item| item.search_word).collect() }
+        Self {
+            hotkey: value
+                .data
+                .item_list
+                .into_iter()
+                .map(|item| item.search_word)
+                .collect(),
+        }
     }
 }
 
@@ -472,7 +521,11 @@ impl From<NRecommendPlaylistResponse> for RecommendPlaylistResult {
 
 impl From<NRecommendPlaylistResource> for Playlist {
     fn from(value: NRecommendPlaylistResource) -> Self {
-        Self { id: value.resource_id, name: value.title, pic_url: value.cover_img }
+        Self {
+            id: value.resource_id,
+            name: value.title,
+            pic_url: value.cover_img,
+        }
     }
 }
 
@@ -511,7 +564,13 @@ impl From<NToplistResponse> for ToplistListResult {
                 second.list.extend(first.list);
             }
         }
-        Self { toplists: data.into_iter().flat_map(|datum| datum.list).map(Into::into).collect() }
+        Self {
+            toplists: data
+                .into_iter()
+                .flat_map(|datum| datum.list)
+                .map(Into::into)
+                .collect(),
+        }
     }
 }
 
@@ -528,7 +587,10 @@ impl From<NToplist> for Toplist {
 
 impl From<NToplistTrack> for ToplistTrack {
     fn from(value: NToplistTrack) -> Self {
-        Self { artist: value.second.unwrap_or_default(), title: value.first }
+        Self {
+            artist: value.second.unwrap_or_default(),
+            title: value.first,
+        }
     }
 }
 
@@ -551,13 +613,20 @@ impl From<NPlaylistCategoriesResponse> for PlaylistCategoriesResult {
         let mut categories = Vec::with_capacity(value.sub.len() + 1);
         categories.push(PlaylistCategory::from(value.all));
         categories.extend(value.sub.into_iter().map(PlaylistCategory::from));
-        Self { group: value.categories, categories }
+        Self {
+            group: value.categories,
+            categories,
+        }
     }
 }
 
 impl From<NPlaylistCategory> for PlaylistCategory {
     fn from(value: NPlaylistCategory) -> Self {
-        Self { id: value.name.clone(), name: value.name, category: value.category }
+        Self {
+            id: value.name.clone(),
+            name: value.name,
+            category: value.category,
+        }
     }
 }
 
@@ -571,7 +640,11 @@ pub(super) struct NPlaylistListResponse {
 
 impl From<NPlaylistListResponse> for PlaylistListResult {
     fn from(value: NPlaylistListResponse) -> Self {
-        Self { more: value.more, category: value.cat, playlists: collect_into(value.playlists) }
+        Self {
+            more: value.more,
+            category: value.cat,
+            playlists: collect_into(value.playlists),
+        }
     }
 }
 
@@ -583,9 +656,16 @@ pub(super) struct NLoginQrResponse {
 
 impl NLoginQrResponse {
     pub(super) fn into_qr_result(self) -> MusicClientResult<LoginQrResult> {
-        let code = QrCode::new(format!("https://music.163.com/login?codekey={}", self.unikey))
-            .map_err(|err| MusicClientError::NeteaseLoginQrCode(err.to_string()))?;
-        let image = code.render::<Luma<u8>>().quiet_zone(true).module_dimensions(8, 8).build();
+        let code = QrCode::new(format!(
+            "https://music.163.com/login?codekey={}",
+            self.unikey
+        ))
+        .map_err(|err| MusicClientError::NeteaseLoginQrCode(err.to_string()))?;
+        let image = code
+            .render::<Luma<u8>>()
+            .quiet_zone(true)
+            .module_dimensions(8, 8)
+            .build();
         let mut png_bytes = Vec::new();
         DynamicImage::ImageLuma8(image)
             .write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
@@ -594,7 +674,10 @@ impl NLoginQrResponse {
             "data:image/png;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(png_bytes)
         );
-        Ok(LoginQrResult { qr_key: self.unikey, qr_code })
+        Ok(LoginQrResult {
+            qr_key: self.unikey,
+            qr_code,
+        })
     }
 }
 

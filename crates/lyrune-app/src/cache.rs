@@ -19,7 +19,6 @@ use reqwest::header::{
 };
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use stream_download::source::{SourceStream, StreamOutcome};
 use stream_download::storage::StorageProvider;
 use stream_download::{Settings, StreamDownload};
@@ -27,15 +26,23 @@ use tokio::io::AsyncReadExt as _;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
+use xxhash_rust::xxh3::xxh3_128;
 
 const CACHE_SCHEMA_VERSION: u32 = 1;
-const PREFETCH_BYTES: u64 = 1024 * 1024;
+const MIN_PREFETCH_BYTES: u64 = 256 * 1024;
+const MAX_PREFETCH_BYTES: u64 = 4 * 1024 * 1024;
+const PREFETCH_SECONDS: u64 = 6;
 const PREFIX_PROBE_BYTES: u64 = 64 * 1024;
+const CDN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
 const QQ_REFERER: &str = "https://y.qq.com/";
 
 type CacheKeyLock = Arc<AsyncMutex<()>>;
 type ByteStream = Box<dyn Stream<Item = io::Result<Bytes>> + Unpin + Send + Sync>;
 type StreamingSource = StreamDownload<CacheStorageProvider>;
+
+pub(crate) fn cache_key(bytes: &[u8]) -> String {
+    format!("{:032x}", xxh3_128(bytes))
+}
 
 #[derive(Clone)]
 pub struct AudioCache {
@@ -69,12 +76,55 @@ impl AudioCache {
         })
     }
 
+    #[cfg(test)]
     pub async fn prepare(
         &self,
         url: &str,
         track: &Track,
         quality: Quality,
     ) -> Result<PreparedStream> {
+        self.prepare_inner(vec![url.to_owned()], track, quality, true)
+            .await
+    }
+
+    pub async fn prepare_with_fallbacks(
+        &self,
+        urls: Vec<String>,
+        track: &Track,
+        quality: Quality,
+    ) -> Result<PreparedStream> {
+        self.prepare_inner(urls, track, quality, true).await
+    }
+
+    #[cfg(test)]
+    pub async fn prepare_for_seek(
+        &self,
+        url: &str,
+        track: &Track,
+        quality: Quality,
+    ) -> Result<PreparedStream> {
+        self.prepare_inner(vec![url.to_owned()], track, quality, false)
+            .await
+    }
+
+    pub async fn prepare_for_seek_with_fallbacks(
+        &self,
+        urls: Vec<String>,
+        track: &Track,
+        quality: Quality,
+    ) -> Result<PreparedStream> {
+        self.prepare_inner(urls, track, quality, false).await
+    }
+
+    async fn prepare_inner(
+        &self,
+        urls: Vec<String>,
+        track: &Track,
+        quality: Quality,
+        validate_remote: bool,
+    ) -> Result<PreparedStream> {
+        let urls = unique_urls(urls);
+        let primary_url = urls.first().context("歌曲没有可用的 CDN 下载地址")?;
         tokio::fs::create_dir_all(self.root.as_ref())
             .await
             .context("无法创建音频缓存目录")?;
@@ -97,7 +147,11 @@ impl AudioCache {
             existing_length = 0;
         }
 
-        let remote = self.inspect_remote(url).await.ok();
+        let remote = if validate_remote {
+            self.inspect_remote(primary_url).await.ok()
+        } else {
+            None
+        };
         if let (Some(cached_metadata), Some(remote)) = (&metadata, &remote)
             && cached_metadata.conflicts_with(remote)
         {
@@ -106,10 +160,11 @@ impl AudioCache {
             existing_length = 0;
         }
 
-        if existing_length > 0
+        if validate_remote
+            && existing_length > 0
             && !has_shared_validator(metadata.as_ref(), remote.as_ref())
             && self
-                .prefix_matches(url, &paths.media, existing_length)
+                .prefix_matches(primary_url, &paths.media, existing_length)
                 .await
                 .is_ok_and(|matches| !matches)
         {
@@ -132,24 +187,31 @@ impl AudioCache {
             existing_length = 0;
         }
 
-        if existing_length > 0 && expected_length == Some(existing_length) && metadata.is_some() {
+        if existing_length > 0
+            && expected_length == Some(existing_length)
+            && metadata.as_ref().is_some_and(|metadata| metadata.complete)
+        {
             let source = File::open(&paths.media).context("无法打开已缓存的歌曲")?;
             drop(guard);
             return Ok(PreparedStream {
                 source: CachedAudioSource::Complete(source),
                 content_length: Some(existing_length),
                 format_hint: quality_format_hint(quality),
-                cache_status: CacheStatus::Complete,
                 cancellation: None,
             });
+        }
+        if existing_length > 0 && expected_length == Some(existing_length) {
+            reset_media(&paths.media).await?;
+            metadata = None;
+            existing_length = 0;
         }
 
         let validator = metadata
             .as_ref()
             .and_then(CacheMetadata::if_range_validator)
             .map(str::to_owned);
-        let (response, resume_from) = self
-            .open_stream_response(url, &paths.media, existing_length, validator.as_deref())
+        let (response, resume_from, active_url) = self
+            .open_stream_response(&urls, &paths.media, existing_length, validator.as_deref())
             .await?;
         if existing_length > 0 && resume_from == 0 {
             metadata = None;
@@ -218,17 +280,24 @@ impl AudioCache {
         let stream: ByteStream = Box::new(local_stream.chain(network_stream));
         let source = ResumeSource {
             stream,
+            client: self.client.clone(),
+            urls,
+            active_url,
+            validator: metadata.if_range_validator().map(str::to_owned),
             content_length,
             media_path: paths.media.clone(),
             metadata_path: paths.metadata.clone(),
             metadata,
+            random_accessed: false,
             _guard: guard,
         };
         let settings = Settings::default()
-            .prefetch_bytes(
-                content_length.map_or(PREFETCH_BYTES, |length| PREFETCH_BYTES.min(length)),
-            )
-            .retry_timeout(Duration::from_secs(30));
+            .prefetch_bytes(prefetch_bytes(
+                content_length,
+                track.duration_seconds,
+                quality,
+            ))
+            .retry_timeout(Duration::from_secs(5));
         let download = StreamDownload::from_stream(
             source,
             CacheStorageProvider { path: paths.media },
@@ -242,11 +311,6 @@ impl AudioCache {
             source: CachedAudioSource::Streaming(download),
             content_length,
             format_hint: quality_format_hint(quality),
-            cache_status: if resume_from == 0 {
-                CacheStatus::Fresh
-            } else {
-                CacheStatus::Resumed(resume_from)
-            },
             cancellation,
         })
     }
@@ -332,6 +396,26 @@ impl AudioCache {
 
     async fn open_stream_response(
         &self,
+        urls: &[String],
+        path: &Path,
+        existing_length: u64,
+        validator: Option<&str>,
+    ) -> Result<(Response, u64, usize)> {
+        let mut last_error = None;
+        for (index, url) in urls.iter().enumerate() {
+            match self
+                .open_stream_response_from(url, path, existing_length, validator)
+                .await
+            {
+                Ok((response, resume_from)) => return Ok((response, resume_from, index)),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("歌曲没有可用的 CDN 下载地址")))
+    }
+
+    async fn open_stream_response_from(
+        &self,
         url: &str,
         path: &Path,
         existing_length: u64,
@@ -349,7 +433,10 @@ impl AudioCache {
             }
         }
 
-        let response = request.send().await.context("歌曲流请求失败")?;
+        let response = tokio::time::timeout(CDN_RESPONSE_TIMEOUT, request.send())
+            .await
+            .context("等待歌曲 CDN 响应超时")?
+            .context("歌曲流请求失败")?;
         if existing_length > 0 && response.status() == StatusCode::PARTIAL_CONTENT {
             let range_start = response
                 .headers()
@@ -373,17 +460,20 @@ impl AudioCache {
         }
 
         drop(response);
+        let response = tokio::time::timeout(
+            CDN_RESPONSE_TIMEOUT,
+            self.client
+                .get(url)
+                .header(REFERER, QQ_REFERER)
+                .header(ACCEPT_ENCODING, "identity")
+                .send(),
+        )
+        .await
+        .context("等待完整歌曲 CDN 响应超时")?
+        .context("重新请求完整歌曲流失败")?
+        .error_for_status()
+        .context("歌曲下载地址拒绝了完整请求")?;
         reset_media(path).await?;
-        let response = self
-            .client
-            .get(url)
-            .header(REFERER, QQ_REFERER)
-            .header(ACCEPT_ENCODING, "identity")
-            .send()
-            .await
-            .context("重新请求完整歌曲流失败")?
-            .error_for_status()
-            .context("歌曲下载地址拒绝了完整请求")?;
         Ok((response, 0))
     }
 }
@@ -392,25 +482,7 @@ pub struct PreparedStream {
     pub source: CachedAudioSource,
     pub content_length: Option<u64>,
     pub format_hint: &'static str,
-    pub cache_status: CacheStatus,
     pub cancellation: Option<CancellationToken>,
-}
-
-#[derive(Clone, Copy)]
-pub enum CacheStatus {
-    Fresh,
-    Resumed(u64),
-    Complete,
-}
-
-impl CacheStatus {
-    pub fn description(self) -> String {
-        match self {
-            Self::Fresh => "边下载边播放".to_owned(),
-            Self::Resumed(bytes) => format!("从 {} 缓存续传", format_bytes(bytes)),
-            Self::Complete => "使用完整本地缓存".to_owned(),
-        }
-    }
 }
 
 pub enum CachedAudioSource {
@@ -449,22 +521,19 @@ impl CacheIdentity {
         Self {
             provider: "qqmusic".to_owned(),
             track_mid: track.mid.clone(),
-            media_mid: track.media_mid.clone(),
+            media_mid: track.media_mid.clone().unwrap_or_else(|| track.mid.clone()),
             quality: quality.cache_id().to_owned(),
         }
     }
 
     fn key(&self) -> String {
-        let mut digest = Sha256::new();
-        digest.update(format!("lyrune-audio-v{CACHE_SCHEMA_VERSION}\0"));
-        digest.update(self.provider.as_bytes());
-        digest.update([0]);
-        digest.update(self.track_mid.as_bytes());
-        digest.update([0]);
-        digest.update(self.media_mid.as_bytes());
-        digest.update([0]);
-        digest.update(self.quality.as_bytes());
-        hex::encode(digest.finalize())
+        cache_key(
+            format!(
+                "lyrune-audio-v{CACHE_SCHEMA_VERSION}\0{}\0{}\0{}\0{}",
+                self.provider, self.track_mid, self.media_mid, self.quality
+            )
+            .as_bytes(),
+        )
     }
 }
 
@@ -566,6 +635,16 @@ fn different_ref<T: Eq + ?Sized>(left: Option<&T>, right: Option<&T>) -> bool {
     matches!((left, right), (Some(left), Some(right)) if left != right)
 }
 
+fn unique_urls(urls: Vec<String>) -> Vec<String> {
+    let mut unique = Vec::with_capacity(urls.len());
+    for url in urls {
+        if !url.trim().is_empty() && !unique.contains(&url) {
+            unique.push(url);
+        }
+    }
+    unique
+}
+
 fn header_string(headers: &HeaderMap, name: reqwest::header::HeaderName) -> Option<String> {
     headers
         .get(name)
@@ -576,17 +655,31 @@ fn header_string(headers: &HeaderMap, name: reqwest::header::HeaderName) -> Opti
 fn quality_format_hint(quality: Quality) -> &'static str {
     match quality {
         Quality::Standard | Quality::High => "mp3",
-        Quality::Lossless => "flac",
+        Quality::Lossless
+        | Quality::HiRes
+        | Quality::AtmosStereo
+        | Quality::AtmosSurround
+        | Quality::Master => "flac",
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const MIB: f64 = 1024.0 * 1024.0;
-    if bytes < 1024 * 1024 {
-        format!("{:.0} KiB", bytes as f64 / 1024.0)
+fn prefetch_bytes(content_length: Option<u64>, duration_seconds: u64, quality: Quality) -> u64 {
+    let estimated_bytes_per_second = match quality {
+        Quality::Standard => 16_000,
+        Quality::High => 40_000,
+        Quality::Lossless => 125_000,
+        Quality::HiRes | Quality::AtmosStereo => 500_000,
+        Quality::AtmosSurround | Quality::Master => 1_000_000,
+    };
+    let target = if let Some(content_length) = content_length
+        && duration_seconds > 0
+    {
+        content_length.saturating_mul(PREFETCH_SECONDS) / duration_seconds
     } else {
-        format!("{:.1} MiB", bytes as f64 / MIB)
-    }
+        estimated_bytes_per_second * PREFETCH_SECONDS
+    };
+    let target = target.clamp(MIN_PREFETCH_BYTES, MAX_PREFETCH_BYTES);
+    content_length.map_or(target, |length| target.min(length))
 }
 
 struct CachePaths {
@@ -649,6 +742,7 @@ impl StorageProvider for CacheStorageProvider {
     ) -> io::Result<(Self::Reader, Self::Writer)> {
         let mut writer = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&self.path)?;
@@ -660,11 +754,100 @@ impl StorageProvider for CacheStorageProvider {
 
 struct ResumeSource {
     stream: ByteStream,
+    client: Client,
+    urls: Vec<String>,
+    active_url: usize,
+    validator: Option<String>,
     content_length: Option<u64>,
     media_path: PathBuf,
     metadata_path: PathBuf,
     metadata: CacheMetadata,
+    random_accessed: bool,
     _guard: OwnedMutexGuard<()>,
+}
+
+impl ResumeSource {
+    async fn request_range(
+        &mut self,
+        start: u64,
+        end: Option<u64>,
+        rotate_first: bool,
+    ) -> io::Result<()> {
+        if Some(start) == self.content_length {
+            self.stream = Box::new(futures_util::stream::empty());
+            return Ok(());
+        }
+
+        let range = match end {
+            Some(end) if end > start => format!("bytes={start}-{}", end - 1),
+            Some(_) => {
+                self.stream = Box::new(futures_util::stream::empty());
+                return Ok(());
+            }
+            None => format!("bytes={start}-"),
+        };
+        let first = if rotate_first {
+            (self.active_url + 1) % self.urls.len()
+        } else {
+            self.active_url
+        };
+        let mut last_error = None;
+        for offset in 0..self.urls.len() {
+            let index = (first + offset) % self.urls.len();
+            match self.request_range_from(index, &range, start).await {
+                Ok(stream) => {
+                    self.active_url = index;
+                    self.stream = stream;
+                    return Ok(());
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| io::Error::other("没有可用的音频 CDN 节点")))
+    }
+
+    async fn request_range_from(
+        &self,
+        url_index: usize,
+        range: &str,
+        expected_start: u64,
+    ) -> io::Result<ByteStream> {
+        let mut request = self
+            .client
+            .get(&self.urls[url_index])
+            .header(REFERER, QQ_REFERER)
+            .header(ACCEPT_ENCODING, "identity")
+            .header(RANGE, range);
+        if let Some(validator) = &self.validator {
+            request = request.header(IF_RANGE, validator);
+        }
+        let response = tokio::time::timeout(CDN_RESPONSE_TIMEOUT, request.send())
+            .await
+            .map_err(|_| io::Error::other("等待音频 CDN Range 响应超时"))?
+            .map_err(|error| io::Error::other(format!("音频 Range 请求失败：{error}")))?;
+
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            return Err(io::Error::other(format!(
+                "音频服务器没有接受 Range 请求（HTTP {}）",
+                response.status()
+            )));
+        }
+        let response_start = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range)
+            .map(|range| range.start);
+        if response_start != Some(expected_start) {
+            return Err(io::Error::other(format!(
+                "音频服务器返回了错误的 Range 起点：期望 {expected_start}，实际 {response_start:?}"
+            )));
+        }
+
+        Ok(Box::new(response.bytes_stream().map(|chunk| {
+            chunk.map_err(|error| io::Error::other(error.to_string()))
+        })))
+    }
 }
 
 impl Stream for ResumeSource {
@@ -687,22 +870,18 @@ impl SourceStream for ResumeSource {
         self.content_length
     }
 
-    async fn seek_range(&mut self, _start: u64, _end: Option<u64>) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "persistent sequential stream does not support random range seeks",
-        ))
+    async fn seek_range(&mut self, start: u64, end: Option<u64>) -> io::Result<()> {
+        self.request_range(start, end, false).await?;
+        self.random_accessed = true;
+        Ok(())
     }
 
-    async fn reconnect(&mut self, _current_position: u64) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "persistent sequential stream cannot reconnect in place",
-        ))
+    async fn reconnect(&mut self, current_position: u64) -> io::Result<()> {
+        self.request_range(current_position, None, true).await
     }
 
     fn supports_seek(&self) -> bool {
-        false
+        self.content_length.is_some()
     }
 
     async fn on_finish(
@@ -719,6 +898,14 @@ impl SourceStream for ResumeSource {
             .is_none_or(|content_length| content_length == file_length);
         self.metadata.complete =
             result.is_ok() && outcome == StreamOutcome::Completed && expected_complete;
+        if !self.metadata.complete && self.random_accessed {
+            let _ = tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&self.media_path)
+                .await;
+        }
         if let Ok(bytes) = serde_json::to_vec(&self.metadata) {
             let _ = tokio::fs::write(&self.metadata_path, bytes).await;
         }
@@ -739,8 +926,8 @@ impl SourceStream for ResumeSource {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Read as _;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -749,14 +936,22 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     use super::{
-        AudioCache, CacheIdentity, CachePaths, ContentRange, file_length, parse_content_range,
+        AudioCache, CacheIdentity, CachePaths, ContentRange, MAX_PREFETCH_BYTES,
+        MIN_PREFETCH_BYTES, file_length, parse_content_range, prefetch_bytes,
     };
 
     fn track(mid: &str, media_mid: &str, title: &str) -> Track {
         Track {
             song_id: None,
             mid: mid.to_owned(),
-            media_mid: media_mid.to_owned(),
+            media_mid: Some(media_mid.to_owned()),
+            standard_size_bytes: None,
+            high_size_bytes: None,
+            lossless_size_bytes: None,
+            hi_res_size_bytes: None,
+            atmos_stereo_size_bytes: None,
+            atmos_surround_size_bytes: None,
+            master_size_bytes: None,
             title: title.to_owned(),
             artists: String::new(),
             album: String::new(),
@@ -777,6 +972,7 @@ mod tests {
         assert_eq!(original.key(), renamed.key());
         assert_ne!(original.key(), lossless.key());
         assert_ne!(original.key(), replaced.key());
+        assert_eq!(original.key().len(), 32);
     }
 
     #[test]
@@ -798,6 +994,26 @@ mod tests {
         assert_eq!(parse_content_range("invalid"), None);
     }
 
+    #[test]
+    fn prefetch_tracks_the_actual_or_expected_audio_bitrate() {
+        assert_eq!(
+            prefetch_bytes(None, 0, Quality::Standard),
+            MIN_PREFETCH_BYTES
+        );
+        assert_eq!(prefetch_bytes(None, 0, Quality::High), MIN_PREFETCH_BYTES);
+        assert_eq!(prefetch_bytes(None, 0, Quality::Lossless), 750_000);
+        assert_eq!(prefetch_bytes(None, 0, Quality::HiRes), 3_000_000);
+        assert_eq!(prefetch_bytes(None, 0, Quality::Master), MAX_PREFETCH_BYTES);
+        assert_eq!(
+            prefetch_bytes(Some(120_000_000), 240, Quality::Standard),
+            3_000_000
+        );
+        assert_eq!(
+            prefetch_bytes(Some(128 * 1024), 240, Quality::HiRes),
+            128 * 1024
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn partial_cache_is_played_locally_and_resumed_with_http_range() {
         let payload: Arc<Vec<u8>> = Arc::new(
@@ -807,6 +1023,7 @@ mod tests {
         );
         let requested_ranges = Arc::new(Mutex::new(Vec::new()));
         let first_full_request = Arc::new(AtomicBool::new(true));
+        let head_requests = Arc::new(AtomicUsize::new(0));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test HTTP server");
@@ -814,14 +1031,22 @@ mod tests {
         let server = {
             let payload = payload.clone();
             let requested_ranges = requested_ranges.clone();
+            let head_requests = head_requests.clone();
             tokio::spawn(async move {
                 while let Ok((socket, _)) = listener.accept().await {
                     let payload = payload.clone();
                     let requested_ranges = requested_ranges.clone();
                     let first_full_request = first_full_request.clone();
+                    let head_requests = head_requests.clone();
                     tokio::spawn(async move {
-                        serve_audio_request(socket, payload, requested_ranges, first_full_request)
-                            .await;
+                        serve_audio_request(
+                            socket,
+                            payload,
+                            requested_ranges,
+                            first_full_request,
+                            head_requests,
+                        )
+                        .await;
                     });
                 }
             })
@@ -848,7 +1073,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let partial_length = file_length(&paths.media).await.expect("partial cache file");
-        assert!(partial_length >= 1024 * 1024);
+        assert!(partial_length >= MIN_PREFETCH_BYTES);
         assert!(partial_length < payload.len() as u64);
 
         let second = cache
@@ -882,6 +1107,164 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconnect_rotates_to_the_next_cached_cdn() {
+        let payload: Arc<Vec<u8>> = Arc::new(
+            (0..2 * 1024 * 1024)
+                .map(|index| (index % 251) as u8)
+                .collect(),
+        );
+        let primary_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind primary CDN");
+        let primary_address = primary_listener.local_addr().expect("primary CDN address");
+        let primary_server = {
+            let payload = payload.clone();
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = primary_listener.accept().await {
+                    let payload = payload.clone();
+                    tokio::spawn(async move {
+                        serve_truncated_audio_request(socket, payload).await;
+                    });
+                }
+            })
+        };
+
+        let backup_ranges = Arc::new(Mutex::new(Vec::new()));
+        let backup_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind backup CDN");
+        let backup_address = backup_listener.local_addr().expect("backup CDN address");
+        let backup_server = {
+            let payload = payload.clone();
+            let backup_ranges = backup_ranges.clone();
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = backup_listener.accept().await {
+                    let payload = payload.clone();
+                    let backup_ranges = backup_ranges.clone();
+                    tokio::spawn(async move {
+                        serve_audio_request(
+                            socket,
+                            payload,
+                            backup_ranges,
+                            Arc::new(AtomicBool::new(false)),
+                            Arc::new(AtomicUsize::new(0)),
+                        )
+                        .await;
+                    });
+                }
+            })
+        };
+
+        let root = test_cache_dir();
+        let cache = AudioCache::with_root(root.clone()).expect("create test audio cache");
+        let track = track("cdn-song", "cdn-media", "CDN failover test");
+        let prepared = cache
+            .prepare_with_fallbacks(
+                vec![
+                    format!("http://{primary_address}/audio"),
+                    format!("http://{backup_address}/audio"),
+                ],
+                &track,
+                Quality::High,
+            )
+            .await
+            .expect("prepare stream from primary CDN");
+        let bytes = tokio::task::spawn_blocking(move || {
+            let mut source = prepared.source;
+            let mut bytes = Vec::new();
+            source
+                .read_to_end(&mut bytes)
+                .expect("resume stream from backup CDN");
+            bytes
+        })
+        .await
+        .expect("CDN failover reader task");
+
+        assert_eq!(bytes, payload.as_ref().as_slice());
+        assert!(!backup_ranges.lock().expect("backup range lock").is_empty());
+
+        primary_server.abort();
+        backup_server.abort();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn uncached_seek_requests_the_target_http_range() {
+        let payload: Arc<Vec<u8>> = Arc::new(
+            (0..2 * 1024 * 1024)
+                .map(|index| (index % 251) as u8)
+                .collect(),
+        );
+        let requested_ranges = Arc::new(Mutex::new(Vec::new()));
+        let first_full_request = Arc::new(AtomicBool::new(true));
+        let head_requests = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let address = listener.local_addr().expect("test server address");
+        let server = {
+            let payload = payload.clone();
+            let requested_ranges = requested_ranges.clone();
+            let head_requests = head_requests.clone();
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = listener.accept().await {
+                    let payload = payload.clone();
+                    let requested_ranges = requested_ranges.clone();
+                    let first_full_request = first_full_request.clone();
+                    let head_requests = head_requests.clone();
+                    tokio::spawn(async move {
+                        serve_audio_request(
+                            socket,
+                            payload,
+                            requested_ranges,
+                            first_full_request,
+                            head_requests,
+                        )
+                        .await;
+                    });
+                }
+            })
+        };
+
+        let root = test_cache_dir();
+        let cache = AudioCache::with_root(root.clone()).expect("create test audio cache");
+        let track = track("seek-song", "seek-media", "Seek test");
+        let url = format!("http://{address}/audio");
+        let prepared = cache
+            .prepare_for_seek(&url, &track, Quality::High)
+            .await
+            .expect("prepare seekable stream");
+        let seek_start = 1600 * 1024_u64;
+        let read_len = 64 * 1024;
+        let bytes = tokio::task::spawn_blocking(move || {
+            let mut source = prepared.source;
+            source
+                .seek(SeekFrom::Start(seek_start))
+                .expect("seek to uncached range");
+            let mut bytes = vec![0; read_len];
+            source.read_exact(&mut bytes).expect("read sought range");
+            bytes
+        })
+        .await
+        .expect("seek reader task");
+
+        assert_eq!(
+            bytes,
+            payload[seek_start as usize..seek_start as usize + read_len]
+        );
+        assert!(
+            requested_ranges
+                .lock()
+                .expect("requested range lock")
+                .contains(&seek_start)
+        );
+        assert_eq!(head_requests.load(Ordering::SeqCst), 0);
+
+        server.abort();
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn test_cache_dir() -> std::path::PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -895,6 +1278,7 @@ mod tests {
         payload: Arc<Vec<u8>>,
         requested_ranges: Arc<Mutex<Vec<u64>>>,
         first_full_request: Arc<AtomicBool>,
+        head_requests: Arc<AtomicUsize>,
     ) {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4096];
@@ -913,15 +1297,15 @@ mod tests {
 
         let request = String::from_utf8_lossy(&request);
         let is_head = request.starts_with("HEAD ");
-        let range_start = request.lines().find_map(|line| {
-            line.trim()
-                .to_ascii_lowercase()
-                .strip_prefix("range: bytes=")
-                .and_then(|range| range.strip_suffix('-'))
-                .and_then(|start| start.parse::<u64>().ok())
+        let range = request.lines().find_map(|line| {
+            let line = line.trim().to_ascii_lowercase();
+            let range = line.strip_prefix("range: bytes=")?;
+            let (start, end) = range.split_once('-')?;
+            Some((start.parse::<u64>().ok()?, end.parse::<u64>().ok()))
         });
 
         if is_head {
+            head_requests.fetch_add(1, Ordering::SeqCst);
             let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"stream-v1\"\r\n\
                  Accept-Ranges: bytes\r\nConnection: close\r\n\r\n",
@@ -931,14 +1315,18 @@ mod tests {
             return;
         }
 
-        let start = range_start.unwrap_or_default() as usize;
-        if let Some(start) = range_start {
+        let start = range.map_or(0, |range| range.0) as usize;
+        let end = range
+            .and_then(|range| range.1)
+            .map_or(payload.len() - 1, |end| end as usize)
+            .min(payload.len() - 1);
+        if let Some((start, _)) = range {
             requested_ranges
                 .lock()
                 .expect("requested range lock")
                 .push(start);
         }
-        let status = if range_start.is_some() {
+        let status = if range.is_some() {
             "206 Partial Content"
         } else {
             "200 OK"
@@ -946,13 +1334,12 @@ mod tests {
         let mut headers = format!(
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: \"stream-v1\"\r\n\
              Accept-Ranges: bytes\r\n",
-            payload.len() - start
+            end - start + 1
         );
-        if range_start.is_some() {
+        if range.is_some() {
             headers.push_str(&format!(
-                "Content-Range: bytes {start}-{}/{}\r\n",
-                payload.len() - 1,
-                payload.len()
+                "Content-Range: bytes {start}-{end}/{}\r\n",
+                payload.len(),
             ));
         }
         headers.push_str("Connection: close\r\n\r\n");
@@ -960,7 +1347,7 @@ mod tests {
             return;
         }
 
-        if range_start.is_none() && first_full_request.swap(false, Ordering::SeqCst) {
+        if range.is_none() && first_full_request.swap(false, Ordering::SeqCst) {
             let initial = 1100 * 1024;
             if socket.write_all(&payload[..initial]).await.is_err() {
                 return;
@@ -969,7 +1356,53 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(2)).await;
             let _ = socket.write_all(&payload[initial..]).await;
         } else {
-            let _ = socket.write_all(&payload[start..]).await;
+            let _ = socket.write_all(&payload[start..=end]).await;
+        }
+    }
+
+    async fn serve_truncated_audio_request(mut socket: TcpStream, payload: Arc<Vec<u8>>) {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let Ok(read) = socket.read(&mut buffer).await else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let request = String::from_utf8_lossy(&request);
+        if request.starts_with("HEAD ") {
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"stream-v1\"\r\n\
+                 Accept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = socket.write_all(headers.as_bytes()).await;
+            return;
+        }
+        if request
+            .lines()
+            .any(|line| line.to_ascii_lowercase().starts_with("range:"))
+        {
+            let _ = socket
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .await;
+            return;
+        }
+
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"stream-v1\"\r\n\
+             Accept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+            payload.len()
+        );
+        if socket.write_all(headers.as_bytes()).await.is_ok() {
+            let _ = socket.write_all(&payload[..512 * 1024]).await;
         }
     }
 }

@@ -1,20 +1,30 @@
 use std::collections::HashSet;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
+use futures_util::StreamExt as _;
 use reqwest::Client;
-use reqwest::header::{COOKIE, REFERER};
+use reqwest::header::{ACCEPT_ENCODING, COOKIE, RANGE, REFERER};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha1::{Digest as _, Sha1};
+use tokio::sync::{Mutex, RwLock};
 
 use super::{
-    PlaylistPage, QqCredential, Quality, Track, UserPlaylist, UserPlaylistId, UserProfile,
+    PlaybackOption, PlaylistPage, QqCredential, Quality, Track, UserPlaylist, UserPlaylistId,
+    UserProfile, new_client_guid,
 };
 
 const API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
 const PROFILE_URL: &str = "https://c6.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg";
 const DEFAULT_STREAM_DOMAIN: &str = "http://dl.stream.qqmusic.qq.com/";
+const CDN_PROBE_BYTES: usize = 64 * 1024;
+const CDN_PROBE_NODE_LIMIT: usize = 4;
+const CDN_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+const DEFAULT_CDN_REFRESH: Duration = Duration::from_secs(30 * 60);
+const MIN_CDN_REFRESH: Duration = Duration::from_secs(60);
 const SIGN_PART_1_INDEXES: [usize; 8] = [23, 14, 6, 36, 16, 40, 7, 19];
 const SIGN_PART_2_INDEXES: [usize; 8] = [16, 1, 32, 12, 19, 27, 8, 5];
 const SIGN_SCRAMBLE_VALUES: [u8; 20] = [
@@ -24,10 +34,123 @@ const SIGN_SCRAMBLE_VALUES: [u8; 20] = [
 #[derive(Clone)]
 pub struct ProtocolClient {
     client: Client,
+    cdn: Arc<RwLock<CdnCache>>,
+    cdn_refresh: Arc<Mutex<()>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CdnCache {
+    client_guid: String,
+    domains: Vec<String>,
+    ranked_domains: Vec<String>,
+    test_file: String,
+    fetched_at: u64,
+    refresh_time: u64,
+    cache_time: u64,
+    expiration: u64,
+    measured_at: u64,
+}
+
+impl Default for CdnCache {
+    fn default() -> Self {
+        Self {
+            client_guid: new_client_guid(),
+            domains: Vec::new(),
+            ranked_domains: Vec::new(),
+            test_file: String::new(),
+            fetched_at: 0,
+            refresh_time: DEFAULT_CDN_REFRESH.as_secs(),
+            cache_time: DEFAULT_CDN_REFRESH.as_secs(),
+            expiration: DEFAULT_CDN_REFRESH.as_secs(),
+            measured_at: 0,
+        }
+    }
+}
+
+impl CdnCache {
+    fn normalized(mut self) -> Self {
+        if self.client_guid.trim().is_empty() {
+            self.client_guid = new_client_guid();
+        }
+
+        let mut domains = Vec::new();
+        append_unique_domains(&mut domains, self.domains);
+        let has_direct_domain = domains.iter().any(|domain| !is_ws_stream_domain(domain));
+        if has_direct_domain {
+            domains.retain(|domain| !is_ws_stream_domain(domain));
+        }
+
+        let mut ranked_domains = Vec::new();
+        append_unique_domains(&mut ranked_domains, self.ranked_domains);
+        ranked_domains.retain(|domain| domains.contains(domain));
+        append_unique_domains(&mut ranked_domains, domains.iter());
+
+        self.domains = domains;
+        self.ranked_domains = ranked_domains;
+        self.refresh_time = self.refresh_time.max(MIN_CDN_REFRESH.as_secs());
+        self.cache_time = self.cache_time.max(MIN_CDN_REFRESH.as_secs());
+        self.expiration = self.expiration.max(MIN_CDN_REFRESH.as_secs());
+        self
+    }
+
+    fn is_valid_at(&self, now: u64) -> bool {
+        self.fetched_at != 0
+            && !self.domains.is_empty()
+            && now < self.fetched_at.saturating_add(self.expiration)
+    }
+
+    fn refresh_delay_at(&self, now: u64) -> Duration {
+        if !self.is_valid_at(now) {
+            return Duration::ZERO;
+        }
+        let refresh_at = self
+            .fetched_at
+            .saturating_add(self.refresh_time.min(self.cache_time).min(self.expiration));
+        Duration::from_secs(refresh_at.saturating_sub(now))
+    }
+
+    fn measurement_is_fresh_at(&self, now: u64) -> bool {
+        self.is_valid_at(now)
+            && self.measured_at != 0
+            && now < self.measured_at.saturating_add(self.cache_time)
+    }
+
+    fn has_same_nodes(&self, other: &Self) -> bool {
+        self.domains.len() == other.domains.len()
+            && self
+                .domains
+                .iter()
+                .all(|domain| other.domains.contains(domain))
+    }
+
+    fn playback_domains_at(&self, now: u64) -> Vec<String> {
+        if self.is_valid_at(now) {
+            self.ranked_domains.clone()
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CdnProbe {
+    first_byte: Duration,
+    elapsed: Duration,
+}
+
+impl CdnProbe {
+    fn score(self) -> Duration {
+        self.first_byte.saturating_add(self.elapsed)
+    }
 }
 
 impl ProtocolClient {
     pub fn new() -> Result<Self> {
+        Self::new_with_cdn_cache(CdnCache::default())
+    }
+
+    pub fn new_with_cdn_cache(cdn_cache: CdnCache) -> Result<Self> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(120))
@@ -37,7 +160,60 @@ impl ProtocolClient {
             )
             .build()
             .context("无法创建 QQ 音乐 HTTP 客户端")?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            cdn: Arc::new(RwLock::new(cdn_cache.normalized())),
+            cdn_refresh: Arc::default(),
+        })
+    }
+
+    pub async fn cdn_refresh_delay(&self) -> Duration {
+        self.cdn.read().await.refresh_delay_at(unix_timestamp())
+    }
+
+    pub async fn refresh_cdn(&self) -> Result<CdnCache> {
+        let _refresh = self.cdn_refresh.lock().await;
+        let previous = self.cdn.read().await.clone();
+        let data = self
+            .call_anonymous(
+                "music.audioCdnDispatch.cdnDispatch",
+                "GetCdnDispatch",
+                json!({
+                    "guid": previous.client_guid.clone(),
+                    "uid": "0",
+                    "use_new_domain": 1,
+                    "use_ipv6": 1,
+                }),
+                &previous.client_guid,
+            )
+            .await
+            .context("无法获取 QQ 音乐 CDN 调度信息")?;
+        let now = unix_timestamp();
+        let mut dispatch = parse_cdn_dispatch(&data, previous.client_guid.clone(), now)?;
+
+        let reuse_measurement =
+            previous.has_same_nodes(&dispatch) && previous.measurement_is_fresh_at(now);
+        if reuse_measurement {
+            dispatch.ranked_domains = previous.ranked_domains;
+            dispatch.measured_at = previous.measured_at;
+        }
+
+        // Publish the service-provided order immediately. Probing runs in the
+        // caller's background maintenance task and never blocks song changes.
+        *self.cdn.write().await = dispatch.clone();
+
+        if !reuse_measurement
+            && !dispatch.test_file.is_empty()
+            && let Some(ranked_domains) = self
+                .rank_cdn_domains(&dispatch.domains, &dispatch.test_file)
+                .await
+        {
+            dispatch.ranked_domains = ranked_domains;
+            dispatch.measured_at = now;
+            *self.cdn.write().await = dispatch.clone();
+        }
+
+        Ok(dispatch)
     }
 
     pub async fn complete_credential(&self, mut credential: QqCredential) -> Result<QqCredential> {
@@ -70,7 +246,7 @@ impl ProtocolClient {
     }
 
     pub async fn user_profile(&self, credential: &QqCredential) -> Result<UserProfile> {
-        let profile = match self
+        let primary = self
             .call(
                 "music.UserInfo.userInfoServer",
                 "GetLoginUserInfo",
@@ -79,27 +255,69 @@ impl ProtocolClient {
                 None,
             )
             .await
-        {
-            Ok(profile) => profile,
-            Err(_) => self.fetch_legacy_profile(credential).await?,
+            .ok();
+        let primary_is_complete = primary.as_ref().is_some_and(|profile| {
+            find_string_recursively(profile, &["nickname", "nick", "userName"]).is_some()
+                && find_string_recursively(
+                    profile,
+                    &[
+                        "avatarUrl",
+                        "headurl",
+                        "headUrl",
+                        "headpic",
+                        "headPic",
+                        "logo",
+                    ],
+                )
+                .is_some()
+        });
+        let legacy = if primary_is_complete {
+            None
+        } else {
+            self.fetch_legacy_profile(credential).await.ok()
         };
+        let profiles = [primary.as_ref(), legacy.as_ref()];
 
-        let nickname = find_string_recursively(
-            &profile,
-            &["nickname", "nick", "name", "userName"],
-        )
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "QQ 音乐用户".to_owned());
-        let avatar_url =
-            find_string_recursively(&profile, &["avatarUrl", "headurl", "headUrl", "logo"])
+        let nickname = profiles
+            .into_iter()
+            .flatten()
+            .find_map(|profile| {
+                find_string_recursively(profile, &["nickname", "nick", "userName"])
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "QQ 音乐用户".to_owned());
+        let avatar_url = profiles
+            .into_iter()
+            .flatten()
+            .find_map(|profile| {
+                find_string_recursively(
+                    profile,
+                    &[
+                        "avatarUrl",
+                        "headurl",
+                        "headUrl",
+                        "headpic",
+                        "headPic",
+                        "logo",
+                    ],
+                )
                 .filter(|value| !value.trim().is_empty())
-                .map(force_https);
-        let id = find_string_recursively(
-            &profile,
-            &["str_musicid", "musicid", "music_id", "uin"],
-        )
-        .filter(|value| value != "0")
-        .unwrap_or_else(|| credential.music_id.to_string());
+            })
+            .map(force_https)
+            .or_else(|| {
+                Some(format!(
+                    "https://q1.qlogo.cn/g?b=qq&nk={}&s=100",
+                    credential.music_id
+                ))
+            });
+        let id = profiles
+            .into_iter()
+            .flatten()
+            .find_map(|profile| {
+                find_string_recursively(profile, &["str_musicid", "musicid", "music_id", "uin"])
+                    .filter(|value| value != "0")
+            })
+            .unwrap_or_else(|| credential.music_id.to_string());
 
         Ok(UserProfile {
             id,
@@ -197,8 +415,7 @@ impl ProtocolClient {
         let total = integer_field(&data, &["total_song_num", "total"])
             .unwrap_or_else(|| offset.saturating_add(tracks.len() as u64));
         let next_offset = offset.saturating_add(tracks.len() as u64);
-        let has_more = bool_field(&data, &["hasmore", "has_more"])
-            .unwrap_or(next_offset < total)
+        let has_more = bool_field(&data, &["hasmore", "has_more"]).unwrap_or(next_offset < total)
             && !tracks.is_empty();
 
         Ok(PlaylistPage {
@@ -223,16 +440,59 @@ impl ProtocolClient {
         track: &Track,
         quality: Quality,
     ) -> Result<String> {
-        let filename = playback_filename(track, quality);
+        self.playback_options_for(credential, track, &[quality])
+            .await?
+            .into_iter()
+            .next()
+            .map(|option| option.url)
+            .with_context(|| {
+                format!(
+                    "“{}”的{}当前不可播放；可能需要对应会员权益或歌曲受版权限制",
+                    track.title,
+                    quality.label()
+                )
+            })
+    }
+
+    pub async fn playback_options(
+        &self,
+        credential: &QqCredential,
+        track: &Track,
+    ) -> Result<Vec<PlaybackOption>> {
+        self.playback_options_for(credential, track, &Quality::ALL)
+            .await
+    }
+
+    async fn playback_options_for(
+        &self,
+        credential: &QqCredential,
+        track: &Track,
+        qualities: &[Quality],
+    ) -> Result<Vec<PlaybackOption>> {
+        let requests = qualities
+            .iter()
+            .copied()
+            .filter(|quality| track.metadata_allows_quality(*quality))
+            .map(|quality| (quality, playback_filename(track, quality)))
+            .collect::<Vec<_>>();
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let filenames = requests
+            .iter()
+            .map(|(_, filename)| filename.clone())
+            .collect::<Vec<_>>();
+        let song_mid = vec![track.mid.clone(); requests.len()];
+        let song_type = vec![0; requests.len()];
         let data = self
             .call(
                 "music.vkey.GetVkey",
                 "UrlGetVkey",
                 json!({
-                    "filename": [filename],
+                    "filename": filenames,
                     "guid": credential.client_guid,
-                    "songmid": [track.mid],
-                    "songtype": [0],
+                    "songmid": song_mid,
+                    "songtype": song_type,
                     "uin": credential.music_id.to_string(),
                     "ctx": 0,
                 }),
@@ -246,36 +506,90 @@ impl ProtocolClient {
             .get("midurlinfo")
             .and_then(Value::as_array)
             .context("QQ 音乐播放地址响应缺少 midurlinfo")?;
-        let entry = entries
+
+        let mut domains = self.cached_cdn_domains().await;
+        append_unique_domains(&mut domains, playback_stream_domains(&data));
+        append_unique_domain(&mut domains, DEFAULT_STREAM_DOMAIN);
+        let mut seen = HashSet::new();
+        Ok(entries
             .iter()
-            .find(|entry| string_field(entry, &["purl"]).is_some_and(|value| !value.is_empty()))
-            .or_else(|| entries.first())
-            .context("QQ 音乐没有返回播放地址候选项")?;
-
-        let purl = string_field(entry, &["purl"]).unwrap_or_default();
-        if purl.is_empty() {
-            let code = integer_field(entry, &["result"]).unwrap_or_default();
-            bail!("所选音质不可播放（上游结果码 {code}）；可能需要对应会员权益或歌曲受版权限制");
-        }
-        if purl.starts_with("http://") || purl.starts_with("https://") {
-            return Ok(purl);
-        }
-
-        let domain = data
-            .get("sip")
-            .and_then(Value::as_array)
-            .and_then(|items| {
-                items
+            .filter_map(|entry| {
+                playback_entry_succeeded(entry).then_some(())?;
+                let purl = string_field(entry, &["purl"]).filter(|purl| !purl.trim().is_empty())?;
+                let quality = requests
                     .iter()
-                    .filter_map(Value::as_str)
-                    .find(|domain| domain.contains("dl.stream"))
+                    .map(|(quality, _)| *quality)
+                    .find(|quality| playback_path_matches_quality(&purl, *quality))?;
+                seen.insert(quality).then_some(())?;
+                let mut urls = playback_urls(&domains, &purl);
+                let url = urls.first()?.clone();
+                let fallback_urls = urls.drain(1..).collect();
+                Some(PlaybackOption {
+                    quality,
+                    url,
+                    fallback_urls,
+                })
             })
-            .unwrap_or(DEFAULT_STREAM_DOMAIN);
-        Ok(format!(
-            "{}/{}",
-            domain.trim_end_matches('/'),
-            purl.trim_start_matches('/')
-        ))
+            .collect())
+    }
+
+    async fn cached_cdn_domains(&self) -> Vec<String> {
+        self.cdn.read().await.playback_domains_at(unix_timestamp())
+    }
+
+    async fn rank_cdn_domains(&self, domains: &[String], test_file: &str) -> Option<Vec<String>> {
+        let mut successful = Vec::new();
+        for (index, domain) in domains.iter().take(CDN_PROBE_NODE_LIMIT).enumerate() {
+            if let Some(probe) = self.probe_cdn(domain, test_file).await {
+                successful.push((index, probe.score()));
+            }
+        }
+        successful.sort_by_key(|(_, score)| *score);
+        if successful.is_empty() {
+            return None;
+        }
+
+        let mut ranked = Vec::with_capacity(domains.len());
+        for (index, _) in successful {
+            append_unique_domain(&mut ranked, &domains[index]);
+        }
+        append_unique_domains(&mut ranked, domains.iter().cloned());
+        Some(ranked)
+    }
+
+    async fn probe_cdn(&self, domain: &str, test_file: &str) -> Option<CdnProbe> {
+        let url = playback_url(domain, &playback_path_and_query(test_file));
+        let started = Instant::now();
+        let response = self
+            .client
+            .get(url)
+            .header(REFERER, "https://y.qq.com/")
+            .header(ACCEPT_ENCODING, "identity")
+            .header(RANGE, format!("bytes=0-{}", CDN_PROBE_BYTES - 1))
+            .timeout(CDN_PROBE_TIMEOUT)
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        let mut stream = response.bytes_stream();
+        let mut received = 0;
+        let mut first_byte = None;
+        while received < CDN_PROBE_BYTES {
+            let Some(chunk) = stream.next().await else {
+                break;
+            };
+            let chunk = chunk.ok()?;
+            if chunk.is_empty() {
+                continue;
+            }
+            first_byte.get_or_insert_with(|| started.elapsed());
+            received += chunk.len().min(CDN_PROBE_BYTES - received);
+        }
+        Some(CdnProbe {
+            first_byte: first_byte?,
+            elapsed: started.elapsed(),
+        })
     }
 
     async fn playlist_data(
@@ -340,8 +654,7 @@ impl ProtocolClient {
     }
 
     async fn fetch_legacy_profile(&self, credential: &QqCredential) -> Result<Value> {
-        self
-            .client
+        self.client
             .get(PROFILE_URL)
             .header(COOKIE, credential.cookie())
             .header(REFERER, "https://y.qq.com/")
@@ -396,14 +709,46 @@ impl ProtocolClient {
                 "param": param,
             },
         });
+        self.send_call(body, Some(credential.cookie())).await
+    }
+
+    async fn call_anonymous(
+        &self,
+        module: &str,
+        method: &str,
+        param: Value,
+        client_guid: &str,
+    ) -> Result<Value> {
+        let body = json!({
+            "comm": {
+                "ct": 19,
+                "cv": 2201,
+                "chid": "0",
+                "uin": "0",
+                "g_tk": hash33(""),
+                "guid": client_guid,
+            },
+            "result": {
+                "module": module,
+                "method": method,
+                "param": param,
+            },
+        });
+        self.send_call(body, None).await
+    }
+
+    async fn send_call(&self, body: Value, cookie: Option<String>) -> Result<Value> {
         let signature = sign(&body);
-        let response = self
+        let mut request = self
             .client
             .post(API_URL)
             .query(&[("sign", signature)])
-            .header(COOKIE, credential.cookie())
             .header(REFERER, "https://y.qq.com/portal/player.html")
-            .json(&body)
+            .json(&body);
+        if let Some(cookie) = cookie {
+            request = request.header(COOKIE, cookie);
+        }
+        let response = request
             .send()
             .await
             .context("QQ 音乐网关请求失败")?
@@ -484,9 +829,15 @@ fn parse_track(value: &Value) -> Result<Track> {
         .context("歌曲缺少标题")?;
 
     let file = value.get("file").unwrap_or(&Value::Null);
-    let media_mid = string_field(file, &["media_mid", "mediaMid"])
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| mid.clone());
+    let media_mid =
+        string_field(file, &["media_mid", "mediaMid"]).filter(|value| !value.is_empty());
+    let standard_size_bytes = integer_field(file, &["size_128mp3", "size128"]);
+    let high_size_bytes = integer_field(file, &["size_320mp3", "size320"]);
+    let lossless_size_bytes = integer_field(file, &["size_flac", "sizeflac"]);
+    let hi_res_size_bytes = integer_field(file, &["size_hires", "sizeHires"]);
+    let master_size_bytes = integer_array_field(file, &["size_new", "sizeNew"], 0);
+    let atmos_stereo_size_bytes = integer_array_field(file, &["size_new", "sizeNew"], 1);
+    let atmos_surround_size_bytes = integer_array_field(file, &["size_new", "sizeNew"], 2);
     let artists = value
         .get("singer")
         .or_else(|| value.get("singers"))
@@ -514,6 +865,13 @@ fn parse_track(value: &Value) -> Result<Track> {
         song_id: integer_field(value, &["id", "songid", "songId"]),
         mid,
         media_mid,
+        standard_size_bytes,
+        high_size_bytes,
+        lossless_size_bytes,
+        hi_res_size_bytes,
+        atmos_stereo_size_bytes,
+        atmos_surround_size_bytes,
+        master_size_bytes,
         title,
         artists,
         album: album_name,
@@ -565,6 +923,7 @@ fn playlist_from_detail(data: &Value, fallback: UserPlaylist) -> UserPlaylist {
     let value = Value::Object(info.clone());
     let mut playlist =
         parse_playlist_summary(&value, fallback.id.clone()).unwrap_or_else(|| fallback.clone());
+    playlist.title = fallback.title;
     if playlist.cover_url.is_none() {
         playlist.cover_url = fallback.cover_url;
     }
@@ -592,17 +951,190 @@ fn album_cover_url(album_mid: &str) -> Option<String> {
 fn force_https(url: String) -> String {
     url.strip_prefix("http://")
         .map(|url| format!("https://{url}"))
+        .or_else(|| url.strip_prefix("//").map(|url| format!("https://{url}")))
         .unwrap_or(url)
 }
 
 fn playback_filename(track: &Track, quality: Quality) -> String {
     let (prefix, extension) = quality.file_parts();
-    let media_mid = if track.media_mid.is_empty() {
-        &track.mid
-    } else {
-        &track.media_mid
-    };
-    format!("{prefix}{}{media_mid}{extension}", track.mid)
+    match track.media_mid.as_deref() {
+        Some(media_mid) => format!("{prefix}{media_mid}{extension}"),
+        None => format!("{prefix}{mid}{mid}{extension}", mid = track.mid),
+    }
+}
+
+fn playback_path_matches_quality(path: &str, quality: Quality) -> bool {
+    let filename = path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    let (prefix, extension) = quality.file_parts();
+    filename.starts_with(prefix) && filename.ends_with(extension)
+}
+
+fn playback_entry_succeeded(entry: &Value) -> bool {
+    integer_field(entry, &["result"]).is_none_or(|result| result == 0)
+}
+
+fn parse_cdn_dispatch(data: &Value, client_guid: String, fetched_at: u64) -> Result<CdnCache> {
+    let mut domains = Vec::new();
+    if let Some(items) = data.get("sip").and_then(Value::as_array) {
+        append_unique_domains(&mut domains, items.iter().filter_map(Value::as_str));
+    }
+    if let Some(items) = data.get("sipinfo").and_then(Value::as_array) {
+        append_unique_domains(
+            &mut domains,
+            items.iter().filter_map(|item| string_field(item, &["cdn"])),
+        );
+    }
+    let has_direct_domain = domains.iter().any(|domain| !is_ws_stream_domain(domain));
+    if has_direct_domain {
+        domains.retain(|domain| !is_ws_stream_domain(domain));
+    }
+    if domains.is_empty() {
+        bail!("QQ 音乐 CDN 调度没有返回可用节点");
+    }
+
+    let refresh_time = cdn_policy_seconds(
+        data,
+        &["refreshTime", "refresh_time"],
+        DEFAULT_CDN_REFRESH.as_secs(),
+    );
+    let cache_time = cdn_policy_seconds(data, &["cacheTime", "cache_time"], refresh_time);
+    let expiration = cdn_policy_seconds(data, &["expiration"], cache_time);
+    Ok(CdnCache {
+        client_guid,
+        ranked_domains: domains.clone(),
+        domains,
+        test_file: string_field(data, &["keepalivefile", "test_file"]).unwrap_or_default(),
+        fetched_at,
+        refresh_time,
+        cache_time,
+        expiration,
+        measured_at: 0,
+    })
+}
+
+fn cdn_policy_seconds(data: &Value, keys: &[&str], fallback: u64) -> u64 {
+    integer_field(data, keys)
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(fallback)
+        .max(MIN_CDN_REFRESH.as_secs())
+}
+
+fn playback_stream_domains(data: &Value) -> Vec<String> {
+    let mut domains = Vec::new();
+    if let Some(items) = data.get("sip").and_then(Value::as_array) {
+        append_unique_domains(&mut domains, items.iter().filter_map(Value::as_str));
+    }
+    let has_direct_domain = domains.iter().any(|domain| !is_ws_stream_domain(domain));
+    if has_direct_domain {
+        domains.retain(|domain| !is_ws_stream_domain(domain));
+    }
+    domains
+}
+
+fn append_unique_domains<I, S>(domains: &mut Vec<String>, candidates: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    for domain in candidates {
+        append_unique_domain(domains, domain.as_ref());
+    }
+}
+
+fn append_unique_domain(domains: &mut Vec<String>, domain: &str) {
+    let domain = domain.trim();
+    if domain.is_empty() || !(domain.starts_with("http://") || domain.starts_with("https://")) {
+        return;
+    }
+    let domain = format!("{}/", domain.trim_end_matches('/'));
+    if !domains.contains(&domain) {
+        domains.push(domain);
+    }
+}
+
+fn playback_urls(domains: &[String], path: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let absolute =
+        (path.starts_with("http://") || path.starts_with("https://")).then(|| path.to_owned());
+    let path = playback_path_and_query(path);
+    for domain in domains {
+        let url = playback_url(domain, &path);
+        if !urls.contains(&url) {
+            urls.push(url);
+        }
+    }
+    if let Some(absolute) = absolute
+        && !urls.contains(&absolute)
+    {
+        urls.push(absolute);
+    }
+    urls
+}
+
+fn playback_path_and_query(path: &str) -> String {
+    reqwest::Url::parse(path).map_or_else(
+        |_| path.trim_start_matches('/').to_owned(),
+        |url| {
+            let mut value = url.path().trim_start_matches('/').to_owned();
+            if let Some(query) = url.query() {
+                value.push('?');
+                value.push_str(query);
+            }
+            value
+        },
+    )
+}
+
+fn playback_url(domain: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        domain.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+#[cfg(test)]
+fn playback_stream_domain(data: &Value) -> &str {
+    data.get("sip")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            let first = items
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|domain| !domain.trim().is_empty());
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|domain| !domain.trim().is_empty() && !is_ws_stream_domain(domain))
+                .or(first)
+        })
+        .unwrap_or(DEFAULT_STREAM_DOMAIN)
+}
+
+fn is_ws_stream_domain(domain: &str) -> bool {
+    let domain = domain.trim();
+    let host = domain
+        .strip_prefix("http://")
+        .or_else(|| domain.strip_prefix("https://"))
+        .unwrap_or(domain)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default();
+    let label = host.split('.').next().unwrap_or_default();
+    label == "ws"
+        || label.strip_prefix("ws").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
@@ -616,11 +1148,24 @@ fn integer_field(value: &Value, keys: &[&str]) -> Option<u64> {
     let object = value.as_object()?;
     keys.iter()
         .find_map(|key| object.get(*key))
-        .and_then(|value| match value {
-            Value::Number(number) => number.as_u64(),
-            Value::String(value) => value.parse().ok(),
-            _ => None,
-        })
+        .and_then(integer_value)
+}
+
+fn integer_array_field(value: &Value, keys: &[&str], index: usize) -> Option<u64> {
+    let object = value.as_object()?;
+    keys.iter()
+        .find_map(|key| object.get(*key))
+        .and_then(Value::as_array)
+        .and_then(|values| values.get(index))
+        .and_then(integer_value)
+}
+
+fn integer_value(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
 }
 
 fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
@@ -669,10 +1214,7 @@ fn find_array_recursively<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Vec
     }
 }
 
-fn find_object_recursively<'a>(
-    value: &'a Value,
-    keys: &[&str],
-) -> Option<&'a Map<String, Value>> {
+fn find_object_recursively<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Map<String, Value>> {
     match value {
         Value::Object(object) => object
             .iter()
@@ -793,11 +1335,282 @@ mod tests {
         .unwrap();
 
         assert_eq!(track.mid, "song-mid");
-        assert_eq!(track.media_mid, "different-media-mid");
+        assert_eq!(track.media_mid.as_deref(), Some("different-media-mid"));
         assert_eq!(track.artists, "Artist A / Artist B");
         assert_eq!(
             playback_filename(&track, Quality::High),
-            "M800song-middifferent-media-mid.mp3"
+            "M800different-media-mid.mp3"
+        );
+
+        let track_without_media_mid = parse_track(&json!({
+            "mid": "song-mid",
+            "title": "A Song"
+        }))
+        .unwrap();
+        assert_eq!(track_without_media_mid.media_mid, None);
+        assert_eq!(
+            playback_filename(&track_without_media_mid, Quality::High),
+            "M800song-midsong-mid.mp3"
+        );
+    }
+
+    #[test]
+    fn only_zero_file_metadata_rules_out_a_quality() {
+        let missing = parse_track(&json!({
+            "mid": "missing-files",
+            "title": "Missing Files",
+            "file": {
+                "size_128mp3": 0,
+                "size_320mp3": 0,
+                "size_flac": 0,
+                "size_hires": 0,
+                "size_new": [0, 0, 0]
+            }
+        }))
+        .unwrap();
+        let available = parse_track(&json!({
+            "mid": "available-files",
+            "title": "Available Files",
+            "file": {
+                "size_128mp3": 4_000_000,
+                "size_320mp3": 10_000_000,
+                "size_flac": 30_000_000,
+                "size_hires": 42_000_000,
+                "size_new": [80_000_000, 50_000_000, 70_000_000]
+            }
+        }))
+        .unwrap();
+        let unknown = parse_track(&json!({
+            "mid": "unknown-files",
+            "title": "Unknown Files"
+        }))
+        .unwrap();
+
+        for quality in Quality::ALL {
+            assert!(!missing.metadata_allows_quality(quality));
+            assert!(available.metadata_allows_quality(quality));
+            assert!(unknown.metadata_allows_quality(quality));
+        }
+    }
+
+    #[test]
+    fn maps_advanced_quality_sizes_from_size_new_indices() {
+        let track = parse_track(&json!({
+            "mid": "advanced-files",
+            "title": "Advanced Files",
+            "file": {
+                "size_new": [80_000_000, 0, 70_000_000]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(track.master_size_bytes, Some(80_000_000));
+        assert_eq!(track.atmos_stereo_size_bytes, Some(0));
+        assert_eq!(track.atmos_surround_size_bytes, Some(70_000_000));
+        assert!(track.metadata_allows_quality(Quality::Master));
+        assert!(!track.metadata_allows_quality(Quality::AtmosStereo));
+        assert!(track.metadata_allows_quality(Quality::AtmosSurround));
+    }
+
+    #[test]
+    fn requires_a_successful_vkey_result_when_it_is_present() {
+        assert!(playback_entry_succeeded(&json!({
+            "result": 0,
+            "purl": "M500song.mp3?vkey=opaque"
+        })));
+        assert!(playback_entry_succeeded(&json!({
+            "purl": "M500song.mp3?vkey=opaque"
+        })));
+        assert!(!playback_entry_succeeded(&json!({
+            "result": 104003,
+            "purl": "M500song.mp3?vkey=opaque"
+        })));
+    }
+
+    #[test]
+    fn normalizes_qq_image_urls_to_https() {
+        assert_eq!(
+            force_https("//y.gtimg.cn/music/photo.jpg".to_owned()),
+            "https://y.gtimg.cn/music/photo.jpg"
+        );
+        assert_eq!(
+            force_https("http://y.gtimg.cn/music/photo.jpg".to_owned()),
+            "https://y.gtimg.cn/music/photo.jpg"
+        );
+    }
+
+    #[test]
+    fn playlist_detail_preserves_the_summary_title() {
+        let fallback = UserPlaylist {
+            id: UserPlaylistId::Created { tid: 30, dir_id: 0 },
+            title: "amtoaer的每日30首".to_owned(),
+            cover_url: None,
+            description: String::new(),
+            owner: "amtoaer".to_owned(),
+            track_count: 30,
+        };
+
+        let playlist = playlist_from_detail(
+            &json!({
+                "dirinfo": {
+                    "dirName": "的今日私享",
+                    "desc": "每日更新",
+                    "songNum": 30
+                }
+            }),
+            fallback,
+        );
+
+        assert_eq!(playlist.title, "amtoaer的每日30首");
+        assert_eq!(playlist.description, "每日更新");
+        assert_eq!(playlist.track_count, 30);
+    }
+
+    #[test]
+    fn validates_that_a_playback_url_matches_its_requested_quality() {
+        assert!(playback_path_matches_quality(
+            "https://example.test/RS01song.flac?vkey=opaque",
+            Quality::HiRes
+        ));
+        assert!(!playback_path_matches_quality(
+            "https://example.test/M500song.mp3?vkey=opaque",
+            Quality::HiRes
+        ));
+    }
+
+    #[test]
+    fn prefers_a_non_ws_stream_domain_returned_by_qq_music() {
+        let data = json!({
+            "sip": [
+                "http://ws6.stream.qqmusic.qq.com/",
+                "https://isure.stream.qqmusic.qq.com/",
+                "http://dl.stream.qqmusic.qq.com/"
+            ]
+        });
+
+        assert_eq!(
+            playback_stream_domain(&data),
+            "https://isure.stream.qqmusic.qq.com/"
+        );
+        assert_eq!(
+            playback_stream_domain(&json!({
+                "sip": ["https://ws.stream.qqmusic.qq.com/"]
+            })),
+            "https://ws.stream.qqmusic.qq.com/"
+        );
+        assert!(is_ws_stream_domain("http://ws12.stream.qqmusic.qq.com/"));
+        assert!(!is_ws_stream_domain("https://isure.stream.qqmusic.qq.com/"));
+        assert_eq!(
+            playback_stream_domain(&json!({ "sip": [] })),
+            DEFAULT_STREAM_DOMAIN
+        );
+    }
+
+    #[test]
+    fn parses_cdn_dispatch_nodes_and_refresh_policy() {
+        let dispatch = parse_cdn_dispatch(
+            &json!({
+                "sip": [
+                    "https://ws.stream.qqmusic.qq.com/",
+                    "https://first.example/"
+                ],
+                "sipinfo": [
+                    { "cdn": "https://first.example/", "quic": 1 },
+                    { "cdn": "https://second.example/" }
+                ],
+                "keepalivefile": "test/keepalive.bin",
+                "refreshTime": 900,
+                "cacheTime": 1800,
+                "expiration": 3600
+            }),
+            "installation-guid".to_owned(),
+            10_000,
+        )
+        .expect("parse CDN dispatch");
+
+        assert_eq!(
+            dispatch.domains,
+            ["https://first.example/", "https://second.example/"]
+        );
+        assert_eq!(dispatch.test_file, "test/keepalive.bin");
+        assert_eq!(dispatch.client_guid, "installation-guid");
+        assert_eq!(dispatch.fetched_at, 10_000);
+        assert_eq!(dispatch.refresh_time, 900);
+        assert_eq!(dispatch.cache_time, 1800);
+        assert_eq!(dispatch.expiration, 3600);
+        assert_eq!(dispatch.refresh_delay_at(10_200), Duration::from_secs(700));
+        assert_eq!(dispatch.refresh_delay_at(10_900), Duration::ZERO);
+        assert!(dispatch.is_valid_at(13_599));
+        assert!(!dispatch.is_valid_at(13_600));
+    }
+
+    #[test]
+    fn persisted_cdn_ranking_is_reused_until_its_cache_time() {
+        let mut previous = parse_cdn_dispatch(
+            &json!({
+                "sip": ["https://first.example/", "https://second.example/"],
+                "refreshTime": 900,
+                "cacheTime": 1800,
+                "expiration": 3600
+            }),
+            "installation-guid".to_owned(),
+            10_000,
+        )
+        .expect("parse previous CDN dispatch");
+        previous.ranked_domains.reverse();
+        previous.measured_at = 10_100;
+        let current = parse_cdn_dispatch(
+            &json!({
+                "sip": ["https://second.example/", "https://first.example/"],
+                "refreshTime": 900,
+                "cacheTime": 1800,
+                "expiration": 3600
+            }),
+            "installation-guid".to_owned(),
+            10_900,
+        )
+        .expect("parse current CDN dispatch");
+
+        assert!(previous.has_same_nodes(&current));
+        assert!(previous.measurement_is_fresh_at(11_899));
+        assert!(!previous.measurement_is_fresh_at(11_900));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live QQ Music network access"]
+    async fn anonymously_loads_cdn_dispatch() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = ProtocolClient::new().expect("create protocol client");
+
+        let cache = client
+            .refresh_cdn()
+            .await
+            .expect("load anonymous CDN dispatch");
+
+        assert!(!cache.domains.is_empty());
+        assert!(cache.refresh_time > 0);
+        assert!(cache.cache_time > 0);
+        assert!(cache.expiration > 0);
+    }
+
+    #[test]
+    fn builds_cdn_fallbacks_without_changing_the_vkey_path() {
+        let domains = vec![
+            "https://fast.example/".to_owned(),
+            "https://backup.example/".to_owned(),
+        ];
+        let urls = playback_urls(
+            &domains,
+            "https://original.example/C400media.m4a?vkey=opaque",
+        );
+
+        assert_eq!(
+            urls,
+            [
+                "https://fast.example/C400media.m4a?vkey=opaque",
+                "https://backup.example/C400media.m4a?vkey=opaque",
+                "https://original.example/C400media.m4a?vkey=opaque",
+            ]
         );
     }
 

@@ -49,6 +49,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a system keyring entry and live QQ Music network access"]
     async fn stored_credential_loads_liked_tracks() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let Some(credential) = CredentialStore::load().expect("read system keyring") else {
             eprintln!("no stored QQ Music credential in this test process");
             return;
@@ -67,7 +68,7 @@ mod tests {
             Duration::from_secs(30),
             ProtocolClient::new()
                 .expect("create protocol client")
-                .liked_tracks(&credential, 100),
+                .liked_tracks(&credential, 1),
         )
         .await
         .expect("liked tracks request timed out")
@@ -77,5 +78,25 @@ mod tests {
             tracks.len(),
             liked_started.elapsed()
         );
+
+        if let Some(track) = tracks.first() {
+            let options = ProtocolClient::new()
+                .expect("create protocol client")
+                .playback_options(&credential, track)
+                .await
+                .expect("load playback options");
+            assert!(
+                !options.is_empty(),
+                "first liked track has no playable quality"
+            );
+            eprintln!(
+                "available qualities for first track: {}",
+                options
+                    .iter()
+                    .map(|option| option.quality.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
 }

@@ -1,0 +1,93 @@
+# Maintainer: amtoaer <amtoaer@gmail.com>
+
+# Keep this recipe in sync with PKGBUILD except for the package identity and
+# build-host CPU optimization.
+_pkgname=lyrune
+pkgname=lyrune-git-native
+pkgver=0.1.0.r9.g6492cf5
+pkgrel=1
+pkgdesc='Fast native QQ Music desktop client optimized for the build host CPU'
+arch=('x86_64')
+url='https://github.com/amtoaer/lyrune'
+license=('LicenseRef-Unknown')
+options=('!lto')
+depends=(
+  'alsa-lib'
+  'fontconfig'
+  'glibc'
+  'libgcc'
+  'libxcb'
+  'libxkbcommon'
+  'libxkbcommon-x11'
+  'vulkan-driver'
+  'vulkan-icd-loader'
+  'wayland'
+)
+makedepends=(
+  'cargo'
+  'git'
+  'pkgconf'
+)
+optdepends=('org.freedesktop.secrets: persist QQ Music credentials')
+provides=("${_pkgname}=${pkgver}" "lyrune-git=${pkgver}")
+conflicts=("${_pkgname}" 'lyrune-git')
+source=(
+  "${_pkgname}::git+${url}.git"
+  "${_pkgname}.desktop"
+  'license-unknown.txt'
+)
+b2sums=(
+  'SKIP'
+  '4a0e99da53dc0ed10e981f1c238899a42b449fed09def48be4792b71d86fe4977173ce64c8dc5c018369d7cc4147f97ff9cbe972b252020b1cfecd5fd949a54c'
+  '81fff22f559994a6faff79982a26c0b870cd29ace43dac243a32c8bf867dacd170a9292b2e52fdc8b97771cbd811ab5124c6ae4fdd6e4ce757f780c97123698c'
+)
+
+pkgver() {
+  cd "${_pkgname}"
+
+  local version
+  version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+  printf '%s.r%s.g%s' \
+    "${version}" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+  cd "${_pkgname}"
+
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "${CARCH}-unknown-linux-gnu"
+}
+
+build() {
+  cd "${_pkgname}"
+
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export RUSTFLAGS="${RUSTFLAGS} -C target-cpu=native --remap-path-prefix=${srcdir}=/usr/src/debug/${pkgname}"
+  cargo build --frozen --release --package lyrune
+}
+
+check() {
+  cd "${_pkgname}"
+
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  export RUSTFLAGS="${RUSTFLAGS} -C target-cpu=native --remap-path-prefix=${srcdir}=/usr/src/debug/${pkgname}"
+  cargo test --frozen --release --workspace
+}
+
+package() {
+  cd "${_pkgname}"
+
+  install -Dm755 target/release/lyrune "${pkgdir}/usr/bin/lyrune"
+  install -Dm644 "${srcdir}/lyrune.desktop" \
+    "${pkgdir}/usr/share/applications/lyrune.desktop"
+  install -Dm644 crates/lyrune-app/assets/lyrune.svg \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/lyrune.svg"
+  install -Dm644 THIRD_PARTY_NOTICES.md \
+    "${pkgdir}/usr/share/doc/lyrune/THIRD_PARTY_NOTICES.md"
+  install -Dm644 "${srcdir}/license-unknown.txt" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/license-unknown.txt"
+}

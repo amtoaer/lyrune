@@ -111,6 +111,14 @@ PKGDEST="$(realpath ../../dist/arch)" makepkg -si
 
 生成的包名为 `lyrune-git`，同时会安装应用菜单项和 SVG 图标。
 
+如果安装包只在构建机或具有兼容指令集的机器上使用，可以构建针对本机 CPU 优化的 `lyrune-git-native`：
+
+```bash
+PKGDEST="$(realpath ../../dist/arch)" makepkg -p PKGBUILD.native -si
+```
+
+该版本会向 Rust 编译器传递 `-C target-cpu=native`，因此不适合分发到 CPU 型号或指令集未知的机器。
+
 ## 数据与缓存
 
 Lyrune 使用系统标准目录保存数据。在 Linux 上主要包括：

@@ -239,6 +239,7 @@ pub struct LyruneView {
     play_generation: u64,
     account_menu_open: bool,
     _subscriptions: Vec<Subscription>,
+    _window_subscription: Option<Subscription>,
 }
 
 impl LyruneView {
@@ -350,33 +351,12 @@ impl LyruneView {
                     }
                 },
             ),
-            cx.observe_window_bounds(window, |this, window, _| {
-                let size = window.window_bounds().get_bounds().size;
-                let width = f32::from(size.width).round() as u32;
-                let height = f32::from(size.height).round() as u32;
-                if width > 0 && height > 0 {
-                    this.settings.window_size = Some(PersistedWindowSize { width, height });
-                }
-            }),
         ];
 
         cx.spawn(async move |this, cx| {
             while load_more_receiver.recv().await.is_ok() {
                 if this
                     .update(cx, |this, cx| this.load_playlist_page(cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor().timer(PROGRESS_TICK).await;
-                if this
-                    .update_in(cx, |this, window, cx| this.tick(window, cx))
                     .is_err()
                 {
                     break;
@@ -438,10 +418,42 @@ impl LyruneView {
             play_generation: 0,
             account_menu_open: false,
             _subscriptions: subscriptions,
+            _window_subscription: None,
         };
+        view.attach_window(window, cx);
         view.start_cdn_maintenance();
         view.restore_credential(cx);
         view
+    }
+
+    pub(crate) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._window_subscription = Some(cx.observe_window_bounds(window, |this, window, _| {
+            let size = window.window_bounds().get_bounds().size;
+            let width = f32::from(size.width).round() as u32;
+            let height = f32::from(size.height).round() as u32;
+            if width > 0 && height > 0 {
+                this.settings.window_size = Some(PersistedWindowSize { width, height });
+            }
+        }));
+    }
+
+    pub(crate) fn start_background_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PROGRESS_TICK).await;
+                if this
+                    .update_in(cx, |this, window, cx| this.tick(window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn window_size(&self) -> Option<PersistedWindowSize> {
+        self.settings.window_size
     }
 
     fn restore_credential(&mut self, cx: &mut Context<Self>) {

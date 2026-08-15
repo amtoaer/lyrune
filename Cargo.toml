@@ -37,6 +37,7 @@ gpui-platform = { package = "gpui_platform", git = "https://github.com/zed-indus
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 keyring = "4.1.6"
+ksni = { version = "0.3.6", features = ["blocking"] }
 md5 = "0.8"
 qrcode = "0.14.1"
 qqmusic-api = { package = "netease-qq-music-api", path = "crates/qqmusic-api" }
@@ -66,5 +67,6 @@ thiserror = "2"
 time = "0.3.47"
 tokio = { version = "1.47", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
+tray-icon = { version = "0.24.2", default-features = false }
 uuid = { version = "1.18", features = ["v4"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

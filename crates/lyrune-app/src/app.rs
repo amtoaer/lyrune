@@ -138,6 +138,27 @@ enum MainContent {
     Playlist,
 }
 
+#[derive(Clone, Copy)]
+enum PlaylistCachePolicy {
+    Fresh,
+    AllowStale,
+}
+
+#[derive(Clone, Copy)]
+struct PlaylistScrollPosition {
+    row: usize,
+    offset_y: Pixels,
+}
+
+impl PlaylistScrollPosition {
+    fn top() -> Self {
+        Self {
+            row: 0,
+            offset_y: px(0.),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SearchCategory {
     Songs,
@@ -209,6 +230,18 @@ fn insert_track_after_current(
     insert_index
 }
 
+fn resolved_playlist_scroll_row(
+    requested_row: usize,
+    track_count: usize,
+    has_more: bool,
+) -> Option<usize> {
+    if requested_row >= track_count && has_more {
+        None
+    } else {
+        Some(requested_row.min(track_count.saturating_sub(1)))
+    }
+}
+
 #[derive(Clone)]
 enum NavigationPage {
     Home,
@@ -222,7 +255,7 @@ enum NavigationPage {
     Playlist {
         playlist: UserPlaylist,
         selected_index: Option<usize>,
-        scroll_row: usize,
+        scroll_position: PlaylistScrollPosition,
     },
 }
 
@@ -403,6 +436,7 @@ pub struct LyruneView {
     selected_playlist: Option<UserPlaylist>,
     page_offset: u64,
     page_loading: bool,
+    pending_playlist_scroll_position: Option<PlaylistScrollPosition>,
     library_generation: u64,
     playlist_generation: u64,
     playlist_force_refresh: bool,
@@ -633,6 +667,7 @@ impl LyruneView {
             selected_playlist: None,
             page_offset: 0,
             page_loading: false,
+            pending_playlist_scroll_position: None,
             library_generation: 0,
             playlist_generation: 0,
             playlist_force_refresh: false,
@@ -975,15 +1010,24 @@ impl LyruneView {
                 .selected_artist
                 .clone()
                 .map(|artist| NavigationPage::Artist { artist }),
-            MainContent::Playlist => {
-                self.selected_playlist
-                    .clone()
-                    .map(|playlist| NavigationPage::Playlist {
-                        playlist,
-                        selected_index: self.selected_playlist_index,
-                        scroll_row: self.track_table.read(cx).visible_range().rows().start,
-                    })
-            }
+            MainContent::Playlist => self.selected_playlist.clone().map(|playlist| {
+                let table = self.track_table.read(cx);
+                let scroll_position = PlaylistScrollPosition {
+                    row: table.visible_range().rows().start,
+                    offset_y: table
+                        .vertical_scroll_handle
+                        .0
+                        .borrow()
+                        .base_handle
+                        .offset()
+                        .y,
+                };
+                NavigationPage::Playlist {
+                    playlist,
+                    selected_index: self.selected_playlist_index,
+                    scroll_position,
+                }
+            }),
         }
     }
 
@@ -1028,12 +1072,19 @@ impl LyruneView {
             NavigationPage::Playlist {
                 playlist,
                 selected_index,
-                scroll_row,
+                scroll_position,
             } => {
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(selected_index.map(IndexPath::new), window, cx);
                 });
-                self.open_playlist(playlist, selected_index, false, scroll_row, cx);
+                self.open_playlist(
+                    playlist,
+                    selected_index,
+                    false,
+                    PlaylistCachePolicy::AllowStale,
+                    scroll_position,
+                    cx,
+                );
             }
         }
     }
@@ -1642,12 +1693,19 @@ impl LyruneView {
             let target = NavigationPage::Playlist {
                 playlist: playlist.clone(),
                 selected_index: Some(index),
-                scroll_row: 0,
+                scroll_position: PlaylistScrollPosition::top(),
             };
             let current = self.current_navigation_page(cx);
             self.navigation_history.record(current, &target);
         }
-        self.open_playlist(playlist, Some(index), force_refresh, 0, cx);
+        self.open_playlist(
+            playlist,
+            Some(index),
+            force_refresh,
+            PlaylistCachePolicy::Fresh,
+            PlaylistScrollPosition::top(),
+            cx,
+        );
     }
 
     fn open_search_artist(
@@ -1913,14 +1971,52 @@ impl LyruneView {
         let target = NavigationPage::Playlist {
             playlist: playlist.clone(),
             selected_index: None,
-            scroll_row: 0,
+            scroll_position: PlaylistScrollPosition::top(),
         };
         let current = self.current_navigation_page(cx);
         self.navigation_history.record(current, &target);
         self.playlist_list.update(cx, |list, cx| {
             list.set_selected_index(None, window, cx);
         });
-        self.open_playlist(playlist, None, false, 0, cx);
+        self.open_playlist(
+            playlist,
+            None,
+            false,
+            PlaylistCachePolicy::Fresh,
+            PlaylistScrollPosition::top(),
+            cx,
+        );
+    }
+
+    fn restore_pending_playlist_scroll(&mut self, cx: &mut Context<Self>) {
+        let Some(position) = self.pending_playlist_scroll_position else {
+            return;
+        };
+        let target_row = {
+            let table = self.track_table.read(cx);
+            resolved_playlist_scroll_row(
+                position.row,
+                table.delegate().tracks().len(),
+                table.delegate().has_more(),
+            )
+        };
+        let Some(target_row) = target_row else {
+            return;
+        };
+        self.pending_playlist_scroll_position = None;
+        self.track_table.update(cx, |table, cx| {
+            if target_row == position.row {
+                let scroll_state = &mut *table.vertical_scroll_handle.0.borrow_mut();
+                scroll_state.deferred_scroll_to_item = None;
+                let current_offset = scroll_state.base_handle.offset();
+                scroll_state
+                    .base_handle
+                    .set_offset(point(current_offset.x, position.offset_y));
+            } else {
+                table.scroll_to_row(target_row, cx);
+            }
+            cx.notify();
+        });
     }
 
     fn open_playlist(
@@ -1928,7 +2024,8 @@ impl LyruneView {
         playlist: UserPlaylist,
         selected_index: Option<usize>,
         force_refresh: bool,
-        scroll_row: usize,
+        cache_policy: PlaylistCachePolicy,
+        scroll_position: PlaylistScrollPosition,
         cx: &mut Context<Self>,
     ) {
         self.main_content = MainContent::Playlist;
@@ -1940,6 +2037,7 @@ impl LyruneView {
         self.selected_playlist = Some(playlist.clone());
         self.page_offset = 0;
         self.page_loading = false;
+        self.pending_playlist_scroll_position = Some(scroll_position);
         if let Some(index) = selected_index {
             self.playlist_list.update(cx, |list, cx| {
                 list.delegate_mut().set_selected(index);
@@ -1950,21 +2048,26 @@ impl LyruneView {
             table.clear_selection(cx);
             table.delegate_mut().reset();
             table.refresh(cx);
-            table.scroll_to_row(scroll_row, cx);
             cx.notify();
         });
-        if !force_refresh
-            && let Some(account_id) = self
-                .credential
+        let cached_snapshot = if force_refresh {
+            None
+        } else {
+            self.credential
                 .as_ref()
-                .map(|credential| credential.music_id)
-            && let Some(snapshot) = self.library_cache.fresh_playlist(
-                account_id,
-                &playlist.id,
-                unix_timestamp_secs(),
-                LIBRARY_CACHE_TTL,
-            )
-        {
+                .and_then(|credential| match cache_policy {
+                    PlaylistCachePolicy::Fresh => self.library_cache.fresh_playlist(
+                        credential.music_id,
+                        &playlist.id,
+                        unix_timestamp_secs(),
+                        LIBRARY_CACHE_TTL,
+                    ),
+                    PlaylistCachePolicy::AllowStale => self
+                        .library_cache
+                        .cached_playlist(credential.music_id, &playlist.id),
+                })
+        };
+        if let Some(snapshot) = cached_snapshot {
             self.playlist_cache_revision = snapshot.revision;
             self.page_offset = snapshot.next_offset;
             self.selected_playlist = Some(snapshot.playlist.clone());
@@ -1983,6 +2086,7 @@ impl LyruneView {
                 table.refresh(cx);
                 cx.notify();
             });
+            self.restore_pending_playlist_scroll(cx);
             self.status = StatusMessage::info(if track_count == 0 {
                 format!("歌单“{}”中暂时没有歌曲", snapshot.playlist.title)
             } else {
@@ -1990,6 +2094,9 @@ impl LyruneView {
             });
             self.sync_table_playback_state(cx);
             cx.notify();
+            if self.pending_playlist_scroll_position.is_some() {
+                self.load_playlist_page(cx);
+            }
             return;
         }
         self.status = StatusMessage::info(format!("正在加载歌单“{}”…", playlist.title));
@@ -2083,6 +2190,10 @@ impl LyruneView {
                             } else {
                                 format!("已打开歌单“{}”", page.playlist.title)
                             });
+                        }
+                        this.restore_pending_playlist_scroll(cx);
+                        if this.pending_playlist_scroll_position.is_some() {
+                            this.load_playlist_page(cx);
                         }
                     }
                     Err(error) => {
@@ -5439,7 +5550,11 @@ impl Render for LyruneView {
 
 #[cfg(test)]
 mod tests {
-    use super::{NavigationHistory, NavigationPage, SearchCategory, insert_track_after_current};
+    use super::{
+        NavigationHistory, NavigationPage, PlaylistScrollPosition, SearchCategory,
+        insert_track_after_current, resolved_playlist_scroll_row,
+    };
+    use gpui::{Pixels, px};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
 
     fn track(mid: &str) -> Track {
@@ -5474,6 +5589,14 @@ mod tests {
     }
 
     fn playlist_at_scroll_row(diss_id: u64, scroll_row: usize) -> NavigationPage {
+        playlist_at_scroll_position(diss_id, scroll_row, px(0.))
+    }
+
+    fn playlist_at_scroll_position(
+        diss_id: u64,
+        scroll_row: usize,
+        offset_y: Pixels,
+    ) -> NavigationPage {
         NavigationPage::Playlist {
             playlist: UserPlaylist {
                 id: UserPlaylistId::Favorite { diss_id },
@@ -5485,7 +5608,10 @@ mod tests {
                 track_count: 0,
             },
             selected_index: None,
-            scroll_row,
+            scroll_position: PlaylistScrollPosition {
+                row: scroll_row,
+                offset_y,
+            },
         }
     }
 
@@ -5513,8 +5639,8 @@ mod tests {
     }
 
     #[test]
-    fn playlist_history_keeps_its_scroll_row() {
-        let playlist = playlist_at_scroll_row(1, 37);
+    fn playlist_history_keeps_its_exact_scroll_position() {
+        let playlist = playlist_at_scroll_position(1, 37, px(-18.));
         let mut history = NavigationHistory::default();
 
         history.record(Some(playlist), &NavigationPage::Home);
@@ -5522,10 +5648,21 @@ mod tests {
             .go_back(Some(NavigationPage::Home))
             .expect("playlist history entry");
 
-        assert!(matches!(
-            restored,
-            NavigationPage::Playlist { scroll_row: 37, .. }
-        ));
+        let NavigationPage::Playlist {
+            scroll_position, ..
+        } = restored
+        else {
+            panic!("restored playlist history entry");
+        };
+        assert_eq!(scroll_position.row, 37);
+        assert_eq!(scroll_position.offset_y, px(-18.));
+    }
+
+    #[test]
+    fn playlist_scroll_waits_until_the_requested_row_is_loaded() {
+        assert_eq!(resolved_playlist_scroll_row(120, 100, true), None);
+        assert_eq!(resolved_playlist_scroll_row(120, 200, true), Some(120));
+        assert_eq!(resolved_playlist_scroll_row(250, 200, false), Some(199));
     }
 
     #[test]

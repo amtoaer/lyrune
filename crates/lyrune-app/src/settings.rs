@@ -261,6 +261,25 @@ impl LibraryCache {
             })
     }
 
+    pub fn cached_playlist(
+        &self,
+        account_id: u64,
+        playlist_id: &UserPlaylistId,
+    ) -> Option<PlaylistSnapshot> {
+        self.playlists
+            .iter()
+            .find(|snapshot| {
+                snapshot.account_id == account_id && snapshot.playlist.id == *playlist_id
+            })
+            .map(|snapshot| PlaylistSnapshot {
+                revision: snapshot.revision,
+                playlist: snapshot.playlist.clone(),
+                tracks: snapshot.tracks.clone(),
+                has_more: snapshot.has_more,
+                next_offset: snapshot.next_offset,
+            })
+    }
+
     pub fn store_playlist_page(
         &mut self,
         account_id: u64,
@@ -600,6 +619,14 @@ mod tests {
             cache
                 .fresh_playlist(10001, &playlist.id, 400, Duration::from_secs(300))
                 .is_none()
+        );
+        assert_eq!(
+            cache
+                .cached_playlist(10001, &playlist.id)
+                .expect("stale snapshot remains available within the session")
+                .tracks
+                .len(),
+            2
         );
 
         assert!(cache.store_playlist_page(

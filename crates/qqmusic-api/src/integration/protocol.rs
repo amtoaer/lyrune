@@ -12,9 +12,11 @@ use serde_json::{Map, Value, json};
 use sha1::{Digest as _, Sha1};
 use tokio::sync::{Mutex, RwLock};
 
+use crate::platform::get_search_id;
+
 use super::{
-    PlaybackOption, PlaylistPage, QqCredential, Quality, Track, UserPlaylist, UserPlaylistId,
-    UserProfile, new_client_guid,
+    PlaybackOption, PlaylistPage, QqCredential, Quality, RadarTrackPage, SearchAlbum, SearchArtist,
+    SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId, UserProfile, new_client_guid,
 };
 
 const API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
@@ -237,9 +239,9 @@ impl ProtocolClient {
 
         if credential.encrypted_uin.trim().is_empty() {
             if let Some(error) = refresh_error {
-                bail!("登录成功，但无法补全“我喜欢”所需的用户标识：{error:#}");
+                bail!("登录成功，但无法补全“已点赞的歌曲”所需的用户标识：{error:#}");
             }
-            bail!("登录成功，但 QQ 音乐没有返回“我喜欢”所需的用户标识");
+            bail!("登录成功，但 QQ 音乐没有返回“已点赞的歌曲”所需的用户标识");
         }
 
         Ok(credential)
@@ -330,7 +332,7 @@ impl ProtocolClient {
         let liked_data = self
             .playlist_data(credential, &UserPlaylistId::Liked, 0, 1)
             .await
-            .context("无法读取“我喜欢”概要")?;
+            .context("无法读取“已点赞的歌曲”概要")?;
         let mut liked = playlist_from_detail(&liked_data, UserPlaylist::liked());
         liked.track_count =
             integer_field(&liked_data, &["total_song_num", "total"]).unwrap_or_default();
@@ -392,6 +394,189 @@ impl ProtocolClient {
         Ok(playlists)
     }
 
+    pub async fn recommended_playlists(
+        &self,
+        credential: &QqCredential,
+        offset: u64,
+        limit: u64,
+    ) -> Result<SearchPage<UserPlaylist>> {
+        let limit = limit.clamp(1, 100);
+        let data = self
+            .call(
+                "music.playlist.PlaylistSquare",
+                "GetRecommendFeed",
+                json!({
+                    "From": offset,
+                    "Size": limit,
+                }),
+                credential,
+                None,
+            )
+            .await
+            .context("无法加载 QQ 音乐推荐歌单")?;
+        parse_recommended_playlist_page(&data, offset)
+    }
+
+    pub async fn radar_tracks(
+        &self,
+        credential: &QqCredential,
+        page: u64,
+    ) -> Result<RadarTrackPage> {
+        let page = page.max(1);
+        let data = self
+            .call(
+                "music.recommend.TrackRelationServer",
+                "GetRadarSong",
+                json!({
+                    "Page": page,
+                    "ReqType": 0,
+                    "FavSongs": [],
+                    "EntranceSongs": [],
+                }),
+                credential,
+                None,
+            )
+            .await
+            .context("无法加载 QQ 音乐专属雷达")?;
+        let tracks = recommendation_tracks(&data, &["VecSongs", "vecSongs"])
+            .context("QQ 音乐专属雷达数据格式发生了变化")?;
+        let has_more =
+            bool_field(&data, &["HasMore", "hasMore", "has_more"]).unwrap_or(!tracks.is_empty());
+        Ok(RadarTrackPage {
+            tracks,
+            has_more,
+            next_page: page.saturating_add(1),
+        })
+    }
+
+    pub async fn guess_tracks(&self, credential: &QqCredential, limit: u64) -> Result<Vec<Track>> {
+        let data = self
+            .call(
+                "music.radioProxy.MbTrackRadioSvr",
+                "get_radio_track",
+                json!({
+                    "id": 99,
+                    "num": limit.clamp(1, 30),
+                    "from": 0,
+                    "scene": 0,
+                    "song_ids": [],
+                }),
+                credential,
+                None,
+            )
+            .await
+            .context("无法加载 QQ 音乐猜你喜欢")?;
+        recommendation_tracks(&data, &["Tracks", "tracks"])
+            .context("QQ 音乐猜你喜欢数据格式发生了变化")
+    }
+
+    pub async fn search(
+        &self,
+        credential: &QqCredential,
+        query: &str,
+        limit: u64,
+    ) -> Result<SearchResults> {
+        let query = query.trim();
+        if query.is_empty() {
+            bail!("搜索关键词不能为空");
+        }
+        let (songs, artists, albums, playlists) = tokio::try_join!(
+            self.search_songs(credential, query, 0, limit),
+            self.search_artists(credential, query, 0, limit),
+            self.search_albums(credential, query, 0, limit),
+            self.search_playlists(credential, query, 0, limit),
+        )?;
+        Ok(SearchResults {
+            songs,
+            artists,
+            albums,
+            playlists,
+        })
+    }
+
+    pub async fn search_songs(
+        &self,
+        credential: &QqCredential,
+        query: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<SearchPage<Track>> {
+        let data = self
+            .search_data(credential, query, 0, offset, limit)
+            .await?;
+        parse_search_page(&data, "song", offset, parse_track)
+            .context("QQ 音乐单曲搜索结果格式发生了变化")
+    }
+
+    pub async fn search_artists(
+        &self,
+        credential: &QqCredential,
+        query: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<SearchPage<SearchArtist>> {
+        let data = self
+            .search_data(credential, query, 1, offset, limit)
+            .await?;
+        parse_search_page(&data, "singer", offset, parse_search_artist)
+            .context("QQ 音乐歌手搜索结果格式发生了变化")
+    }
+
+    pub async fn search_albums(
+        &self,
+        credential: &QqCredential,
+        query: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<SearchPage<SearchAlbum>> {
+        let data = self
+            .search_data(credential, query, 2, offset, limit)
+            .await?;
+        parse_search_page(&data, "album", offset, parse_search_album)
+            .context("QQ 音乐专辑搜索结果格式发生了变化")
+    }
+
+    pub async fn search_playlists(
+        &self,
+        credential: &QqCredential,
+        query: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<SearchPage<UserPlaylist>> {
+        let data = self
+            .search_data(credential, query, 3, offset, limit)
+            .await?;
+        parse_search_page(&data, "songlist", offset, parse_search_playlist)
+            .context("QQ 音乐歌单搜索结果格式发生了变化")
+    }
+
+    pub async fn artist_albums(
+        &self,
+        credential: &QqCredential,
+        artist: &SearchArtist,
+        offset: u64,
+        limit: u64,
+    ) -> Result<SearchPage<SearchAlbum>> {
+        let limit = limit.clamp(1, 100);
+        let data = self
+            .call(
+                "music.musichallAlbum.AlbumListServer",
+                "GetAlbumList",
+                json!({
+                    "singerMid": artist.mid,
+                    "begin": offset,
+                    "number": limit,
+                    "order": 1,
+                }),
+                credential,
+                None,
+            )
+            .await
+            .with_context(|| format!("无法加载歌手“{}”的专辑", artist.name))?;
+        parse_artist_album_page(&data, artist, offset, limit)
+            .context("QQ 音乐歌手专辑列表格式发生了变化")
+    }
+
     pub async fn playlist_page(
         &self,
         credential: &QqCredential,
@@ -400,11 +585,50 @@ impl ProtocolClient {
         limit: u64,
     ) -> Result<PlaylistPage> {
         let limit = limit.clamp(1, 100);
-        let data = self
-            .playlist_data(credential, &playlist.id, offset, limit)
-            .await
-            .with_context(|| format!("无法加载 QQ 音乐歌单“{}”", playlist.title))?;
-        let songs = find_array_recursively(&data, &["songlist"])
+        let data = match &playlist.id {
+            UserPlaylistId::Artist { mid } => {
+                self.call(
+                    "music.musichallSong.SongListInter",
+                    "GetSingerSongList",
+                    json!({
+                        "singerMid": mid,
+                        "begin": offset,
+                        "num": limit,
+                        "order": 1,
+                    }),
+                    credential,
+                    None,
+                )
+                .await
+            }
+            UserPlaylistId::Album { mid } => {
+                self.call(
+                    "music.musichallAlbum.AlbumSongList",
+                    "GetAlbumSongList",
+                    json!({
+                        "albumMid": mid,
+                        "begin": offset,
+                        "num": limit,
+                        "order": 2,
+                    }),
+                    credential,
+                    None,
+                )
+                .await
+            }
+            UserPlaylistId::Search { .. } => {
+                bail!("搜索播放队列只能从本地缓存恢复")
+            }
+            UserPlaylistId::Recommendation { .. } => {
+                bail!("推荐播放队列不使用歌单详情接口")
+            }
+            _ => {
+                self.playlist_data(credential, &playlist.id, offset, limit)
+                    .await
+            }
+        }
+        .with_context(|| format!("无法加载 QQ 音乐媒体集合“{}”", playlist.title))?;
+        let songs = find_array_recursively(&data, &["songlist", "song_list"])
             .cloned()
             .unwrap_or_default();
         let tracks = songs
@@ -412,14 +636,18 @@ impl ProtocolClient {
             .map(parse_track)
             .collect::<Result<Vec<_>>>()
             .with_context(|| format!("QQ 音乐歌单“{}”的数据格式发生了变化", playlist.title))?;
-        let total = integer_field(&data, &["total_song_num", "total"])
+        let total = integer_field(&data, &["total_song_num", "total", "totalNum", "total_num"])
             .unwrap_or_else(|| offset.saturating_add(tracks.len() as u64));
         let next_offset = offset.saturating_add(tracks.len() as u64);
         let has_more = bool_field(&data, &["hasmore", "has_more"]).unwrap_or(next_offset < total)
             && !tracks.is_empty();
 
+        let mut resolved_playlist = playlist_from_detail(&data, playlist.clone());
+        if resolved_playlist.track_count == 0 {
+            resolved_playlist.track_count = total;
+        }
         Ok(PlaylistPage {
-            playlist: playlist_from_detail(&data, playlist.clone()),
+            playlist: resolved_playlist,
             tracks,
             total,
             has_more,
@@ -602,16 +830,25 @@ impl ProtocolClient {
         let (diss_id, dir_id, encrypted_uin) = match id {
             UserPlaylistId::Liked => (0, 201, Some(credential.encrypted_uin.as_str())),
             UserPlaylistId::Created { tid, .. } => (*tid, 0, None),
-            UserPlaylistId::Favorite { diss_id } => (*diss_id, 0, None),
+            UserPlaylistId::Favorite { diss_id } | UserPlaylistId::Recommended { diss_id } => {
+                (*diss_id, 0, None)
+            }
+            UserPlaylistId::Artist { .. }
+            | UserPlaylistId::Album { .. }
+            | UserPlaylistId::Search { .. }
+            | UserPlaylistId::Recommendation { .. } => {
+                bail!("该媒体集合不使用歌单详情接口")
+            }
         };
         let mut param = json!({
             "disstid": diss_id,
             "dirid": dir_id,
-            "tag": true,
+            "tag": 1,
             "song_begin": offset,
             "song_num": limit.clamp(1, 100),
-            "userinfo": true,
-            "orderlist": true,
+            "userinfo": 1,
+            "orderlist": 1,
+            "onlysonglist": 0,
         });
         if let Some(encrypted_uin) = encrypted_uin {
             param
@@ -627,6 +864,34 @@ impl ProtocolClient {
             None,
         )
         .await
+    }
+
+    async fn search_data(
+        &self,
+        credential: &QqCredential,
+        query: &str,
+        search_type: u8,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Value> {
+        let limit = limit.clamp(1, 50);
+        let page = offset / limit + 1;
+        self.call(
+            "music.search.SearchCgiService",
+            "DoSearchForQQMusicDesktop",
+            json!({
+                "grp": 0,
+                "num_per_page": limit,
+                "page_num": page,
+                "query": query.trim(),
+                "search_type": search_type,
+                "searchid": get_search_id(),
+            }),
+            credential,
+            None,
+        )
+        .await
+        .with_context(|| format!("无法搜索 QQ 音乐中的“{}”", query.trim()))
     }
 
     async fn refresh_full_credential(&self, credential: &QqCredential) -> Result<Value> {
@@ -820,6 +1085,7 @@ fn parse_track(value: &Value) -> Result<Track> {
     let value = wrapper
         .get("songInfo")
         .or_else(|| value.get("track"))
+        .or_else(|| value.get("Track"))
         .unwrap_or(value);
     let mid = string_field(value, &["mid", "songmid"])
         .filter(|value| !value.is_empty())
@@ -882,6 +1148,122 @@ fn parse_track(value: &Value) -> Result<Track> {
     })
 }
 
+fn recommendation_tracks(data: &Value, keys: &[&str]) -> Result<Vec<Track>> {
+    let values = find_array_recursively(data, keys).context("推荐结果缺少歌曲列表")?;
+    values.iter().map(parse_track).collect()
+}
+
+fn parse_search_page<T>(
+    data: &Value,
+    category: &str,
+    offset: u64,
+    parse: impl Fn(&Value) -> Result<T>,
+) -> Result<SearchPage<T>> {
+    let items = data
+        .get("body")
+        .and_then(|body| body.get(category))
+        .and_then(|category| category.get("list"))
+        .and_then(Value::as_array)
+        .with_context(|| format!("搜索结果缺少 {category}.list"))?;
+    let items = items.iter().map(parse).collect::<Result<Vec<_>>>()?;
+    let next_offset = offset.saturating_add(items.len() as u64);
+    let has_more = data
+        .get("meta")
+        .and_then(|meta| integer_field(meta, &["nextpage", "nextPage"]))
+        .is_some_and(|next_page| next_page > 0)
+        && !items.is_empty();
+    Ok(SearchPage {
+        items,
+        has_more,
+        next_offset,
+    })
+}
+
+fn parse_search_artist(value: &Value) -> Result<SearchArtist> {
+    let mid = string_field(value, &["singerMID", "singerMid", "mid"])
+        .filter(|mid| !mid.trim().is_empty())
+        .context("歌手缺少 mid")?;
+    let name = string_field(value, &["singerName", "name"])
+        .filter(|name| !name.trim().is_empty())
+        .context("歌手缺少名称")?;
+    let cover_url = string_field(value, &["singerPic", "picUrl", "pic"])
+        .filter(|url| !url.trim().is_empty())
+        .map(force_https)
+        .or_else(|| singer_cover_url(&mid));
+    Ok(SearchArtist {
+        mid,
+        name,
+        cover_url,
+    })
+}
+
+fn parse_search_album(value: &Value) -> Result<SearchAlbum> {
+    let mid = string_field(value, &["albumMID", "albumMid", "mid"])
+        .filter(|mid| !mid.trim().is_empty())
+        .context("专辑缺少 mid")?;
+    let title = string_field(value, &["albumName", "name", "title"])
+        .filter(|title| !title.trim().is_empty())
+        .context("专辑缺少标题")?;
+    let cover_url = string_field(value, &["albumPic", "picUrl", "pic"])
+        .filter(|url| !url.trim().is_empty())
+        .map(force_https)
+        .or_else(|| album_cover_url(&mid));
+    let artist = string_field(value, &["singerName", "artistName", "artist"]).unwrap_or_default();
+    Ok(SearchAlbum {
+        mid,
+        title,
+        cover_url,
+        artist,
+    })
+}
+
+fn parse_artist_album_page(
+    data: &Value,
+    artist: &SearchArtist,
+    offset: u64,
+    limit: u64,
+) -> Result<SearchPage<SearchAlbum>> {
+    let albums = find_array_recursively(data, &["albumList", "album_list"])
+        .context("歌手专辑列表缺少 albumList")?;
+    let items = albums
+        .iter()
+        .take(limit as usize)
+        .map(|value| {
+            let mut album = parse_search_album(value)?;
+            if album.artist.is_empty() {
+                album.artist = artist.name.clone();
+            }
+            Ok(album)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let next_offset = offset.saturating_add(items.len() as u64);
+    let total = integer_field(data, &["total", "totalNum", "total_num"]).unwrap_or(next_offset);
+    Ok(SearchPage {
+        has_more: !items.is_empty() && next_offset < total,
+        items,
+        next_offset,
+    })
+}
+
+fn parse_search_playlist(value: &Value) -> Result<UserPlaylist> {
+    let diss_id = integer_field(value, &["dissid", "dissId", "id"]).context("歌单缺少 dissid")?;
+    let title = string_field(value, &["dissname", "dissName", "title", "name"])
+        .filter(|title| !title.trim().is_empty())
+        .context("歌单缺少标题")?;
+    Ok(UserPlaylist {
+        id: UserPlaylistId::Recommended { diss_id },
+        title,
+        cover_url: string_field(value, &["imgurl", "imgUrl", "picUrl", "logo"])
+            .filter(|url| !url.trim().is_empty())
+            .map(force_https),
+        description: string_field(value, &["desc", "description"]).unwrap_or_default(),
+        owner: playlist_owner_name(value).unwrap_or_default(),
+        owner_avatar_url: playlist_owner_avatar_url(value),
+        track_count: integer_field(value, &["songNum", "songnum", "song_count"])
+            .unwrap_or_default(),
+    })
+}
+
 fn parse_created_playlist(value: &Value) -> Option<UserPlaylist> {
     let tid = integer_field(value, &["tid", "id", "dissid"])?;
     let dir_id = integer_field(value, &["dirId", "dirid"]).unwrap_or_default();
@@ -894,6 +1276,64 @@ fn parse_created_playlist(value: &Value) -> Option<UserPlaylist> {
 fn parse_favorite_playlist(value: &Value) -> Option<UserPlaylist> {
     let diss_id = integer_field(value, &["dissid", "tid", "id"])?;
     parse_playlist_summary(value, UserPlaylistId::Favorite { diss_id })
+}
+
+fn parse_recommended_playlist_page(data: &Value, offset: u64) -> Result<SearchPage<UserPlaylist>> {
+    let entries = data
+        .get("List")
+        .and_then(Value::as_array)
+        .context("推荐歌单结果缺少 List")?;
+    let mut seen = HashSet::new();
+    let items = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("Playlist")
+                .and_then(|playlist| playlist.get("basic"))
+        })
+        .filter_map(parse_recommended_playlist)
+        .filter(|playlist| seen.insert(playlist.id.clone()))
+        .collect::<Vec<_>>();
+    let next_offset = integer_field(data, &["FromLimit", "fromLimit", "from_limit"])
+        .unwrap_or_else(|| offset.saturating_add(entries.len() as u64));
+    let has_more =
+        bool_field(data, &["HasMore", "hasMore", "has_more"]).unwrap_or(!items.is_empty());
+    Ok(SearchPage {
+        items,
+        has_more,
+        next_offset,
+    })
+}
+
+fn parse_recommended_playlist(value: &Value) -> Option<UserPlaylist> {
+    let diss_id = integer_field(value, &["tid", "dissid", "dissId", "id"])?;
+    let title = string_field(value, &["title", "dissname", "dissName", "name"])
+        .filter(|title| !title.trim().is_empty())?;
+    let cover_url = value
+        .get("cover")
+        .and_then(|cover| string_field(cover, &["default_url", "defaultUrl", "url"]))
+        .or_else(|| string_field(value, &["imgurl", "imgUrl", "picUrl", "logo"]))
+        .filter(|url| !url.trim().is_empty())
+        .map(force_https);
+    Some(UserPlaylist {
+        id: UserPlaylistId::Recommended { diss_id },
+        title,
+        cover_url,
+        description: string_field(value, &["desc", "description", "subtitle"]).unwrap_or_default(),
+        owner: playlist_owner_name(value).unwrap_or_default(),
+        owner_avatar_url: playlist_owner_avatar_url(value),
+        track_count: integer_field(
+            value,
+            &[
+                "song_cnt",
+                "songNum",
+                "songnum",
+                "song_count",
+                "total_song_num",
+            ],
+        )
+        .unwrap_or_default(),
+    })
 }
 
 fn parse_playlist_summary(value: &Value, id: UserPlaylistId) -> Option<UserPlaylist> {
@@ -910,7 +1350,8 @@ fn parse_playlist_summary(value: &Value, id: UserPlaylistId) -> Option<UserPlayl
         title,
         cover_url,
         description: string_field(value, &["desc", "description"]).unwrap_or_default(),
-        owner: string_field(value, &["nick", "nickname", "creatorName"]).unwrap_or_default(),
+        owner: playlist_owner_name(value).unwrap_or_default(),
+        owner_avatar_url: playlist_owner_avatar_url(value),
         track_count: integer_field(value, &["songNum", "songnum", "total_song_num"])
             .unwrap_or_default(),
     })
@@ -931,7 +1372,10 @@ fn playlist_from_detail(data: &Value, fallback: UserPlaylist) -> UserPlaylist {
         playlist.description = fallback.description;
     }
     if playlist.owner.is_empty() {
-        playlist.owner = fallback.owner;
+        playlist.owner = playlist_owner_name(data).unwrap_or(fallback.owner);
+    }
+    if playlist.owner_avatar_url.is_none() {
+        playlist.owner_avatar_url = playlist_owner_avatar_url(data).or(fallback.owner_avatar_url);
     }
     if playlist.track_count == 0 {
         playlist.track_count = fallback.track_count;
@@ -939,11 +1383,65 @@ fn playlist_from_detail(data: &Value, fallback: UserPlaylist) -> UserPlaylist {
     playlist
 }
 
+fn playlist_owner_name(value: &Value) -> Option<String> {
+    const DIRECT_KEYS: &[&str] = &[
+        "creatorName",
+        "creator_name",
+        "host_nick",
+        "hostname",
+        "nickname",
+        "nick",
+    ];
+    const CREATOR_KEYS: &[&str] = &["name", "nickname", "nick", "host_nick", "hostname"];
+
+    string_field(value, DIRECT_KEYS)
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            find_object_recursively(value, &["creator", "creatorInfo", "creator_info"])
+                .and_then(|creator| find_string_in_object(creator, CREATOR_KEYS))
+                .filter(|name| !name.trim().is_empty())
+        })
+}
+
+fn playlist_owner_avatar_url(value: &Value) -> Option<String> {
+    const AVATAR_KEYS: &[&str] = &[
+        "avatar",
+        "avatarUrl",
+        "avatarurl",
+        "avatar_url",
+        "headurl",
+        "headUrl",
+        "head_url",
+        "headpic",
+        "headPic",
+        "creatorAvatar",
+        "creatorAvatarUrl",
+    ];
+
+    string_field(value, AVATAR_KEYS)
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| {
+            find_object_recursively(value, &["creator", "creatorInfo", "creator_info"])
+                .and_then(|creator| find_string_in_object(creator, AVATAR_KEYS))
+                .filter(|url| !url.trim().is_empty())
+        })
+        .map(force_https)
+}
+
 fn album_cover_url(album_mid: &str) -> Option<String> {
     (!album_mid.trim().is_empty()).then(|| {
         format!(
             "https://y.gtimg.cn/music/photo_new/T002R300x300M000{}.jpg?max_age=2592000",
             album_mid.trim()
+        )
+    })
+}
+
+fn singer_cover_url(singer_mid: &str) -> Option<String> {
+    (!singer_mid.trim().is_empty()).then(|| {
+        format!(
+            "https://y.gtimg.cn/music/photo_new/T001R300x300M000{}.jpg?max_age=2592000",
+            singer_mid.trim()
         )
     })
 }
@@ -1355,6 +1853,142 @@ mod tests {
     }
 
     #[test]
+    fn parses_recommendation_track_wrappers_and_list_casing() {
+        let radar = recommendation_tracks(
+            &json!({
+                "VecSongs": [{
+                    "Track": {
+                        "mid": "radar-mid",
+                        "title": "Radar Song",
+                        "interval": 180
+                    }
+                }]
+            }),
+            &["VecSongs", "vecSongs"],
+        )
+        .unwrap();
+        assert_eq!(radar[0].mid, "radar-mid");
+
+        let guess = recommendation_tracks(
+            &json!({
+                "tracks": [{
+                    "track": {
+                        "mid": "guess-mid",
+                        "title": "Guess Song",
+                        "interval": 200
+                    }
+                }]
+            }),
+            &["Tracks", "tracks"],
+        )
+        .unwrap();
+        assert_eq!(guess[0].mid, "guess-mid");
+    }
+
+    #[test]
+    fn parses_each_qq_music_search_category() {
+        let song_page = parse_search_page(
+            &json!({
+                "body": { "song": { "list": [{
+                    "mid": "song-mid",
+                    "title": "Song",
+                    "interval": 180,
+                    "singer": [{ "name": "Singer" }],
+                    "album": { "name": "Album", "mid": "album-mid" },
+                    "file": { "media_mid": "media-mid", "size_flac": 1024 }
+                }] } },
+                "meta": { "nextpage": 2 }
+            }),
+            "song",
+            0,
+            parse_track,
+        )
+        .unwrap();
+        assert_eq!(song_page.items[0].mid, "song-mid");
+        assert_eq!(song_page.items[0].media_mid.as_deref(), Some("media-mid"));
+        assert!(song_page.has_more);
+        assert_eq!(song_page.next_offset, 1);
+
+        let artist = parse_search_artist(&json!({
+            "singerMID": "artist-mid",
+            "singerName": "Artist",
+            "singerPic": "http://example.test/artist.jpg"
+        }))
+        .unwrap();
+        assert_eq!(artist.mid, "artist-mid");
+        assert_eq!(
+            artist.cover_url.as_deref(),
+            Some("https://example.test/artist.jpg")
+        );
+
+        let album = parse_search_album(&json!({
+            "albumMID": "album-mid",
+            "albumName": "Album",
+            "albumPic": "https://example.test/album.jpg",
+            "singerName": "Artist"
+        }))
+        .unwrap();
+        assert_eq!(album.title, "Album");
+        assert_eq!(album.artist, "Artist");
+
+        let playlist = parse_search_playlist(&json!({
+            "dissid": "42",
+            "dissname": "Playlist",
+            "imgurl": "//example.test/playlist.jpg",
+            "creator": {
+                "name": "Owner",
+                "headUrl": "//example.test/owner.jpg"
+            }
+        }))
+        .unwrap();
+        assert_eq!(playlist.id, UserPlaylistId::Recommended { diss_id: 42 });
+        assert_eq!(playlist.owner, "Owner");
+        assert_eq!(
+            playlist.cover_url.as_deref(),
+            Some("https://example.test/playlist.jpg")
+        );
+        assert_eq!(
+            playlist.owner_avatar_url.as_deref(),
+            Some("https://example.test/owner.jpg")
+        );
+    }
+
+    #[test]
+    fn parses_paginated_artist_albums() {
+        let artist = SearchArtist {
+            mid: "artist-mid".to_owned(),
+            name: "Artist".to_owned(),
+            cover_url: None,
+        };
+        let page = parse_artist_album_page(
+            &json!({
+                "singerMid": "artist-mid",
+                "total": 3,
+                "albumList": [
+                    {
+                        "albumMid": "album-mid",
+                        "albumName": "Album"
+                    },
+                    {
+                        "albumMid": "ignored-album-mid",
+                        "albumName": "Ignored album"
+                    }
+                ]
+            }),
+            &artist,
+            0,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(page.items[0].mid, "album-mid");
+        assert_eq!(page.items[0].artist, "Artist");
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.next_offset, 1);
+        assert!(page.has_more);
+    }
+
+    #[test]
     fn only_zero_file_metadata_rules_out_a_quality() {
         let missing = parse_track(&json!({
             "mid": "missing-files",
@@ -1447,6 +2081,7 @@ mod tests {
             cover_url: None,
             description: String::new(),
             owner: "amtoaer".to_owned(),
+            owner_avatar_url: None,
             track_count: 30,
         };
 
@@ -1464,6 +2099,49 @@ mod tests {
         assert_eq!(playlist.title, "amtoaer的每日30首");
         assert_eq!(playlist.description, "每日更新");
         assert_eq!(playlist.track_count, 30);
+    }
+
+    #[test]
+    fn parses_recommended_playlist_page_and_server_cursor() {
+        let page = parse_recommended_playlist_page(
+            &json!({
+                "List": [{
+                    "Playlist": {
+                        "basic": {
+                            "tid": "4270386076",
+                            "title": "每日30首",
+                            "cover": { "default_url": "http://example.test/daily.jpg" },
+                            "creator": {
+                                "nick": "amtoaer",
+                                "head_url": "http://example.test/avatar.jpg"
+                            },
+                            "song_cnt": 30
+                        }
+                    }
+                }],
+                "HasMore": 1,
+                "FromLimit": 10
+            }),
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(
+            page.items[0].id,
+            UserPlaylistId::Recommended {
+                diss_id: 4_270_386_076
+            }
+        );
+        assert_eq!(page.items[0].title, "每日30首");
+        assert_eq!(
+            page.items[0].cover_url.as_deref(),
+            Some("https://example.test/daily.jpg")
+        );
+        assert_eq!(page.items[0].owner, "amtoaer");
+        assert_eq!(page.items[0].track_count, 30);
+        assert!(page.has_more);
+        assert_eq!(page.next_offset, 10);
     }
 
     #[test]

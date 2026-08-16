@@ -556,9 +556,14 @@ fn track_columns(show_added_at: bool, compact: bool) -> Vec<Column> {
 
 fn playlist_subtitle(playlist: &UserPlaylist) -> String {
     let kind = match playlist.id {
-        UserPlaylistId::Liked => "我喜欢",
+        UserPlaylistId::Liked => "已点赞的歌曲",
         UserPlaylistId::Created { .. } => "创建的歌单",
         UserPlaylistId::Favorite { .. } => "收藏的歌单",
+        UserPlaylistId::Recommended { .. } => "推荐歌单",
+        UserPlaylistId::Artist { .. } => "歌手",
+        UserPlaylistId::Album { .. } => "专辑",
+        UserPlaylistId::Search { .. } => "搜索结果",
+        UserPlaylistId::Recommendation { .. } => "个性化推荐",
     };
     if playlist.owner.is_empty() {
         format!("{kind} · {} 首", playlist.track_count)

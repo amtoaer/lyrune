@@ -18,6 +18,16 @@ pub struct PersistedPlayback {
     pub playlist_id: UserPlaylistId,
     pub track_mid: String,
     pub position_ms: u64,
+    #[serde(default)]
+    pub queue_tracks: Vec<Track>,
+    #[serde(default)]
+    pub queue_continuation: Option<PersistedQueueContinuation>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum PersistedQueueContinuation {
+    Radar { next_page: u64, has_more: bool },
+    Guess,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -76,11 +86,14 @@ impl AppSettings {
     fn normalized(mut self) -> Self {
         self.volume = normalized_volume(self.volume, 1.);
         self.last_nonzero_volume = normalized_volume(self.last_nonzero_volume, 1.).max(0.01);
-        if self
-            .current_playback
-            .as_ref()
-            .is_some_and(|playback| playback.track_mid.trim().is_empty())
-        {
+        if self.current_playback.as_ref().is_some_and(|playback| {
+            playback.track_mid.trim().is_empty()
+                || playback.queue_tracks.is_empty()
+                || !playback
+                    .queue_tracks
+                    .iter()
+                    .any(|track| track.mid == playback.track_mid)
+        }) {
             self.current_playback = None;
         }
         self
@@ -237,7 +250,8 @@ impl LibraryCache {
             .find(|snapshot| {
                 snapshot.account_id == account_id
                     && snapshot.playlist.id == *playlist_id
-                    && is_fresh(snapshot.fetched_at_secs, now_secs, ttl)
+                    && (matches!(playlist_id, UserPlaylistId::Search { .. })
+                        || is_fresh(snapshot.fetched_at_secs, now_secs, ttl))
             })
             .map(|snapshot| PlaylistSnapshot {
                 revision: snapshot.revision,
@@ -392,6 +406,7 @@ mod tests {
             cover_url: None,
             description: String::new(),
             owner: "tester".to_owned(),
+            owner_avatar_url: None,
             track_count: 2,
         }
     }
@@ -467,9 +482,16 @@ mod tests {
             }),
             current_playback: Some(PersistedPlayback {
                 account_id: 10001,
-                playlist_id: UserPlaylistId::Created { tid: 42, dir_id: 0 },
+                playlist_id: UserPlaylistId::Recommendation {
+                    kind: qqmusic_api::integration::RecommendationKind::Radar,
+                },
                 track_mid: "restored-track".to_owned(),
                 position_ms: 92_345,
+                queue_tracks: vec![track("restored-track")],
+                queue_continuation: Some(PersistedQueueContinuation::Radar {
+                    next_page: 4,
+                    has_more: true,
+                }),
             }),
             window_size: Some(PersistedWindowSize {
                 width: 1440,
@@ -499,6 +521,8 @@ mod tests {
             playlist_id: UserPlaylistId::Liked,
             track_mid: "track-mid".to_owned(),
             position_ms: 92_345,
+            queue_tracks: vec![track("track-mid")],
+            queue_continuation: None,
         };
         assert_eq!(playback.resume_position(180), Duration::from_millis(92_345));
 
@@ -506,6 +530,22 @@ mod tests {
         assert_eq!(playback.resume_position(180), Duration::ZERO);
         playback.position_ms = 200_000;
         assert_eq!(playback.resume_position(180), Duration::ZERO);
+    }
+
+    #[test]
+    fn playback_from_before_queue_persistence_is_discarded() {
+        let settings = serde_json::from_value::<AppSettings>(serde_json::json!({
+            "current_playback": {
+                "account_id": 10001,
+                "playlist_id": UserPlaylistId::Liked,
+                "track_mid": "track-mid",
+                "position_ms": 1234
+            }
+        }))
+        .expect("deserialize old playback settings")
+        .normalized();
+
+        assert_eq!(settings.current_playback, None);
     }
 
     #[test]
@@ -646,5 +686,34 @@ mod tests {
             "refreshed"
         );
         fs::remove_dir_all(directory).expect("remove test library cache directory");
+    }
+
+    #[test]
+    fn search_queue_snapshot_remains_available_for_playback_restore() {
+        let mut cache = LibraryCache::default();
+        let playlist = UserPlaylist {
+            id: UserPlaylistId::Search {
+                query: "search query".to_owned(),
+            },
+            title: "Search results".to_owned(),
+            cover_url: None,
+            description: String::new(),
+            owner: String::new(),
+            owner_avatar_url: None,
+            track_count: 1,
+        };
+        assert!(cache.replace_playlist(
+            10001,
+            playlist.clone(),
+            vec![track("search-track")],
+            false,
+            1,
+            100,
+            1,
+        ));
+        let snapshot = cache
+            .fresh_playlist(10001, &playlist.id, 10_000, Duration::from_secs(300))
+            .expect("search queue snapshot");
+        assert_eq!(snapshot.tracks[0].mid, "search-track");
     }
 }

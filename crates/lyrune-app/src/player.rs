@@ -76,7 +76,6 @@ impl AudioPlayer {
             decoder,
             cancellation,
             position_offset,
-            ..
         } = playback;
         *self
             .position_offset

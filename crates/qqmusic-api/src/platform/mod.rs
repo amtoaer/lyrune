@@ -15,6 +15,7 @@ pub(crate) mod netease;
 mod tencent;
 
 pub(crate) use netease::NeteaseClient;
+pub(crate) use tencent::utils::get_search_id;
 pub(crate) use tencent::{TencentClient, TencentMqttLoginSession};
 
 /// 将平台原始模型集合转换为统一模型集合。

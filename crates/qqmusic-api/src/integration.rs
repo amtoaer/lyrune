@@ -87,6 +87,17 @@ pub enum UserPlaylistId {
     Liked,
     Created { tid: u64, dir_id: u64 },
     Favorite { diss_id: u64 },
+    Recommended { diss_id: u64 },
+    Artist { mid: String },
+    Album { mid: String },
+    Search { query: String },
+    Recommendation { kind: RecommendationKind },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
+pub enum RecommendationKind {
+    Radar,
+    Guess,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -96,17 +107,27 @@ pub struct UserPlaylist {
     pub cover_url: Option<String>,
     pub description: String,
     pub owner: String,
+    #[serde(default)]
+    pub owner_avatar_url: Option<String>,
     pub track_count: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct RadarTrackPage {
+    pub tracks: Vec<Track>,
+    pub has_more: bool,
+    pub next_page: u64,
 }
 
 impl UserPlaylist {
     pub fn liked() -> Self {
         Self {
             id: UserPlaylistId::Liked,
-            title: "我喜欢".to_owned(),
+            title: "已点赞的歌曲".to_owned(),
             cover_url: None,
             description: "QQ 音乐中已收藏的歌曲".to_owned(),
             owner: String::new(),
+            owner_avatar_url: None,
             track_count: 0,
         }
     }
@@ -121,7 +142,65 @@ pub struct PlaylistPage {
     pub next_offset: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
+pub struct SearchPage<T> {
+    pub items: Vec<T>,
+    pub has_more: bool,
+    pub next_offset: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchArtist {
+    pub mid: String,
+    pub name: String,
+    pub cover_url: Option<String>,
+}
+
+impl SearchArtist {
+    pub fn into_playlist(self) -> UserPlaylist {
+        UserPlaylist {
+            id: UserPlaylistId::Artist { mid: self.mid },
+            title: self.name,
+            cover_url: self.cover_url,
+            description: String::new(),
+            owner: "歌手".to_owned(),
+            owner_avatar_url: None,
+            track_count: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchAlbum {
+    pub mid: String,
+    pub title: String,
+    pub cover_url: Option<String>,
+    pub artist: String,
+}
+
+impl SearchAlbum {
+    pub fn into_playlist(self) -> UserPlaylist {
+        UserPlaylist {
+            id: UserPlaylistId::Album { mid: self.mid },
+            title: self.title,
+            cover_url: self.cover_url,
+            description: String::new(),
+            owner: self.artist,
+            owner_avatar_url: None,
+            track_count: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchResults {
+    pub songs: SearchPage<Track>,
+    pub artists: SearchPage<SearchArtist>,
+    pub albums: SearchPage<SearchAlbum>,
+    pub playlists: SearchPage<UserPlaylist>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Track {
     pub song_id: Option<u64>,
     pub mid: String,

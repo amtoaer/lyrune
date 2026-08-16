@@ -4,14 +4,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Context as _;
 use gpui::{prelude::*, *};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, ResizableState, Selectable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, IndexPath, ResizableState, Selectable as _, Sizable as _,
     StyledExt as _,
     avatar::Avatar,
     button::{Button, ButtonVariants as _},
     h_flex, h_resizable,
+    input::{Input, InputEvent, InputState},
     list::{List, ListEvent, ListState},
     resizable_panel,
+    scroll::ScrollableElement as _,
     slider::{Slider, SliderEvent, SliderState},
+    spinner::Spinner,
     table::{DataTable, TableEvent, TableState},
     v_flex,
 };
@@ -31,17 +34,19 @@ use crate::mpris::{
 use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::settings::{
     AppSettings, CdnCacheStore, LibraryCache, LibraryCacheStore, PersistedLibraryView,
-    PersistedPlayback, PersistedWindowSize, SettingsStore,
+    PersistedPlayback, PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
 };
 use crate::singleflight::SingleFlight;
 use qqmusic_api::integration::{
-    LoginEvent, PlaylistPage, ProtocolClient, QqCredential, Quality, Track, UserPlaylist,
-    UserPlaylistId, UserProfile, refresh_credential, run_qr_login,
+    LoginEvent, PlaylistPage, ProtocolClient, QqCredential, Quality, RecommendationKind,
+    SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId,
+    UserProfile, refresh_credential, run_qr_login,
 };
 #[cfg(target_os = "linux")]
 use xxhash_rust::xxh3::xxh3_128;
 
 const PAGE_SIZE: u64 = 100;
+const ARTIST_PAGE_SIZE: u64 = 5;
 const PROGRESS_TICK: Duration = Duration::from_millis(250);
 const PLAYBACK_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
@@ -69,6 +74,10 @@ fn progress_fraction(position: Duration, duration: Duration) -> f32 {
     } else {
         (position.as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.)
     }
+}
+
+fn single_line_summary(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(target_os = "linux")]
@@ -119,6 +128,162 @@ enum AccountState {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum MainContent {
+    Home,
+    Search,
+    Artist,
+    Playlist,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchCategory {
+    Songs,
+    Playlists,
+    Albums,
+    Artists,
+}
+
+impl SearchCategory {
+    const ALL: [Self; 4] = [Self::Songs, Self::Playlists, Self::Albums, Self::Artists];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Songs => "单曲",
+            Self::Playlists => "歌单",
+            Self::Albums => "专辑",
+            Self::Artists => "歌手",
+        }
+    }
+
+    fn icon(self) -> MediaIcon {
+        match self {
+            Self::Songs => MediaIcon::Music,
+            Self::Artists => MediaIcon::Artist,
+            Self::Albums => MediaIcon::Album,
+            Self::Playlists => MediaIcon::Playlist,
+        }
+    }
+}
+
+enum SearchMoreResults {
+    Songs(SearchPage<Track>),
+    Artists(SearchPage<SearchArtist>),
+    Albums(SearchPage<SearchAlbum>),
+    Playlists(SearchPage<UserPlaylist>),
+}
+
+#[derive(Clone, Copy)]
+enum SongRowSource {
+    Search,
+    Artist,
+}
+
+fn append_search_page<T>(target: &mut SearchPage<T>, mut page: SearchPage<T>) {
+    target.items.append(&mut page.items);
+    target.has_more = page.has_more;
+    target.next_offset = page.next_offset;
+}
+
+fn insert_track_after_current(
+    tracks: &mut Vec<Track>,
+    current_index: Option<usize>,
+    track: Track,
+) -> usize {
+    let mut current_index = current_index.filter(|index| *index < tracks.len());
+    if let Some(existing_index) = tracks.iter().position(|item| item.mid == track.mid) {
+        if current_index == Some(existing_index) {
+            return existing_index;
+        }
+        tracks.remove(existing_index);
+        if let Some(index) = &mut current_index
+            && existing_index < *index
+        {
+            *index -= 1;
+        }
+    }
+    let insert_index = current_index.map_or(tracks.len(), |index| index + 1);
+    tracks.insert(insert_index, track);
+    insert_index
+}
+
+#[derive(Clone)]
+enum NavigationPage {
+    Home,
+    Search {
+        query: String,
+        category: SearchCategory,
+    },
+    Artist {
+        artist: SearchArtist,
+    },
+    Playlist {
+        playlist: UserPlaylist,
+        selected_index: Option<usize>,
+    },
+}
+
+impl NavigationPage {
+    fn same_destination(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Home, Self::Home) => true,
+            (Self::Search { query, .. }, Self::Search { query: other, .. }) => query == other,
+            (Self::Artist { artist, .. }, Self::Artist { artist: other, .. }) => {
+                artist.mid == other.mid
+            }
+            (
+                Self::Playlist { playlist, .. },
+                Self::Playlist {
+                    playlist: other, ..
+                },
+            ) => playlist.id == other.id,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Default)]
+struct NavigationHistory {
+    back: Vec<NavigationPage>,
+    forward: Vec<NavigationPage>,
+}
+
+impl NavigationHistory {
+    fn record(&mut self, current: Option<NavigationPage>, target: &NavigationPage) {
+        if current
+            .as_ref()
+            .is_some_and(|current| current.same_destination(target))
+        {
+            return;
+        }
+        if let Some(current) = current {
+            self.back.push(current);
+        }
+        self.forward.clear();
+    }
+
+    fn go_back(&mut self, current: Option<NavigationPage>) -> Option<NavigationPage> {
+        let target = self.back.pop()?;
+        if let Some(current) = current {
+            self.forward.push(current);
+        }
+        Some(target)
+    }
+
+    fn go_forward(&mut self, current: Option<NavigationPage>) -> Option<NavigationPage> {
+        let target = self.forward.pop()?;
+        if let Some(current) = current {
+            self.back.push(current);
+        }
+        Some(target)
+    }
+
+    fn clear(&mut self) {
+        self.back.clear();
+        self.forward.clear();
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RepeatMode {
     Off,
     All,
@@ -135,6 +300,16 @@ struct PlaybackLocation {
 struct PlaybackQueue {
     playlist_id: UserPlaylistId,
     tracks: Vec<Track>,
+    continuation: Option<PersistedQueueContinuation>,
+}
+
+impl PersistedQueueContinuation {
+    fn can_load_more(self) -> bool {
+        match self {
+            Self::Radar { has_more, .. } => has_more,
+            Self::Guess => true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -229,9 +404,36 @@ pub struct LyruneView {
     playlist_force_refresh: bool,
     playlist_cache_revision: u64,
     playlist_page_requests: SingleFlight<PlaylistPageKey, PlaylistPage>,
+    main_content: MainContent,
+    navigation_history: NavigationHistory,
+    home_playlists: Vec<UserPlaylist>,
+    home_loading: bool,
+    home_loaded: bool,
+    home_error: Option<String>,
+    home_generation: u64,
+    home_recommendation_loading: Option<RecommendationKind>,
+    search_query: String,
+    search_results: Option<SearchResults>,
+    search_category: SearchCategory,
+    search_loading: bool,
+    search_loading_more: bool,
+    search_error: Option<String>,
+    search_generation: u64,
+    selected_artist: Option<SearchArtist>,
+    artist_songs: Option<SearchPage<Track>>,
+    artist_track_count: u64,
+    artist_songs_loading: bool,
+    artist_songs_loading_more: bool,
+    artist_song_error: Option<String>,
+    artist_albums: Option<SearchPage<SearchAlbum>>,
+    artist_albums_loading: bool,
+    artist_albums_loading_more: bool,
+    artist_album_error: Option<String>,
+    artist_generation: u64,
 
     playlist_list: Entity<ListState<PlaylistListDelegate>>,
     track_table: Entity<TableState<TrackTableDelegate>>,
+    search_input: Entity<InputState>,
     progress_slider: Entity<SliderState>,
     volume_slider: Entity<SliderState>,
 
@@ -241,6 +443,8 @@ pub struct LyruneView {
     cdn_maintenance: Option<JoinHandle<()>>,
     playback_queue: Option<PlaybackQueue>,
     queue_generation: u64,
+    queue_recommendation_loading: bool,
+    queue_waiting_for_recommendation: bool,
     current_track: Option<usize>,
     loading_track: Option<usize>,
     loading_autoplay: bool,
@@ -323,6 +527,11 @@ impl LyruneView {
 
         let playlist_list =
             cx.new(|cx| ListState::new(PlaylistListDelegate::new(), window, cx).searchable(false));
+        let search_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("想播放什么？")
+                .context_menu(false)
+        });
         let (load_more_sender, load_more_receiver) = async_channel::bounded(1);
         let track_table = cx.new(|cx| {
             TableState::new(TrackTableDelegate::new(load_more_sender), window, cx)
@@ -344,6 +553,15 @@ impl LyruneView {
                     this.select_track(*index, cx);
                 }
             }),
+            cx.subscribe_in(
+                &search_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.submit_search(window, cx);
+                    }
+                },
+            ),
             cx.subscribe(
                 &progress_slider,
                 |this, _, event: &SliderEvent, cx| match event {
@@ -403,8 +621,35 @@ impl LyruneView {
             playlist_force_refresh: false,
             playlist_cache_revision: 0,
             playlist_page_requests: SingleFlight::default(),
+            main_content: MainContent::Playlist,
+            navigation_history: NavigationHistory::default(),
+            home_playlists: Vec::new(),
+            home_loading: false,
+            home_loaded: false,
+            home_error: None,
+            home_generation: 0,
+            home_recommendation_loading: None,
+            search_query: String::new(),
+            search_results: None,
+            search_category: SearchCategory::Songs,
+            search_loading: false,
+            search_loading_more: false,
+            search_error: None,
+            search_generation: 0,
+            selected_artist: None,
+            artist_songs: None,
+            artist_track_count: 0,
+            artist_songs_loading: false,
+            artist_songs_loading_more: false,
+            artist_song_error: None,
+            artist_albums: None,
+            artist_albums_loading: false,
+            artist_albums_loading_more: false,
+            artist_album_error: None,
+            artist_generation: 0,
             playlist_list,
             track_table,
+            search_input,
             progress_slider,
             volume_slider,
             audio,
@@ -413,6 +658,8 @@ impl LyruneView {
             cdn_maintenance: None,
             playback_queue: None,
             queue_generation: 0,
+            queue_recommendation_loading: false,
+            queue_waiting_for_recommendation: false,
             current_track: None,
             loading_track: None,
             loading_autoplay: false,
@@ -702,6 +949,527 @@ impl LyruneView {
         }));
     }
 
+    fn current_navigation_page(&self) -> Option<NavigationPage> {
+        match self.main_content {
+            MainContent::Home => Some(NavigationPage::Home),
+            MainContent::Search => Some(NavigationPage::Search {
+                query: self.search_query.clone(),
+                category: self.search_category,
+            }),
+            MainContent::Artist => self
+                .selected_artist
+                .clone()
+                .map(|artist| NavigationPage::Artist { artist }),
+            MainContent::Playlist => {
+                self.selected_playlist
+                    .clone()
+                    .map(|playlist| NavigationPage::Playlist {
+                        playlist,
+                        selected_index: self.selected_playlist_index,
+                    })
+            }
+        }
+    }
+
+    fn apply_navigation_page(
+        &mut self,
+        page: NavigationPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match page {
+            NavigationPage::Home => {
+                self.main_content = MainContent::Home;
+                self.playlist_list.update(cx, |list, cx| {
+                    list.set_selected_index(None, window, cx);
+                });
+                if !self.home_loaded && !self.home_loading {
+                    self.load_home(cx);
+                }
+                cx.notify();
+            }
+            NavigationPage::Search { query, category } => {
+                self.main_content = MainContent::Search;
+                self.search_category = category;
+                self.playlist_list.update(cx, |list, cx| {
+                    list.set_selected_index(None, window, cx);
+                });
+                self.search_input.update(cx, |input, cx| {
+                    input.set_value(query.clone(), window, cx);
+                });
+                if self.search_query != query || self.search_results.is_none() {
+                    self.start_search(query, cx);
+                } else {
+                    cx.notify();
+                }
+            }
+            NavigationPage::Artist { artist } => {
+                self.playlist_list.update(cx, |list, cx| {
+                    list.set_selected_index(None, window, cx);
+                });
+                self.open_artist(artist, cx);
+            }
+            NavigationPage::Playlist {
+                playlist,
+                selected_index,
+            } => {
+                self.playlist_list.update(cx, |list, cx| {
+                    list.set_selected_index(selected_index.map(IndexPath::new), window, cx);
+                });
+                self.open_playlist(playlist, selected_index, false, cx);
+            }
+        }
+    }
+
+    fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = NavigationPage::Home;
+        let current = self.current_navigation_page();
+        self.navigation_history.record(current, &target);
+        self.apply_navigation_page(target, window, cx);
+    }
+
+    fn submit_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).value().trim().to_owned();
+        if query.is_empty() {
+            return;
+        }
+        window.blur();
+        let target = NavigationPage::Search {
+            query,
+            category: SearchCategory::Songs,
+        };
+        let current = self.current_navigation_page();
+        self.navigation_history.record(current, &target);
+        self.apply_navigation_page(target, window, cx);
+    }
+
+    fn start_search(&mut self, query: String, cx: &mut Context<Self>) {
+        let Some(credential) = self.credential.clone() else {
+            self.search_error = Some("请先登录 QQ 音乐".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            self.search_error = Some("QQ 音乐客户端不可用".to_owned());
+            cx.notify();
+            return;
+        };
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
+        self.search_query = query.clone();
+        self.search_results = None;
+        self.search_category = SearchCategory::Songs;
+        self.search_loading = true;
+        self.search_loading_more = false;
+        self.search_error = None;
+        cx.notify();
+
+        let (sender, receiver) = async_channel::bounded(1);
+        drop(RUNTIME.spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                client.search(&credential, &query, 20),
+            )
+            .await
+            .context("QQ 音乐搜索等待超过 30 秒")
+            .and_then(|result| result);
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                this.search_loading = false;
+                match result {
+                    Ok(results) => {
+                        this.search_results = Some(results);
+                        this.search_error = None;
+                    }
+                    Err(error) => {
+                        this.search_results = None;
+                        this.search_error = Some(format!("搜索失败：{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_more_search(&mut self, cx: &mut Context<Self>) {
+        if self.search_loading || self.search_loading_more {
+            return;
+        }
+        let Some(results) = self.search_results.as_ref() else {
+            return;
+        };
+        let (offset, has_more) = match self.search_category {
+            SearchCategory::Songs => (results.songs.next_offset, results.songs.has_more),
+            SearchCategory::Artists => (results.artists.next_offset, results.artists.has_more),
+            SearchCategory::Albums => (results.albums.next_offset, results.albums.has_more),
+            SearchCategory::Playlists => {
+                (results.playlists.next_offset, results.playlists.has_more)
+            }
+        };
+        if !has_more {
+            return;
+        }
+        let Some(credential) = self.credential.clone() else {
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            return;
+        };
+        let query = self.search_query.clone();
+        let category = self.search_category;
+        let generation = self.search_generation;
+        self.search_loading_more = true;
+        cx.notify();
+
+        let (sender, receiver) = async_channel::bounded(1);
+        drop(RUNTIME.spawn(async move {
+            let result = match category {
+                SearchCategory::Songs => client
+                    .search_songs(&credential, &query, offset, 20)
+                    .await
+                    .map(SearchMoreResults::Songs),
+                SearchCategory::Artists => client
+                    .search_artists(&credential, &query, offset, 20)
+                    .await
+                    .map(SearchMoreResults::Artists),
+                SearchCategory::Albums => client
+                    .search_albums(&credential, &query, offset, 20)
+                    .await
+                    .map(SearchMoreResults::Albums),
+                SearchCategory::Playlists => client
+                    .search_playlists(&credential, &query, offset, 20)
+                    .await
+                    .map(SearchMoreResults::Playlists),
+            };
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                this.search_loading_more = false;
+                if this.search_category != category {
+                    cx.notify();
+                    return;
+                }
+                match (this.search_results.as_mut(), result) {
+                    (Some(results), Ok(SearchMoreResults::Songs(page))) => {
+                        append_search_page(&mut results.songs, page)
+                    }
+                    (Some(results), Ok(SearchMoreResults::Artists(page))) => {
+                        append_search_page(&mut results.artists, page)
+                    }
+                    (Some(results), Ok(SearchMoreResults::Albums(page))) => {
+                        append_search_page(&mut results.albums, page)
+                    }
+                    (Some(results), Ok(SearchMoreResults::Playlists(page))) => {
+                        append_search_page(&mut results.playlists, page)
+                    }
+                    (_, Err(error)) => {
+                        this.search_error = Some(format!("继续加载搜索结果失败：{error:#}"));
+                    }
+                    _ => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn select_search_track(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(results) = self.search_results.as_ref() else {
+            return;
+        };
+        let Some(track) = results.songs.items.get(index).cloned() else {
+            return;
+        };
+        if self
+            .current_track_data()
+            .is_some_and(|current| current.mid == track.mid)
+        {
+            if self.loading_track.is_none() {
+                self.toggle_playback(cx);
+            }
+            return;
+        }
+
+        self.pending_playback_restore = None;
+        self.home_recommendation_loading = None;
+        let current_index = self.current_track;
+        let queue_index = if let Some(queue) = &mut self.playback_queue {
+            insert_track_after_current(&mut queue.tracks, current_index, track)
+        } else {
+            self.playback_queue = Some(PlaybackQueue {
+                playlist_id: UserPlaylistId::Search {
+                    query: self.search_query.clone(),
+                },
+                tracks: vec![track],
+                continuation: None,
+            });
+            0
+        };
+        self.start_playback(queue_index, Duration::ZERO, None, true, cx);
+    }
+
+    fn navigate_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.current_navigation_page();
+        if let Some(target) = self.navigation_history.go_back(current) {
+            self.apply_navigation_page(target, window, cx);
+        }
+    }
+
+    fn navigate_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.current_navigation_page();
+        if let Some(target) = self.navigation_history.go_forward(current) {
+            self.apply_navigation_page(target, window, cx);
+        }
+    }
+
+    fn load_home(&mut self, cx: &mut Context<Self>) {
+        if self.home_loading {
+            return;
+        }
+        let Some(credential) = self.credential.clone() else {
+            self.home_error = Some("请先登录 QQ 音乐".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            self.home_error = Some("QQ 音乐客户端不可用".to_owned());
+            cx.notify();
+            return;
+        };
+        self.home_generation = self.home_generation.wrapping_add(1);
+        let generation = self.home_generation;
+        self.home_loading = true;
+        self.home_error = None;
+        cx.notify();
+
+        let (sender, receiver) = async_channel::bounded(1);
+        drop(RUNTIME.spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                client.recommended_playlists(&credential, 0, 20),
+            )
+            .await
+            .context("QQ 音乐主页请求等待超过 30 秒")
+            .and_then(|result| result);
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.home_generation != generation {
+                    return;
+                }
+                this.home_loading = false;
+                match result {
+                    Ok(page) => {
+                        this.home_loaded = true;
+                        this.home_playlists = page.items;
+                        this.home_error = None;
+                    }
+                    Err(error) => {
+                        this.home_error = Some(format!("加载主页推荐失败：{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn start_home_recommendation(&mut self, kind: RecommendationKind, cx: &mut Context<Self>) {
+        let Some(credential) = self.credential.clone() else {
+            self.status = StatusMessage::error("请先登录 QQ 音乐");
+            cx.notify();
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            self.status = StatusMessage::error("QQ 音乐客户端不可用");
+            cx.notify();
+            return;
+        };
+        self.home_recommendation_loading = Some(kind);
+        cx.notify();
+
+        let (sender, receiver) = async_channel::bounded(1);
+        drop(RUNTIME.spawn(async move {
+            let result = tokio::time::timeout(Duration::from_secs(30), async {
+                match kind {
+                    RecommendationKind::Radar => {
+                        let page = client.radar_tracks(&credential, 1).await?;
+                        Ok::<_, anyhow::Error>((
+                            page.tracks,
+                            PersistedQueueContinuation::Radar {
+                                next_page: page.next_page,
+                                has_more: page.has_more,
+                            },
+                        ))
+                    }
+                    RecommendationKind::Guess => Ok((
+                        client.guess_tracks(&credential, 5).await?,
+                        PersistedQueueContinuation::Guess,
+                    )),
+                }
+            })
+            .await
+            .context("QQ 音乐个性化推荐请求等待超过 30 秒")
+            .and_then(|result| result);
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.home_recommendation_loading != Some(kind) {
+                    return;
+                }
+                this.home_recommendation_loading = None;
+                match result {
+                    Ok((tracks, continuation)) if !tracks.is_empty() => {
+                        this.pending_playback_restore = None;
+                        this.queue_generation = this.queue_generation.wrapping_add(1);
+                        this.queue_recommendation_loading = false;
+                        this.queue_waiting_for_recommendation = false;
+                        this.playback_queue = Some(PlaybackQueue {
+                            playlist_id: UserPlaylistId::Recommendation { kind },
+                            tracks,
+                            continuation: Some(continuation),
+                        });
+                        this.start_playback(0, Duration::ZERO, None, true, cx);
+                    }
+                    Ok(_) => {
+                        this.status = StatusMessage::error("QQ 音乐没有返回可播放的推荐歌曲");
+                    }
+                    Err(error) => {
+                        this.status =
+                            StatusMessage::error(format!("加载个性化推荐失败：{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn maybe_load_queue_recommendations(&mut self, force: bool, cx: &mut Context<Self>) {
+        if self.queue_recommendation_loading {
+            return;
+        }
+        let Some((continuation, remaining)) = self.playback_queue.as_ref().and_then(|queue| {
+            let continuation = queue.continuation?;
+            let current = self.current_track.unwrap_or_default();
+            Some((
+                continuation,
+                queue.tracks.len().saturating_sub(current.saturating_add(1)),
+            ))
+        }) else {
+            return;
+        };
+        if !continuation.can_load_more() || (!force && remaining > 2) {
+            return;
+        }
+        let Some(credential) = self.credential.clone() else {
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            return;
+        };
+        let generation = self.queue_generation;
+        self.queue_recommendation_loading = true;
+
+        let (sender, receiver) = async_channel::bounded(1);
+        drop(RUNTIME.spawn(async move {
+            let result = tokio::time::timeout(Duration::from_secs(30), async {
+                match continuation {
+                    PersistedQueueContinuation::Radar { next_page, .. } => {
+                        let page = client.radar_tracks(&credential, next_page).await?;
+                        Ok::<_, anyhow::Error>((
+                            page.tracks,
+                            Some(PersistedQueueContinuation::Radar {
+                                next_page: page.next_page,
+                                has_more: page.has_more,
+                            }),
+                        ))
+                    }
+                    PersistedQueueContinuation::Guess => {
+                        let tracks = client.guess_tracks(&credential, 5).await?;
+                        let next =
+                            (!tracks.is_empty()).then_some(PersistedQueueContinuation::Guess);
+                        Ok((tracks, next))
+                    }
+                }
+            })
+            .await
+            .context("QQ 音乐推荐队列请求等待超过 30 秒")
+            .and_then(|result| result);
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.queue_generation != generation {
+                    return;
+                }
+                this.queue_recommendation_loading = false;
+                match result {
+                    Ok((tracks, continuation)) => {
+                        let mut first_added = None;
+                        if let Some(queue) = &mut this.playback_queue {
+                            queue.continuation = continuation;
+                            for track in tracks {
+                                if !queue.tracks.iter().any(|item| item.mid == track.mid) {
+                                    first_added.get_or_insert(queue.tracks.len());
+                                    queue.tracks.push(track);
+                                }
+                            }
+                        }
+                        this.persist_current_playback();
+                        if this.queue_waiting_for_recommendation {
+                            this.queue_waiting_for_recommendation = false;
+                            if let Some(index) = first_added {
+                                this.start_playback(index, Duration::ZERO, None, true, cx);
+                            } else {
+                                this.status = StatusMessage::info("当前推荐暂时没有更多歌曲");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        this.queue_waiting_for_recommendation = false;
+                        this.status =
+                            StatusMessage::error(format!("继续加载推荐歌曲失败：{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn load_library(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
         let Some(credential) = self.credential.clone() else {
             return;
@@ -800,13 +1568,7 @@ impl LyruneView {
             .pending_playback_restore
             .clone()
             .filter(|restore| restore.account_id == account_id);
-        let playback_playlist = playback_restore.as_ref().and_then(|restore| {
-            playlists
-                .iter()
-                .find(|playlist| playlist.id == restore.playlist_id)
-                .cloned()
-        });
-        if self.pending_playback_restore.is_some() && playback_playlist.is_none() {
+        if self.pending_playback_restore.is_some() && playback_restore.is_none() {
             self.clear_persisted_playback();
         }
         self.playlist_list.update(cx, |list, cx| {
@@ -814,24 +1576,25 @@ impl LyruneView {
             cx.notify();
         });
         if count > 0 {
-            self.select_playlist_with_refresh(viewed_index.unwrap_or(0), force_refresh, cx);
+            self.select_playlist_with_refresh(viewed_index.unwrap_or(0), force_refresh, false, cx);
         } else {
             self.status = StatusMessage::info("QQ 音乐账号中没有可显示的歌单");
             cx.notify();
         }
-        if let (Some(playlist), Some(restore)) = (playback_playlist, playback_restore) {
-            self.restore_playback_queue(playlist, restore, cx);
+        if let Some(restore) = playback_restore {
+            self.restore_playback_queue(restore, cx);
         }
     }
 
     fn select_playlist(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.select_playlist_with_refresh(index, false, cx);
+        self.select_playlist_with_refresh(index, false, true, cx);
     }
 
     fn select_playlist_with_refresh(
         &mut self,
         index: usize,
         force_refresh: bool,
+        record_navigation: bool,
         cx: &mut Context<Self>,
     ) {
         let playlist = self
@@ -859,17 +1622,311 @@ impl LyruneView {
             }
         }
 
+        if record_navigation {
+            let target = NavigationPage::Playlist {
+                playlist: playlist.clone(),
+                selected_index: Some(index),
+            };
+            let current = self.current_navigation_page();
+            self.navigation_history.record(current, &target);
+        }
+        self.open_playlist(playlist, Some(index), force_refresh, cx);
+    }
+
+    fn open_search_artist(
+        &mut self,
+        artist: SearchArtist,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = NavigationPage::Artist { artist };
+        let current = self.current_navigation_page();
+        self.navigation_history.record(current, &target);
+        self.apply_navigation_page(target, window, cx);
+    }
+
+    fn open_artist(&mut self, artist: SearchArtist, cx: &mut Context<Self>) {
+        let artist_changed = self
+            .selected_artist
+            .as_ref()
+            .is_none_or(|selected| selected.mid != artist.mid);
+        if artist_changed {
+            self.artist_generation = self.artist_generation.wrapping_add(1);
+            self.artist_songs = None;
+            self.artist_track_count = 0;
+            self.artist_songs_loading = false;
+            self.artist_songs_loading_more = false;
+            self.artist_song_error = None;
+            self.artist_albums = None;
+            self.artist_albums_loading = false;
+            self.artist_albums_loading_more = false;
+            self.artist_album_error = None;
+        }
+        self.selected_artist = Some(artist);
+        self.main_content = MainContent::Artist;
+        if self.artist_songs.is_none() && !self.artist_songs_loading {
+            self.load_artist_songs(false, cx);
+        }
+        if self.artist_albums.is_none() && !self.artist_albums_loading {
+            self.load_artist_albums(false, cx);
+        }
+        cx.notify();
+    }
+
+    fn load_artist_songs(&mut self, append: bool, cx: &mut Context<Self>) {
+        if self.artist_songs_loading || self.artist_songs_loading_more {
+            return;
+        }
+        let Some(artist) = self.selected_artist.clone() else {
+            return;
+        };
+        let Some(credential) = self.credential.clone() else {
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            self.artist_song_error = Some("QQ 音乐客户端不可用".to_owned());
+            cx.notify();
+            return;
+        };
+        let offset = if append {
+            let Some(page) = self.artist_songs.as_ref().filter(|page| page.has_more) else {
+                return;
+            };
+            page.next_offset
+        } else {
+            0
+        };
+        let generation = self.artist_generation;
+        let artist_mid = artist.mid.clone();
+        let playlist = artist.into_playlist();
+        self.artist_song_error = None;
+        if append {
+            self.artist_songs_loading_more = true;
+        } else {
+            self.artist_songs_loading = true;
+        }
+        cx.notify();
+
+        let (sender, receiver) = async_channel::bounded(1);
+        drop(RUNTIME.spawn(async move {
+            let result = client
+                .playlist_page(&credential, &playlist, offset, ARTIST_PAGE_SIZE)
+                .await;
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.artist_generation != generation
+                    || this
+                        .selected_artist
+                        .as_ref()
+                        .map(|artist| artist.mid.as_str())
+                        != Some(artist_mid.as_str())
+                {
+                    return;
+                }
+                this.finish_artist_song_load(result, append);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn finish_artist_song_load(&mut self, result: anyhow::Result<PlaylistPage>, append: bool) {
+        self.artist_songs_loading = false;
+        self.artist_songs_loading_more = false;
+        match result {
+            Ok(page) => {
+                self.artist_track_count = page.total;
+                let page = SearchPage {
+                    items: page.tracks,
+                    has_more: page.has_more,
+                    next_offset: page.next_offset,
+                };
+                if append {
+                    if let Some(songs) = &mut self.artist_songs {
+                        append_search_page(songs, page);
+                    } else {
+                        self.artist_songs = Some(page);
+                    }
+                } else {
+                    self.artist_songs = Some(page);
+                }
+            }
+            Err(error) => {
+                self.artist_song_error = Some(format!("加载歌手歌曲失败：{error:#}"));
+            }
+        }
+    }
+
+    fn load_artist_albums(&mut self, append: bool, cx: &mut Context<Self>) {
+        if self.artist_albums_loading || self.artist_albums_loading_more {
+            return;
+        }
+        let Some(artist) = self.selected_artist.clone() else {
+            return;
+        };
+        let Some(credential) = self.credential.clone() else {
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            self.artist_album_error = Some("QQ 音乐客户端不可用".to_owned());
+            cx.notify();
+            return;
+        };
+        let offset = if append {
+            let Some(page) = self.artist_albums.as_ref().filter(|page| page.has_more) else {
+                return;
+            };
+            page.next_offset
+        } else {
+            0
+        };
+        let generation = self.artist_generation;
+        let artist_mid = artist.mid.clone();
+        self.artist_album_error = None;
+        if append {
+            self.artist_albums_loading_more = true;
+        } else {
+            self.artist_albums_loading = true;
+        }
+        cx.notify();
+
+        let (sender, receiver) = async_channel::bounded(1);
+        drop(RUNTIME.spawn(async move {
+            let result = client
+                .artist_albums(&credential, &artist, offset, ARTIST_PAGE_SIZE)
+                .await;
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.artist_generation != generation
+                    || this
+                        .selected_artist
+                        .as_ref()
+                        .map(|artist| artist.mid.as_str())
+                        != Some(artist_mid.as_str())
+                {
+                    return;
+                }
+                this.finish_artist_album_load(result, append);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn finish_artist_album_load(
+        &mut self,
+        result: anyhow::Result<SearchPage<SearchAlbum>>,
+        append: bool,
+    ) {
+        self.artist_albums_loading = false;
+        self.artist_albums_loading_more = false;
+        match result {
+            Ok(page) if append => {
+                if let Some(albums) = &mut self.artist_albums {
+                    append_search_page(albums, page);
+                } else {
+                    self.artist_albums = Some(page);
+                }
+            }
+            Ok(page) => self.artist_albums = Some(page),
+            Err(error) => {
+                self.artist_album_error = Some(format!("加载歌手专辑失败：{error:#}"));
+            }
+        }
+    }
+
+    fn select_artist_track(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(artist) = self.selected_artist.clone() else {
+            return;
+        };
+        let Some(songs) = self.artist_songs.as_ref() else {
+            return;
+        };
+        let Some(selected_track) = songs.items.get(index) else {
+            return;
+        };
+        let mut playlist = artist.into_playlist();
+        playlist.track_count = self.artist_track_count;
+
+        if let Some(queue_index) = self.playback_queue.as_ref().and_then(|queue| {
+            (queue.playlist_id == playlist.id)
+                .then(|| {
+                    queue
+                        .tracks
+                        .iter()
+                        .position(|track| track.mid == selected_track.mid)
+                })
+                .flatten()
+        }) {
+            if self.current_track == Some(queue_index) {
+                if self.loading_track.is_none() {
+                    self.toggle_playback(cx);
+                }
+            } else {
+                self.start_playback(queue_index, Duration::ZERO, None, true, cx);
+            }
+            return;
+        }
+
+        let tracks = songs.items.clone();
+        let has_more = songs.has_more;
+        self.pending_playback_restore = None;
+        self.replace_playback_queue(playlist, tracks, has_more, cx);
+        self.start_playback(index, Duration::ZERO, None, true, cx);
+    }
+
+    fn open_home_playlist(
+        &mut self,
+        playlist: UserPlaylist,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = NavigationPage::Playlist {
+            playlist: playlist.clone(),
+            selected_index: None,
+        };
+        let current = self.current_navigation_page();
+        self.navigation_history.record(current, &target);
+        self.playlist_list.update(cx, |list, cx| {
+            list.set_selected_index(None, window, cx);
+        });
+        self.open_playlist(playlist, None, false, cx);
+    }
+
+    fn open_playlist(
+        &mut self,
+        playlist: UserPlaylist,
+        selected_index: Option<usize>,
+        force_refresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.main_content = MainContent::Playlist;
+
         self.playlist_generation = self.playlist_generation.wrapping_add(1);
         self.playlist_force_refresh = force_refresh;
         self.playlist_cache_revision = new_cache_revision();
-        self.selected_playlist_index = Some(index);
+        self.selected_playlist_index = selected_index;
         self.selected_playlist = Some(playlist.clone());
         self.page_offset = 0;
         self.page_loading = false;
-        self.playlist_list.update(cx, |list, cx| {
-            list.delegate_mut().set_selected(index);
-            cx.notify();
-        });
+        if let Some(index) = selected_index {
+            self.playlist_list.update(cx, |list, cx| {
+                list.delegate_mut().set_selected(index);
+                cx.notify();
+            });
+        }
         self.track_table.update(cx, |table, cx| {
             table.delegate_mut().reset();
             table.refresh(cx);
@@ -1026,110 +2083,26 @@ impl LyruneView {
         .detach();
     }
 
-    fn restore_playback_queue(
-        &mut self,
-        playlist: UserPlaylist,
-        restore: PersistedPlayback,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(credential) = self.credential.clone() else {
-            return;
-        };
-        let cached = self.library_cache.fresh_playlist(
-            credential.music_id,
-            &playlist.id,
-            unix_timestamp_secs(),
-            LIBRARY_CACHE_TTL,
-        );
-        let (initial_tracks, initial_offset, initial_has_more, cached_playlist, cache_revision) =
-            cached
-                .map(|snapshot| {
-                    (
-                        snapshot.tracks,
-                        snapshot.next_offset,
-                        snapshot.has_more,
-                        snapshot.playlist,
-                        snapshot.revision,
-                    )
-                })
-                .unwrap_or_else(|| (Vec::new(), 0, true, playlist.clone(), new_cache_revision()));
-        let client = self.protocol_client.clone();
-        let requests = self.playlist_page_requests.clone();
-
-        self.queue_generation = self.queue_generation.wrapping_add(1);
-        let generation = self.queue_generation;
-        let playlist_id = playlist.id.clone();
-        let track_mid = restore.track_mid.clone();
-        let account_id = credential.music_id;
-        let (sender, receiver) = async_channel::bounded(1);
-        drop(RUNTIME.spawn(async move {
-            let result = async {
-                let mut tracks = initial_tracks;
-                let mut offset = initial_offset;
-                let mut has_more = initial_has_more;
-                while has_more {
-                    let client = client.as_ref().context("QQ 音乐客户端不可用")?;
-                    let page = request_playlist_page(
-                        requests.clone(),
-                        client.clone(),
-                        credential.clone(),
-                        playlist.clone(),
-                        offset,
-                        false,
-                    )
-                    .await
-                    .context("无法恢复 QQ 音乐播放队列")?;
-                    offset = page.next_offset;
-                    has_more = page.has_more;
-                    tracks.extend(page.tracks);
-                }
-                let index = tracks.iter().position(|track| track.mid == track_mid);
-                Ok::<_, anyhow::Error>((tracks, index))
-            }
-            .await;
-            let _ = sender.send(result).await;
-        }));
-
-        cx.spawn(async move |this, cx| {
-            let Ok(result) = receiver.recv().await else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                if this.queue_generation != generation {
-                    return;
-                }
-                match result {
-                    Ok((tracks, index)) => {
-                        this.library_cache.replace_playlist(
-                            account_id,
-                            cached_playlist,
-                            tracks.clone(),
-                            false,
-                            tracks.len() as u64,
-                            unix_timestamp_secs(),
-                            cache_revision,
-                        );
-                        this.persist_library_cache();
-                        if let Some(index) = index {
-                            let resume_at = restore.resume_position(tracks[index].duration_seconds);
-                            this.pending_playback_restore = None;
-                            this.playback_queue = Some(PlaybackQueue {
-                                playlist_id,
-                                tracks,
-                            });
-                            this.start_playback(index, resume_at, None, false, cx);
-                        } else {
-                            this.clear_persisted_playback();
-                        }
-                    }
-                    Err(error) => {
-                        this.status = StatusMessage::error(format!("恢复播放队列失败：{error:#}"));
-                        cx.notify();
-                    }
-                }
+    fn restore_playback_queue(&mut self, restore: PersistedPlayback, cx: &mut Context<Self>) {
+        let index = restore
+            .queue_tracks
+            .iter()
+            .position(|track| track.mid == restore.track_mid);
+        if let Some(index) = index {
+            let resume_at = restore.resume_position(restore.queue_tracks[index].duration_seconds);
+            self.pending_playback_restore = None;
+            self.queue_generation = self.queue_generation.wrapping_add(1);
+            self.queue_recommendation_loading = false;
+            self.queue_waiting_for_recommendation = false;
+            self.playback_queue = Some(PlaybackQueue {
+                playlist_id: restore.playlist_id,
+                tracks: restore.queue_tracks,
+                continuation: restore.queue_continuation,
             });
-        })
-        .detach();
+            self.start_playback(index, resume_at, None, false, cx);
+        } else {
+            self.clear_persisted_playback();
+        }
     }
 
     fn replace_playback_queue(
@@ -1139,13 +2112,18 @@ impl LyruneView {
         has_more: bool,
         cx: &mut Context<Self>,
     ) {
+        self.home_recommendation_loading = None;
         self.queue_generation = self.queue_generation.wrapping_add(1);
         let generation = self.queue_generation;
         let mut offset = tracks.len() as u64;
+        let initial_tracks = tracks.clone();
         self.playback_queue = Some(PlaybackQueue {
             playlist_id: playlist.id.clone(),
             tracks,
+            continuation: None,
         });
+        self.queue_recommendation_loading = false;
+        self.queue_waiting_for_recommendation = false;
 
         if !has_more {
             return;
@@ -1196,18 +2174,25 @@ impl LyruneView {
                     return;
                 }
                 if let (Some(queue), Ok(tracks)) = (&mut this.playback_queue, result) {
-                    queue.tracks.extend(tracks);
-                    let cached_tracks = queue.tracks.clone();
+                    let mut cached_tracks = initial_tracks;
+                    cached_tracks.extend(tracks.iter().cloned());
+                    for track in tracks {
+                        if !queue.tracks.iter().any(|item| item.mid == track.mid) {
+                            queue.tracks.push(track);
+                        }
+                    }
+                    let cached_track_count = cached_tracks.len() as u64;
                     this.library_cache.replace_playlist(
                         account_id,
                         cached_playlist,
                         cached_tracks,
                         false,
-                        queue.tracks.len() as u64,
+                        cached_track_count,
                         unix_timestamp_secs(),
                         cache_revision,
                     );
                     this.persist_library_cache();
+                    this.persist_current_playback();
                     cx.notify();
                 }
             });
@@ -1332,11 +2317,13 @@ impl LyruneView {
         } else {
             format!("正在缓冲“{}”…", track.title)
         });
+        self.queue_waiting_for_recommendation = false;
         self.persist_current_playback();
         self.sync_table_playback_state(cx);
         #[cfg(target_os = "linux")]
         self.sync_mpris(!same_track && !resume_at.is_zero());
         cx.notify();
+        self.maybe_load_queue_recommendations(false, cx);
 
         let title = track.title.clone();
         let (sender, receiver) = async_channel::bounded(1);
@@ -1679,19 +2666,33 @@ impl LyruneView {
         if len == 0 {
             return;
         }
+        let continuation = self
+            .playback_queue
+            .as_ref()
+            .and_then(|queue| queue.continuation);
+        let can_extend = continuation.is_some_and(PersistedQueueContinuation::can_load_more);
         let next = if automatic && self.repeat_mode == RepeatMode::One {
             Some(index)
-        } else if self.shuffle && len > 1 {
+        } else if continuation.is_none() && self.shuffle && len > 1 {
             Some(self.random_track_index(index, len))
         } else if index + 1 < len {
             Some(index + 1)
-        } else if self.repeat_mode == RepeatMode::All {
+        } else if !can_extend && self.repeat_mode == RepeatMode::All {
             Some(0)
         } else {
             None
         };
         if let Some(next) = next {
             self.start_playback(next, Duration::ZERO, None, true, cx);
+        } else if can_extend {
+            self.playback_started = false;
+            self.queue_waiting_for_recommendation = true;
+            self.status = StatusMessage::info("正在获取下一首推荐…");
+            self.maybe_load_queue_recommendations(true, cx);
+            self.persist_current_playback();
+            #[cfg(target_os = "linux")]
+            self.sync_mpris(false);
+            cx.notify();
         } else {
             self.playback_started = false;
             self.position = self.current_duration().unwrap_or_default();
@@ -1841,6 +2842,15 @@ impl LyruneView {
             playlist_id,
             track_mid,
             position_ms: position.as_millis().min(u64::MAX as u128) as u64,
+            queue_tracks: self
+                .playback_queue
+                .as_ref()
+                .map(|queue| queue.tracks.clone())
+                .unwrap_or_default(),
+            queue_continuation: self
+                .playback_queue
+                .as_ref()
+                .and_then(|queue| queue.continuation),
         };
         if self.settings.current_playback.as_ref() != Some(&current_playback) {
             self.settings.current_playback = Some(current_playback);
@@ -1909,9 +2919,15 @@ impl LyruneView {
             .playback_queue
             .as_ref()
             .map_or((0, None), |queue| (queue.tracks.len(), self.current_track));
+        let can_extend = self
+            .playback_queue
+            .as_ref()
+            .and_then(|queue| queue.continuation)
+            .is_some_and(PersistedQueueContinuation::can_load_more);
         let can_go_next = audio_available
             && current_index.is_some_and(|index| {
-                (self.shuffle && queue_len > 1)
+                can_extend
+                    || (self.shuffle && queue_len > 1)
                     || index + 1 < queue_len
                     || (self.repeat_mode == RepeatMode::All && queue_len > 0)
             });
@@ -2023,6 +3039,7 @@ impl LyruneView {
         self.login_generation = self.login_generation.wrapping_add(1);
         self.library_generation = self.library_generation.wrapping_add(1);
         self.playlist_generation = self.playlist_generation.wrapping_add(1);
+        self.home_generation = self.home_generation.wrapping_add(1);
         self.queue_generation = self.queue_generation.wrapping_add(1);
         self.play_generation = self.play_generation.wrapping_add(1);
         if let Some(audio) = &self.audio {
@@ -2033,10 +3050,19 @@ impl LyruneView {
         self.profile = None;
         self.qr_image = None;
         self.library_loading = false;
+        self.main_content = MainContent::Playlist;
+        self.navigation_history.clear();
+        self.home_playlists.clear();
+        self.home_loading = false;
+        self.home_loaded = false;
+        self.home_error = None;
+        self.home_recommendation_loading = None;
         self.selected_playlist_index = None;
         self.selected_playlist = None;
         self.page_loading = false;
         self.playback_queue = None;
+        self.queue_recommendation_loading = false;
+        self.queue_waiting_for_recommendation = false;
         self.current_track = None;
         self.loading_track = None;
         self.loading_autoplay = false;
@@ -2373,14 +3399,29 @@ impl LyruneView {
             px(18.),
             cx,
         ));
-        let owner = if playlist.owner.is_empty() {
-            self.profile
-                .as_ref()
-                .map(|profile| profile.nickname.as_str())
-                .unwrap_or("QQ 音乐用户")
-        } else {
-            &playlist.owner
-        };
+        let owned_by_profile = matches!(
+            &playlist.id,
+            UserPlaylistId::Liked | UserPlaylistId::Created { .. }
+        );
+        let owner = (!playlist.owner.is_empty())
+            .then(|| playlist.owner.clone())
+            .or_else(|| {
+                if owned_by_profile {
+                    self.profile
+                        .as_ref()
+                        .map(|profile| profile.nickname.clone())
+                } else {
+                    None
+                }
+            });
+        let owner_avatar_url = playlist.owner_avatar_url.clone().or_else(|| {
+            owned_by_profile
+                .then(|| self.profile.as_ref()?.avatar_url.clone())
+                .flatten()
+        });
+        let owner_identity = owner.zip(owner_avatar_url);
+        let has_owner = owner_identity.is_some();
+        let description = single_line_summary(&playlist.description);
         let has_tracks = !self.track_table.read(cx).delegate().tracks().is_empty();
         div()
             .h(if narrow {
@@ -2421,11 +3462,17 @@ impl LyruneView {
                                         .text_xs()
                                         .font_medium()
                                         .text_color(theme.muted_foreground)
-                                        .child("歌单"),
+                                        .child(match &playlist.id {
+                                            UserPlaylistId::Artist { .. } => "歌手",
+                                            UserPlaylistId::Album { .. } => "专辑",
+                                            _ => "歌单",
+                                        }),
                                 ),
                             )
                             .child(
                                 div()
+                                    .min_w_0()
+                                    .w_full()
                                     .truncate()
                                     .text_size(if narrow {
                                         px(34.)
@@ -2445,16 +3492,16 @@ impl LyruneView {
                                     .child(playlist.title),
                             )
                             .when(
-                                playlist.id != UserPlaylistId::Liked
-                                    && !playlist.description.is_empty(),
+                                playlist.id != UserPlaylistId::Liked && !description.is_empty(),
                                 |this| {
                                     this.child(
                                         div()
+                                            .w_full()
                                             .max_w(px(720.))
-                                            .line_clamp(1)
+                                            .truncate()
                                             .text_sm()
                                             .text_color(theme.secondary_foreground)
-                                            .child(playlist.description),
+                                            .child(description),
                                     )
                                 },
                             )
@@ -2465,22 +3512,34 @@ impl LyruneView {
                                     .gap_2()
                                     .text_sm()
                                     .font_medium()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .max_w(if narrow { px(120.) } else { px(200.) })
-                                            .truncate()
-                                            .child(owner.to_owned()),
-                                    )
+                                    .when_some(owner_identity, |this, (owner, url)| {
+                                        this.child(
+                                            img(cached_image_source(url))
+                                                .size(px(18.))
+                                                .flex_shrink_0()
+                                                .rounded(px(999.)),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .max_w(if narrow { px(120.) } else { px(200.) })
+                                                .truncate()
+                                                .child(owner),
+                                        )
+                                    })
                                     .child(
                                         div()
                                             .font_normal()
                                             .text_color(theme.secondary_foreground)
-                                            .child(format!("· {} 首歌曲", playlist.track_count)),
+                                            .child(format!(
+                                                "{}{} 首歌曲",
+                                                if has_owner { "· " } else { "" },
+                                                playlist.track_count
+                                            )),
                                     ),
                             )
                             .child(
-                                h_flex().pt_2().gap_2().child(
+                                h_flex().pt_2().child(
                                     Button::new("play-all")
                                         .primary()
                                         .rounded(px(999.))
@@ -2535,6 +3594,1142 @@ impl LyruneView {
                                 .stripe(false)
                                 .with_size(px(64.)),
                         ),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_artist_header(
+        &mut self,
+        compact: bool,
+        narrow: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let Some(artist) = self.selected_artist.clone() else {
+            return div().into_any_element();
+        };
+        let cover_size = if narrow {
+            px(112.)
+        } else if compact {
+            px(142.)
+        } else {
+            px(176.)
+        };
+        let cover = div()
+            .rounded(px(999.))
+            .shadow_md()
+            .child(self.render_search_cover(
+                artist.cover_url,
+                MediaIcon::Artist,
+                cover_size,
+                px(999.),
+                cx,
+            ));
+        let track_count = self.artist_track_count;
+        let has_tracks = self
+            .artist_songs
+            .as_ref()
+            .is_some_and(|songs| !songs.items.is_empty());
+
+        div()
+            .h(if narrow {
+                px(190.)
+            } else if compact {
+                px(214.)
+            } else {
+                px(246.)
+            })
+            .w_full()
+            .px_6()
+            .pt_4()
+            .pb_5()
+            .child(
+                h_flex()
+                    .size_full()
+                    .items_end()
+                    .gap(if narrow {
+                        px(16.)
+                    } else if compact {
+                        px(20.)
+                    } else {
+                        px(28.)
+                    })
+                    .child(cover)
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .gap_2()
+                            .child(
+                                h_flex().child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(px(999.))
+                                        .bg(theme.muted)
+                                        .text_xs()
+                                        .font_medium()
+                                        .text_color(theme.muted_foreground)
+                                        .child("歌手"),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(if narrow {
+                                        px(34.)
+                                    } else if compact {
+                                        px(40.)
+                                    } else {
+                                        px(52.)
+                                    })
+                                    .line_height(if narrow {
+                                        px(45.)
+                                    } else if compact {
+                                        px(52.)
+                                    } else {
+                                        px(68.)
+                                    })
+                                    .font_semibold()
+                                    .child(artist.name),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_medium()
+                                    .text_color(theme.secondary_foreground)
+                                    .child(if track_count == 0 {
+                                        "歌曲与专辑".to_owned()
+                                    } else {
+                                        format!("{track_count} 首歌曲")
+                                    }),
+                            )
+                            .child(
+                                h_flex().pt_2().child(
+                                    Button::new("play-all-artist")
+                                        .primary()
+                                        .rounded(px(999.))
+                                        .h(px(44.))
+                                        .min_w(px(44.))
+                                        .px_4()
+                                        .tooltip("从第一首开始播放")
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .text_color(theme.primary_foreground)
+                                                .child(media_icon(
+                                                    MediaIcon::Play,
+                                                    self.settings.color_theme.icon_on_accent(),
+                                                    px(17.),
+                                                ))
+                                                .child("播放全部"),
+                                        )
+                                        .disabled(!has_tracks)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.select_artist_track(0, cx)
+                                        })),
+                                ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_artist_content(
+        &mut self,
+        compact: bool,
+        narrow: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let songs = self.artist_songs.clone();
+        let song_has_more = songs.as_ref().is_some_and(|page| page.has_more);
+        let song_body = if self.artist_songs_loading {
+            h_flex()
+                .h(px(92.))
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .text_color(theme.muted_foreground)
+                .child(Spinner::new().with_size(px(22.)).color(theme.primary))
+                .child("正在加载歌曲…")
+                .into_any_element()
+        } else if let Some(error) = self.artist_song_error.clone() {
+            h_flex()
+                .h(px(92.))
+                .items_center()
+                .justify_center()
+                .gap_4()
+                .text_color(theme.muted_foreground)
+                .child(error)
+                .child(
+                    Button::new("retry-artist-songs")
+                        .outline()
+                        .h(px(40.))
+                        .px_4()
+                        .label("重新加载")
+                        .on_click(cx.listener(|this, _, _, cx| this.load_artist_songs(false, cx))),
+                )
+                .into_any_element()
+        } else if let Some(songs) = songs.filter(|page| !page.items.is_empty()) {
+            self.render_song_rows(songs.items, narrow, SongRowSource::Artist, cx)
+        } else {
+            h_flex()
+                .h(px(72.))
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .child("暂无歌曲")
+                .into_any_element()
+        };
+
+        let albums = self.artist_albums.clone();
+        let album_has_more = albums.as_ref().is_some_and(|page| page.has_more);
+        let album_body = if self.artist_albums_loading {
+            h_flex()
+                .h(px(120.))
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .text_color(theme.muted_foreground)
+                .child(Spinner::new().with_size(px(22.)).color(theme.primary))
+                .child("正在加载专辑…")
+                .into_any_element()
+        } else if let Some(error) = self.artist_album_error.clone() {
+            h_flex()
+                .h(px(120.))
+                .items_center()
+                .justify_center()
+                .gap_4()
+                .text_color(theme.muted_foreground)
+                .child(error)
+                .child(
+                    Button::new("retry-artist-albums")
+                        .outline()
+                        .h(px(40.))
+                        .px_4()
+                        .label("重新加载")
+                        .on_click(cx.listener(|this, _, _, cx| this.load_artist_albums(false, cx))),
+                )
+                .into_any_element()
+        } else if let Some(albums) = albums.filter(|page| !page.items.is_empty()) {
+            self.render_search_cards(
+                SearchCategory::Albums,
+                Vec::new(),
+                albums.items,
+                Vec::new(),
+                compact,
+                cx,
+            )
+        } else {
+            h_flex()
+                .h(px(72.))
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .child("暂无专辑")
+                .into_any_element()
+        };
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(
+                div().flex_1().min_h_0().overflow_y_scrollbar().child(
+                    v_flex()
+                        .w_full()
+                        .child(self.render_artist_header(compact, narrow, cx))
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .px(if narrow { px(20.) } else { px(24.) })
+                                .pb_10()
+                                .gap_10()
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .gap_3()
+                                        .child(
+                                            div().text_size(px(24.)).font_semibold().child("歌曲"),
+                                        )
+                                        .child(song_body)
+                                        .when(song_has_more, |this| {
+                                            this.child(
+                                                h_flex().child(
+                                                    Button::new("load-more-artist-songs")
+                                                        .outline()
+                                                        .h(px(40.))
+                                                        .px_4()
+                                                        .loading(self.artist_songs_loading_more)
+                                                        .disabled(self.artist_songs_loading_more)
+                                                        .label(if self.artist_songs_loading_more {
+                                                            "正在加载…"
+                                                        } else {
+                                                            "查看更多"
+                                                        })
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.load_artist_songs(true, cx)
+                                                        })),
+                                                ),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .gap_4()
+                                        .child(
+                                            div().text_size(px(24.)).font_semibold().child("专辑"),
+                                        )
+                                        .child(album_body)
+                                        .when(album_has_more, |this| {
+                                            this.child(
+                                                h_flex().child(
+                                                    Button::new("load-more-artist-albums")
+                                                        .outline()
+                                                        .h(px(40.))
+                                                        .px_4()
+                                                        .loading(self.artist_albums_loading_more)
+                                                        .disabled(self.artist_albums_loading_more)
+                                                        .label(if self.artist_albums_loading_more {
+                                                            "正在加载…"
+                                                        } else {
+                                                            "查看更多"
+                                                        })
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.load_artist_albums(true, cx)
+                                                        })),
+                                                ),
+                                            )
+                                        }),
+                                ),
+                        ),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_home(&mut self, compact: bool, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        if self.home_loading && self.home_playlists.is_empty() {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .text_color(theme.muted_foreground)
+                .child(Spinner::new().with_size(px(24.)).color(theme.primary))
+                .child("正在加载主页推荐…")
+                .into_any_element();
+        }
+        if self.home_playlists.is_empty()
+            && let Some(error) = self.home_error.clone()
+        {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_4()
+                .text_color(theme.muted_foreground)
+                .child(error)
+                .child(
+                    Button::new("retry-home")
+                        .outline()
+                        .h(px(44.))
+                        .px_4()
+                        .label("重新加载")
+                        .on_click(cx.listener(|this, _, _, cx| this.load_home(cx))),
+                )
+                .into_any_element();
+        }
+        if self.home_loaded && self.home_playlists.is_empty() {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_color(theme.muted_foreground)
+                .child("QQ 音乐暂时没有返回可显示的歌单推荐")
+                .into_any_element();
+        }
+
+        let cover_size = if narrow {
+            px(132.)
+        } else if compact {
+            px(148.)
+        } else {
+            px(168.)
+        };
+        let card_width = cover_size + px(16.);
+        let feature_width = if narrow {
+            px(304.)
+        } else if compact {
+            px(344.)
+        } else {
+            px(384.)
+        };
+        let grid_width = if narrow {
+            px(640.)
+        } else if compact {
+            px(704.)
+        } else {
+            px(784.)
+        };
+        let cards = self
+            .home_playlists
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, playlist)| {
+                let cover = playlist_cover(&playlist, cover_size, px(14.), cx);
+                let title = playlist.title.clone();
+                let subtitle = if playlist.description.is_empty() {
+                    "为你推荐".to_owned()
+                } else {
+                    playlist.description.clone()
+                };
+                Button::new(format!("home-playlist-{index}"))
+                    .ghost()
+                    .w(card_width)
+                    .h(cover_size + px(74.))
+                    .p_2()
+                    .rounded(px(12.))
+                    .tooltip(title.clone())
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .items_start()
+                            .gap_2()
+                            .child(div().rounded(px(14.)).shadow_sm().child(cover))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .font_medium()
+                                    .text_color(theme.foreground)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(subtitle),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_home_playlist(playlist.clone(), window, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let recommendation_loading = self.home_recommendation_loading.is_some();
+        let radar_loading = self.home_recommendation_loading == Some(RecommendationKind::Radar);
+        let guess_loading = self.home_recommendation_loading == Some(RecommendationKind::Guess);
+        let radar_icon = if radar_loading {
+            Spinner::new()
+                .with_size(px(24.))
+                .color(theme.primary)
+                .into_any_element()
+        } else {
+            media_icon_hsla(MediaIcon::Radar, theme.primary, px(25.))
+        };
+        let guess_icon = if guess_loading {
+            Spinner::new()
+                .with_size(px(24.))
+                .color(theme.primary)
+                .into_any_element()
+        } else {
+            media_icon_hsla(MediaIcon::Headphones, theme.primary, px(25.))
+        };
+        let recommendation_cards = [
+            Button::new("home-radar")
+                .ghost()
+                .w(feature_width)
+                .h(px(92.))
+                .p_4()
+                .rounded(px(12.))
+                .bg(theme.muted.opacity(0.7))
+                .tooltip("播放专属雷达")
+                .disabled(recommendation_loading)
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap_4()
+                        .child(
+                            div()
+                                .size(px(48.))
+                                .flex_shrink_0()
+                                .rounded(px(10.))
+                                .bg(theme.background.opacity(0.55))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(radar_icon),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_1()
+                                .child(div().font_semibold().child("专属雷达"))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("不断更新的个性推荐"),
+                                ),
+                        ),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.start_home_recommendation(RecommendationKind::Radar, cx)
+                })),
+            Button::new("home-guess")
+                .ghost()
+                .w(feature_width)
+                .h(px(92.))
+                .p_4()
+                .rounded(px(12.))
+                .bg(theme.muted.opacity(0.7))
+                .tooltip("播放猜你喜欢")
+                .disabled(recommendation_loading)
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap_4()
+                        .child(
+                            div()
+                                .size(px(48.))
+                                .flex_shrink_0()
+                                .rounded(px(10.))
+                                .bg(theme.background.opacity(0.55))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(guess_icon),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_1()
+                                .child(div().font_semibold().child("猜你喜欢"))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("持续生成的个性漫游"),
+                                ),
+                        ),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.start_home_recommendation(RecommendationKind::Guess, cx)
+                })),
+        ];
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .child(
+                v_flex()
+                    .w_full()
+                    .px(if narrow { px(20.) } else { px(28.) })
+                    .pt(if narrow { px(22.) } else { px(32.) })
+                    .pb_8()
+                    .child(
+                        h_flex().w_full().justify_center().child(
+                            v_flex()
+                                .w_full()
+                                .max_w(grid_width)
+                                .gap_6()
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .px_2()
+                                                .text_size(if narrow { px(22.) } else { px(24.) })
+                                                .font_semibold()
+                                                .child("专属推荐"),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .items_start()
+                                                .flex_wrap()
+                                                .gap_4()
+                                                .children(recommendation_cards),
+                                        ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .px_2()
+                                        .child(
+                                            div()
+                                                .text_size(if narrow { px(22.) } else { px(24.) })
+                                                .font_semibold()
+                                                .child("推荐歌单"),
+                                        )
+                                        .when_some(self.home_error.clone(), |header, error| {
+                                            header.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(error),
+                                            )
+                                        }),
+                                )
+                                .child(h_flex().items_start().flex_wrap().gap_4().children(cards)),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_search_cover(
+        &self,
+        cover_url: Option<String>,
+        icon: MediaIcon,
+        size: Pixels,
+        radius: Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        match cover_url {
+            Some(url) => img(cached_image_source(url))
+                .size(size)
+                .flex_shrink_0()
+                .rounded(radius)
+                .into_any_element(),
+            None => div()
+                .size(size)
+                .flex_shrink_0()
+                .rounded(radius)
+                .bg(theme.muted)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(media_icon_hsla(icon, theme.muted_foreground, size * 0.38))
+                .into_any_element(),
+        }
+    }
+
+    fn render_search_songs(
+        &mut self,
+        songs: Vec<Track>,
+        narrow: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.render_song_rows(songs, narrow, SongRowSource::Search, cx)
+    }
+
+    fn render_song_rows(
+        &mut self,
+        songs: Vec<Track>,
+        narrow: bool,
+        source: SongRowSource,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let current_mid = self.current_track_data().map(|track| track.mid.clone());
+        let loading_mid = self
+            .loading_track
+            .and_then(|index| self.playback_queue.as_ref()?.tracks.get(index))
+            .map(|track| track.mid.clone());
+        let is_playing = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
+        let rows = songs
+            .into_iter()
+            .enumerate()
+            .map(|(index, track)| {
+                let is_current = current_mid.as_deref() == Some(track.mid.as_str());
+                let is_loading = loading_mid.as_deref() == Some(track.mid.as_str());
+                let title = track.title.clone();
+                let artists = track.artists.clone();
+                let album = track.album.clone();
+                let duration = format_duration(track.duration_seconds);
+                let cover = self.render_search_cover(
+                    track.cover_url,
+                    MediaIcon::Music,
+                    px(48.),
+                    px(9.),
+                    cx,
+                );
+                Button::new(format!(
+                    "{}-song-{}-{}",
+                    match source {
+                        SongRowSource::Search => "search",
+                        SongRowSource::Artist => "artist",
+                    },
+                    track.mid,
+                    index
+                ))
+                .ghost()
+                .w_full()
+                .h(px(68.))
+                .px_3()
+                .rounded(px(10.))
+                .selected(is_current)
+                .tooltip(format!("播放 {title}"))
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(28.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when_else(
+                                    is_loading,
+                                    |this| {
+                                        this.child(
+                                            Spinner::new().with_size(px(17.)).color(theme.primary),
+                                        )
+                                    },
+                                    |this| {
+                                        this.child(media_icon_hsla(
+                                            if is_current && is_playing {
+                                                MediaIcon::Pause
+                                            } else {
+                                                MediaIcon::Play
+                                            },
+                                            if is_current {
+                                                theme.primary
+                                            } else {
+                                                theme.muted_foreground
+                                            },
+                                            px(17.),
+                                        ))
+                                    },
+                                ),
+                        )
+                        .child(cover)
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .flex_1()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .font_medium()
+                                        .text_color(if is_current {
+                                            theme.primary
+                                        } else {
+                                            theme.foreground
+                                        })
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(artists),
+                                ),
+                        )
+                        .when(!narrow, |row| {
+                            row.child(
+                                div()
+                                    .w(px(300.))
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(theme.secondary_foreground)
+                                    .child(album),
+                            )
+                        })
+                        .child(
+                            div()
+                                .w(px(52.))
+                                .flex_shrink_0()
+                                .text_right()
+                                .font_family("monospace")
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(duration),
+                        ),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| match source {
+                    SongRowSource::Search => this.select_search_track(index, cx),
+                    SongRowSource::Artist => this.select_artist_track(index, cx),
+                }))
+            })
+            .collect::<Vec<_>>();
+        v_flex().w_full().gap_1().children(rows).into_any_element()
+    }
+
+    fn render_search_cards(
+        &mut self,
+        category: SearchCategory,
+        artists: Vec<SearchArtist>,
+        albums: Vec<SearchAlbum>,
+        playlists: Vec<UserPlaylist>,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let cover_size = if compact { px(132.) } else { px(148.) };
+        let card_width = cover_size + px(16.);
+        let cards = match category {
+            SearchCategory::Artists => artists
+                .into_iter()
+                .enumerate()
+                .map(|(index, artist)| {
+                    let title = artist.name.clone();
+                    let cover = self.render_search_cover(
+                        artist.cover_url.clone(),
+                        MediaIcon::Artist,
+                        cover_size,
+                        px(999.),
+                        cx,
+                    );
+                    Button::new(format!("search-artist-{index}"))
+                        .ghost()
+                        .w(card_width)
+                        .h(cover_size + px(62.))
+                        .p_2()
+                        .rounded(px(12.))
+                        .tooltip(title.clone())
+                        .child(
+                            v_flex()
+                                .size_full()
+                                .items_center()
+                                .gap_3()
+                                .child(cover)
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .text_center()
+                                        .font_medium()
+                                        .text_color(theme.foreground)
+                                        .child(title),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_search_artist(artist.clone(), window, cx)
+                        }))
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
+            SearchCategory::Albums => albums
+                .into_iter()
+                .enumerate()
+                .map(|(index, album)| {
+                    let title = album.title.clone();
+                    let subtitle = album.artist.clone();
+                    let cover = self.render_search_cover(
+                        album.cover_url.clone(),
+                        MediaIcon::Album,
+                        cover_size,
+                        px(12.),
+                        cx,
+                    );
+                    let playlist = album.into_playlist();
+                    Button::new(format!("search-album-{index}"))
+                        .ghost()
+                        .w(card_width)
+                        .h(cover_size + px(74.))
+                        .p_2()
+                        .rounded(px(12.))
+                        .tooltip(title.clone())
+                        .child(
+                            v_flex()
+                                .size_full()
+                                .items_start()
+                                .gap_2()
+                                .child(cover)
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .font_medium()
+                                        .text_color(theme.foreground)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(subtitle),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_home_playlist(playlist.clone(), window, cx)
+                        }))
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
+            SearchCategory::Playlists => playlists
+                .into_iter()
+                .enumerate()
+                .map(|(index, playlist)| {
+                    let title = playlist.title.clone();
+                    let subtitle = if playlist.owner.is_empty() {
+                        "QQ 音乐歌单".to_owned()
+                    } else {
+                        playlist.owner.clone()
+                    };
+                    let cover = self.render_search_cover(
+                        playlist.cover_url.clone(),
+                        MediaIcon::Playlist,
+                        cover_size,
+                        px(12.),
+                        cx,
+                    );
+                    Button::new(format!("search-playlist-{index}"))
+                        .ghost()
+                        .w(card_width)
+                        .h(cover_size + px(74.))
+                        .p_2()
+                        .rounded(px(12.))
+                        .tooltip(title.clone())
+                        .child(
+                            v_flex()
+                                .size_full()
+                                .items_start()
+                                .gap_2()
+                                .child(cover)
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .font_medium()
+                                        .text_color(theme.foreground)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(subtitle),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_home_playlist(playlist.clone(), window, cx)
+                        }))
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>(),
+            SearchCategory::Songs => Vec::new(),
+        };
+        h_flex()
+            .w_full()
+            .items_start()
+            .flex_wrap()
+            .gap_4()
+            .children(cards)
+            .into_any_element()
+    }
+
+    fn render_search(&mut self, compact: bool, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let active_category = self.search_category;
+        let tabs = SearchCategory::ALL
+            .into_iter()
+            .map(|category| {
+                Button::new(format!("search-category-{}", category.label()))
+                    .ghost()
+                    .h(px(40.))
+                    .px_3()
+                    .rounded(px(9.))
+                    .selected(active_category == category)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(media_icon_hsla(
+                                category.icon(),
+                                if active_category == category {
+                                    theme.primary
+                                } else {
+                                    theme.secondary_foreground
+                                },
+                                px(17.),
+                            ))
+                            .child(category.label()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.search_category = category;
+                        this.search_error = None;
+                        cx.notify();
+                    }))
+            })
+            .collect::<Vec<_>>();
+
+        let mut content = v_flex().w_full();
+        let mut has_more = false;
+        let mut is_empty = false;
+        if let Some(results) = self.search_results.clone() {
+            match self.search_category {
+                SearchCategory::Songs => {
+                    has_more = results.songs.has_more;
+                    is_empty = results.songs.items.is_empty();
+                    content =
+                        content.child(self.render_search_songs(results.songs.items, narrow, cx));
+                }
+                SearchCategory::Artists => {
+                    has_more = results.artists.has_more;
+                    is_empty = results.artists.items.is_empty();
+                    content = content.child(self.render_search_cards(
+                        SearchCategory::Artists,
+                        results.artists.items,
+                        Vec::new(),
+                        Vec::new(),
+                        compact,
+                        cx,
+                    ));
+                }
+                SearchCategory::Albums => {
+                    has_more = results.albums.has_more;
+                    is_empty = results.albums.items.is_empty();
+                    content = content.child(self.render_search_cards(
+                        SearchCategory::Albums,
+                        Vec::new(),
+                        results.albums.items,
+                        Vec::new(),
+                        compact,
+                        cx,
+                    ));
+                }
+                SearchCategory::Playlists => {
+                    has_more = results.playlists.has_more;
+                    is_empty = results.playlists.items.is_empty();
+                    content = content.child(self.render_search_cards(
+                        SearchCategory::Playlists,
+                        Vec::new(),
+                        Vec::new(),
+                        results.playlists.items,
+                        compact,
+                        cx,
+                    ));
+                }
+            }
+        }
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .bg(theme.background)
+            .child(
+                div().flex_1().min_h_0().overflow_y_scrollbar().child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(1120.))
+                        .mx_auto()
+                        .px(if narrow { px(20.) } else { px(32.) })
+                        .pt(if narrow { px(20.) } else { px(28.) })
+                        .pb_8()
+                        .gap_5()
+                        .child(
+                            v_flex().child(
+                                div()
+                                    .text_size(if narrow { px(22.) } else { px(24.) })
+                                    .font_semibold()
+                                    .child(format!("搜索“{}”", self.search_query)),
+                            ),
+                        )
+                        .child(h_flex().gap_1().children(tabs))
+                        .when(self.search_loading, |this| {
+                            this.child(
+                                v_flex()
+                                    .h(px(260.))
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_3()
+                                    .text_color(theme.muted_foreground)
+                                    .child(Spinner::new().with_size(px(24.)).color(theme.primary))
+                                    .child("正在搜索…"),
+                            )
+                        })
+                        .when(
+                            !self.search_loading
+                                && self.search_results.is_none()
+                                && self.search_error.is_some(),
+                            |this| {
+                                this.child(
+                                    v_flex()
+                                        .h(px(260.))
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_4()
+                                        .text_color(theme.muted_foreground)
+                                        .child(self.search_error.clone().unwrap_or_default())
+                                        .child(
+                                            Button::new("retry-search")
+                                                .outline()
+                                                .h(px(44.))
+                                                .px_4()
+                                                .label("重新搜索")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.start_search(this.search_query.clone(), cx)
+                                                })),
+                                        ),
+                                )
+                            },
+                        )
+                        .when(
+                            !self.search_loading && self.search_results.is_some() && is_empty,
+                            |this| {
+                                this.child(
+                                    div()
+                                        .h(px(220.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!(
+                                            "没有找到相关{}",
+                                            self.search_category.label()
+                                        )),
+                                )
+                            },
+                        )
+                        .when(
+                            !self.search_loading && self.search_results.is_some() && !is_empty,
+                            |this| this.child(content),
+                        )
+                        .when(
+                            self.search_results.is_some() && self.search_error.is_some(),
+                            |this| {
+                                this.child(
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(px(9.))
+                                        .bg(theme.danger.opacity(0.1))
+                                        .text_sm()
+                                        .text_color(theme.danger)
+                                        .child(self.search_error.clone().unwrap_or_default()),
+                                )
+                            },
+                        )
+                        .when(has_more, |this| {
+                            this.child(
+                                h_flex().w_full().justify_center().pt_2().child(
+                                    Button::new("load-more-search")
+                                        .outline()
+                                        .h(px(44.))
+                                        .px_5()
+                                        .label("加载更多")
+                                        .loading(self.search_loading_more)
+                                        .disabled(self.search_loading_more)
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.load_more_search(cx)),
+                                        ),
+                                ),
+                            )
+                        }),
                 ),
             )
             .into_any_element()
@@ -2976,29 +5171,119 @@ impl LyruneView {
             .clamp(min_sidebar_width, max_sidebar_width));
         let sidebar_range = px(min_sidebar_width)..px(max_sidebar_width);
         let sidebar = self.render_sidebar(cx);
+        let page = match self.main_content {
+            MainContent::Home => self.render_home(compact, narrow, cx),
+            MainContent::Search => self.render_search(compact, narrow, cx),
+            MainContent::Artist => self.render_artist_content(compact, narrow, cx),
+            MainContent::Playlist => self.render_playlist_content(compact, narrow, cx),
+        };
+        let search_width = if narrow {
+            px(268.)
+        } else if compact {
+            px(376.)
+        } else {
+            px(480.)
+        };
+        let home_selected = self.main_content == MainContent::Home;
+        let history_navigation = h_flex()
+            .gap_1()
+            .child(
+                Button::new("navigate-back")
+                    .ghost()
+                    .rounded(px(999.))
+                    .size(px(44.))
+                    .p_0()
+                    .tooltip("返回")
+                    .disabled(self.navigation_history.back.is_empty())
+                    .child(media_icon_hsla(
+                        MediaIcon::Back,
+                        theme.secondary_foreground,
+                        px(22.),
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.navigate_back(window, cx))),
+            )
+            .child(
+                Button::new("navigate-forward")
+                    .ghost()
+                    .rounded(px(999.))
+                    .size(px(44.))
+                    .p_0()
+                    .tooltip("前进")
+                    .disabled(self.navigation_history.forward.is_empty())
+                    .child(media_icon_hsla(
+                        MediaIcon::Forward,
+                        theme.secondary_foreground,
+                        px(22.),
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.navigate_forward(window, cx))),
+            );
+        let navigation = h_flex()
+            .gap_3()
+            .child(
+                Button::new("home")
+                    .ghost()
+                    .rounded(px(999.))
+                    .size(px(44.))
+                    .p_0()
+                    .tooltip("主页")
+                    .child(media_icon_hsla(
+                        MediaIcon::Home,
+                        if home_selected {
+                            theme.primary
+                        } else {
+                            theme.secondary_foreground
+                        },
+                        px(24.),
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.show_home(window, cx))),
+            )
+            .child(
+                div()
+                    .id("search-input")
+                    .on_mouse_down_out(|_, window, _| window.blur())
+                    .child(
+                        Input::new(&self.search_input)
+                            .large()
+                            .w(search_width)
+                            .border_2()
+                            .rounded(px(999.))
+                            .text_size(px(16.))
+                            .aria_label("搜索")
+                            .prefix(media_icon_hsla(
+                                MediaIcon::Search,
+                                theme.muted_foreground,
+                                px(22.),
+                            )),
+                    ),
+            );
+        let account = self.render_account(cx);
         let content = v_flex()
             .h_full()
             .min_w_0()
             .flex_1()
             .child(
-                h_flex()
-                    .h(px(52.))
+                div()
+                    .relative()
+                    .h(px(72.))
                     .w_full()
                     .flex_shrink_0()
-                    .justify_between()
-                    .px_6()
                     .child(
                         h_flex()
-                            .gap_2()
-                            .text_sm()
-                            .text_color(theme.secondary_foreground)
-                            .child("QQ 音乐")
-                            .child(div().text_color(theme.muted_foreground).child("/"))
-                            .child("音乐库"),
+                            .size_full()
+                            .items_center()
+                            .justify_center()
+                            .child(navigation),
                     )
-                    .child(self.render_account(cx)),
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(14.))
+                            .left(px(24.))
+                            .child(history_navigation),
+                    )
+                    .child(div().absolute().top(px(17.)).right(px(24.)).child(account)),
             )
-            .child(self.render_playlist_content(compact, narrow, cx));
+            .child(page);
         v_flex()
             .relative()
             .size_full()
@@ -3069,5 +5354,136 @@ impl Render for LyruneView {
         } else {
             self.render_login(cx)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NavigationHistory, NavigationPage, SearchCategory, insert_track_after_current};
+    use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
+
+    fn track(mid: &str) -> Track {
+        Track {
+            song_id: None,
+            mid: mid.to_owned(),
+            media_mid: None,
+            standard_size_bytes: None,
+            high_size_bytes: None,
+            lossless_size_bytes: None,
+            hi_res_size_bytes: None,
+            atmos_stereo_size_bytes: None,
+            atmos_surround_size_bytes: None,
+            master_size_bytes: None,
+            title: mid.to_owned(),
+            artists: String::new(),
+            album: String::new(),
+            album_mid: String::new(),
+            cover_url: None,
+            duration_seconds: 180,
+            added_at: None,
+        }
+    }
+
+    fn mids(tracks: &[Track]) -> Vec<&str> {
+        tracks.iter().map(|track| track.mid.as_str()).collect()
+    }
+
+    fn playlist(diss_id: u64) -> NavigationPage {
+        NavigationPage::Playlist {
+            playlist: UserPlaylist {
+                id: UserPlaylistId::Favorite { diss_id },
+                title: format!("playlist-{diss_id}"),
+                cover_url: None,
+                description: String::new(),
+                owner: String::new(),
+                owner_avatar_url: None,
+                track_count: 0,
+            },
+            selected_index: None,
+        }
+    }
+
+    #[test]
+    fn new_navigation_after_back_clears_the_forward_branch() {
+        let first = playlist(1);
+        let second = playlist(2);
+        let home = NavigationPage::Home;
+        let mut history = NavigationHistory::default();
+
+        history.record(Some(first.clone()), &home);
+        let back = history.go_back(Some(home.clone())).unwrap();
+        assert!(back.same_destination(&first));
+
+        let forward = history.go_forward(Some(first.clone())).unwrap();
+        assert!(forward.same_destination(&home));
+
+        let back = history.go_back(Some(home)).unwrap();
+        assert!(back.same_destination(&first));
+        history.record(Some(first), &second);
+
+        assert!(history.forward.is_empty());
+        let back = history.go_back(Some(second)).unwrap();
+        assert!(back.same_destination(&playlist(1)));
+    }
+
+    #[test]
+    fn playlist_description_is_collapsed_to_one_line() {
+        assert_eq!(
+            super::single_line_summary("first line\n second\tline\r\nthird"),
+            "first line second line third"
+        );
+    }
+
+    #[test]
+    fn search_history_keeps_the_active_category_without_splitting_one_query() {
+        let songs = NavigationPage::Search {
+            query: "周杰伦".to_owned(),
+            category: SearchCategory::Songs,
+        };
+        let albums = NavigationPage::Search {
+            query: "周杰伦".to_owned(),
+            category: SearchCategory::Albums,
+        };
+        assert!(songs.same_destination(&albums));
+
+        let target = playlist(42);
+        let mut history = NavigationHistory::default();
+        history.record(Some(albums.clone()), &target);
+        let restored = history.go_back(Some(target)).expect("search history entry");
+        assert!(matches!(
+            restored,
+            NavigationPage::Search {
+                query,
+                category: SearchCategory::Albums,
+            } if query == "周杰伦"
+        ));
+    }
+
+    #[test]
+    fn search_categories_follow_the_product_order() {
+        assert_eq!(
+            SearchCategory::ALL.map(SearchCategory::label),
+            ["单曲", "歌单", "专辑", "歌手"]
+        );
+    }
+
+    #[test]
+    fn search_track_is_inserted_after_the_current_track() {
+        let mut tracks = vec![track("A"), track("B")];
+
+        let inserted = insert_track_after_current(&mut tracks, Some(0), track("C"));
+
+        assert_eq!(inserted, 1);
+        assert_eq!(mids(&tracks), ["A", "C", "B"]);
+    }
+
+    #[test]
+    fn existing_search_track_is_moved_without_duplication() {
+        let mut tracks = vec![track("C"), track("A"), track("B")];
+
+        let inserted = insert_track_after_current(&mut tracks, Some(1), track("C"));
+
+        assert_eq!(inserted, 1);
+        assert_eq!(mids(&tracks), ["A", "C", "B"]);
     }
 }

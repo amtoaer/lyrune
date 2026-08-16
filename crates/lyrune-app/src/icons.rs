@@ -15,6 +15,16 @@ pub fn lyrune_icon(size: Pixels) -> AnyElement {
 
 #[derive(Clone, Copy)]
 pub enum MediaIcon {
+    Back,
+    Forward,
+    Home,
+    Search,
+    Music,
+    Artist,
+    Album,
+    Playlist,
+    Radar,
+    Headphones,
     Play,
     Pause,
     Folder,
@@ -33,6 +43,28 @@ pub enum MediaIcon {
 impl MediaIcon {
     fn body(self) -> &'static str {
         match self {
+            Self::Back => r#"<path d="m15 18-6-6 6-6"/>"#,
+            Self::Forward => r#"<path d="m9 18 6-6-6-6"/>"#,
+            Self::Home => {
+                r#"<path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/>"#
+            }
+            Self::Search => r#"<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>"#,
+            Self::Music => {
+                r#"<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>"#
+            }
+            Self::Artist => r#"<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>"#,
+            Self::Album => {
+                r#"<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2"/><path d="M12 3v7"/>"#
+            }
+            Self::Playlist => {
+                r#"<path d="M4 6h10M4 10h10M4 14h7"/><path d="M17 5v10.5a2.5 2.5 0 1 1-2-2.45V7l5-1"/>"#
+            }
+            Self::Radar => {
+                r#"<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/><path d="m12 12 6.4-6.4"/>"#
+            }
+            Self::Headphones => {
+                r#"<path d="M4 14v-2a8 8 0 0 1 16 0v2"/><path d="M18 19h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3v5a2 2 0 0 1-2 2Z"/><path d="M6 19H5a2 2 0 0 1-2-2v-5h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2Z"/>"#
+            }
             Self::Play => r#"<path d="m6 4 14 8-14 8V4Z"/>"#,
             Self::Pause => r#"<path d="M8 5v14"/><path d="M16 5v14"/>"#,
             Self::Folder => {
@@ -75,7 +107,7 @@ pub fn media_icon_hsla(icon: MediaIcon, color: Hsla, size: Pixels) -> AnyElement
 
 fn render_media_icon(icon: MediaIcon, color: &str, size: Pixels) -> AnyElement {
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{}</svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" color="{color}" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{}</svg>"#,
         icon.body()
     );
     img(Arc::new(Image::from_bytes(

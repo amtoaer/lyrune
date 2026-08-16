@@ -219,6 +219,7 @@ enum NavigationPage {
     Playlist {
         playlist: UserPlaylist,
         selected_index: Option<usize>,
+        scroll_row: usize,
     },
 }
 
@@ -949,7 +950,7 @@ impl LyruneView {
         }));
     }
 
-    fn current_navigation_page(&self) -> Option<NavigationPage> {
+    fn current_navigation_page(&self, cx: &App) -> Option<NavigationPage> {
         match self.main_content {
             MainContent::Home => Some(NavigationPage::Home),
             MainContent::Search => Some(NavigationPage::Search {
@@ -966,6 +967,7 @@ impl LyruneView {
                     .map(|playlist| NavigationPage::Playlist {
                         playlist,
                         selected_index: self.selected_playlist_index,
+                        scroll_row: self.track_table.read(cx).visible_range().rows().start,
                     })
             }
         }
@@ -1012,18 +1014,19 @@ impl LyruneView {
             NavigationPage::Playlist {
                 playlist,
                 selected_index,
+                scroll_row,
             } => {
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(selected_index.map(IndexPath::new), window, cx);
                 });
-                self.open_playlist(playlist, selected_index, false, cx);
+                self.open_playlist(playlist, selected_index, false, scroll_row, cx);
             }
         }
     }
 
     fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target = NavigationPage::Home;
-        let current = self.current_navigation_page();
+        let current = self.current_navigation_page(cx);
         self.navigation_history.record(current, &target);
         self.apply_navigation_page(target, window, cx);
     }
@@ -1038,7 +1041,7 @@ impl LyruneView {
             query,
             category: SearchCategory::Songs,
         };
-        let current = self.current_navigation_page();
+        let current = self.current_navigation_page(cx);
         self.navigation_history.record(current, &target);
         self.apply_navigation_page(target, window, cx);
     }
@@ -1227,14 +1230,14 @@ impl LyruneView {
     }
 
     fn navigate_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.current_navigation_page();
+        let current = self.current_navigation_page(cx);
         if let Some(target) = self.navigation_history.go_back(current) {
             self.apply_navigation_page(target, window, cx);
         }
     }
 
     fn navigate_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.current_navigation_page();
+        let current = self.current_navigation_page(cx);
         if let Some(target) = self.navigation_history.go_forward(current) {
             self.apply_navigation_page(target, window, cx);
         }
@@ -1626,11 +1629,12 @@ impl LyruneView {
             let target = NavigationPage::Playlist {
                 playlist: playlist.clone(),
                 selected_index: Some(index),
+                scroll_row: 0,
             };
-            let current = self.current_navigation_page();
+            let current = self.current_navigation_page(cx);
             self.navigation_history.record(current, &target);
         }
-        self.open_playlist(playlist, Some(index), force_refresh, cx);
+        self.open_playlist(playlist, Some(index), force_refresh, 0, cx);
     }
 
     fn open_search_artist(
@@ -1640,7 +1644,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) {
         let target = NavigationPage::Artist { artist };
-        let current = self.current_navigation_page();
+        let current = self.current_navigation_page(cx);
         self.navigation_history.record(current, &target);
         self.apply_navigation_page(target, window, cx);
     }
@@ -1896,13 +1900,14 @@ impl LyruneView {
         let target = NavigationPage::Playlist {
             playlist: playlist.clone(),
             selected_index: None,
+            scroll_row: 0,
         };
-        let current = self.current_navigation_page();
+        let current = self.current_navigation_page(cx);
         self.navigation_history.record(current, &target);
         self.playlist_list.update(cx, |list, cx| {
             list.set_selected_index(None, window, cx);
         });
-        self.open_playlist(playlist, None, false, cx);
+        self.open_playlist(playlist, None, false, 0, cx);
     }
 
     fn open_playlist(
@@ -1910,6 +1915,7 @@ impl LyruneView {
         playlist: UserPlaylist,
         selected_index: Option<usize>,
         force_refresh: bool,
+        scroll_row: usize,
         cx: &mut Context<Self>,
     ) {
         self.main_content = MainContent::Playlist;
@@ -1928,9 +1934,10 @@ impl LyruneView {
             });
         }
         self.track_table.update(cx, |table, cx| {
+            table.clear_selection(cx);
             table.delegate_mut().reset();
             table.refresh(cx);
-            table.scroll_to_row(0, cx);
+            table.scroll_to_row(scroll_row, cx);
             cx.notify();
         });
         if !force_refresh
@@ -4154,7 +4161,7 @@ impl LyruneView {
                                                 .px_2()
                                                 .text_size(if narrow { px(22.) } else { px(24.) })
                                                 .font_semibold()
-                                                .child("专属推荐"),
+                                                .child("智能推荐"),
                                         )
                                         .child(
                                             h_flex()
@@ -4172,7 +4179,7 @@ impl LyruneView {
                                             div()
                                                 .text_size(if narrow { px(22.) } else { px(24.) })
                                                 .font_semibold()
-                                                .child("推荐歌单"),
+                                                .child("今日歌单"),
                                         )
                                         .when_some(self.home_error.clone(), |header, error| {
                                             header.child(
@@ -5185,6 +5192,8 @@ impl LyruneView {
             px(480.)
         };
         let home_selected = self.main_content == MainContent::Home;
+        let can_navigate_back = !self.navigation_history.back.is_empty();
+        let can_navigate_forward = !self.navigation_history.forward.is_empty();
         let history_navigation = h_flex()
             .gap_1()
             .child(
@@ -5194,10 +5203,14 @@ impl LyruneView {
                     .size(px(44.))
                     .p_0()
                     .tooltip("返回")
-                    .disabled(self.navigation_history.back.is_empty())
+                    .disabled(!can_navigate_back)
                     .child(media_icon_hsla(
                         MediaIcon::Back,
-                        theme.secondary_foreground,
+                        if can_navigate_back {
+                            theme.foreground
+                        } else {
+                            theme.muted_foreground
+                        },
                         px(22.),
                     ))
                     .on_click(cx.listener(|this, _, window, cx| this.navigate_back(window, cx))),
@@ -5209,10 +5222,14 @@ impl LyruneView {
                     .size(px(44.))
                     .p_0()
                     .tooltip("前进")
-                    .disabled(self.navigation_history.forward.is_empty())
+                    .disabled(!can_navigate_forward)
                     .child(media_icon_hsla(
                         MediaIcon::Forward,
-                        theme.secondary_foreground,
+                        if can_navigate_forward {
+                            theme.foreground
+                        } else {
+                            theme.muted_foreground
+                        },
                         px(22.),
                     ))
                     .on_click(cx.listener(|this, _, window, cx| this.navigate_forward(window, cx))),
@@ -5389,6 +5406,10 @@ mod tests {
     }
 
     fn playlist(diss_id: u64) -> NavigationPage {
+        playlist_at_scroll_row(diss_id, 0)
+    }
+
+    fn playlist_at_scroll_row(diss_id: u64, scroll_row: usize) -> NavigationPage {
         NavigationPage::Playlist {
             playlist: UserPlaylist {
                 id: UserPlaylistId::Favorite { diss_id },
@@ -5400,6 +5421,7 @@ mod tests {
                 track_count: 0,
             },
             selected_index: None,
+            scroll_row,
         }
     }
 
@@ -5424,6 +5446,22 @@ mod tests {
         assert!(history.forward.is_empty());
         let back = history.go_back(Some(second)).unwrap();
         assert!(back.same_destination(&playlist(1)));
+    }
+
+    #[test]
+    fn playlist_history_keeps_its_scroll_row() {
+        let playlist = playlist_at_scroll_row(1, 37);
+        let mut history = NavigationHistory::default();
+
+        history.record(Some(playlist), &NavigationPage::Home);
+        let restored = history
+            .go_back(Some(NavigationPage::Home))
+            .expect("playlist history entry");
+
+        assert!(matches!(
+            restored,
+            NavigationPage::Playlist { scroll_row: 37, .. }
+        ));
     }
 
     #[test]

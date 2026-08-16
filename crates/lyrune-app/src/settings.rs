@@ -159,13 +159,13 @@ impl CdnCacheStore {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default)]
 pub struct LibraryCache {
     directories: Vec<CachedLibraryDirectory>,
     playlists: Vec<CachedPlaylistSnapshot>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Debug)]
 struct CachedLibraryDirectory {
     account_id: u64,
     fetched_at_secs: u64,
@@ -173,11 +173,10 @@ struct CachedLibraryDirectory {
     playlists: Vec<UserPlaylist>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Debug)]
 struct CachedPlaylistSnapshot {
     account_id: u64,
     fetched_at_secs: u64,
-    #[serde(default)]
     revision: u64,
     playlist: UserPlaylist,
     tracks: Vec<Track>,
@@ -337,34 +336,6 @@ impl LibraryCache {
     }
 }
 
-pub struct LibraryCacheStore;
-
-impl LibraryCacheStore {
-    pub fn load() -> Result<LibraryCache> {
-        Self::load_from(&library_cache_path()?)
-    }
-
-    pub fn save(cache: &LibraryCache) -> Result<()> {
-        Self::save_to(&library_cache_path()?, cache)
-    }
-
-    fn load_from(path: &Path) -> Result<LibraryCache> {
-        let serialized = match fs::read_to_string(path) {
-            Ok(serialized) => serialized,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(LibraryCache::default()),
-            Err(error) => return Err(error).context("无法读取音乐库缓存"),
-        };
-        serde_json::from_str(&serialized).context("音乐库缓存格式无效")
-    }
-
-    fn save_to(path: &Path, cache: &LibraryCache) -> Result<()> {
-        let parent = path.parent().context("音乐库缓存路径缺少父目录")?;
-        fs::create_dir_all(parent).context("无法创建音乐库缓存目录")?;
-        let serialized = serde_json::to_vec(cache).context("无法序列化音乐库缓存")?;
-        fs::write(path, serialized).context("无法保存音乐库缓存")
-    }
-}
-
 fn settings_path() -> Result<PathBuf> {
     ProjectDirs::from("dev", "lyrune", "Lyrune")
         .map(|dirs| dirs.config_dir().join("settings.json"))
@@ -375,12 +346,6 @@ fn cdn_cache_path() -> Result<PathBuf> {
     ProjectDirs::from("dev", "lyrune", "Lyrune")
         .map(|dirs| dirs.cache_dir().join("cdn.json"))
         .context("无法确定 CDN 缓存目录")
-}
-
-fn library_cache_path() -> Result<PathBuf> {
-    ProjectDirs::from("dev", "lyrune", "Lyrune")
-        .map(|dirs| dirs.cache_dir().join("library.json"))
-        .context("无法确定音乐库缓存目录")
 }
 
 fn is_fresh(fetched_at_secs: u64, now_secs: u64, ttl: Duration) -> bool {
@@ -425,6 +390,7 @@ mod tests {
             master_size_bytes: None,
             title: mid.to_owned(),
             artists: String::new(),
+            artist_details: Vec::new(),
             album: String::new(),
             album_mid: String::new(),
             cover_url: None,
@@ -668,28 +634,10 @@ mod tests {
                 .mid,
             "refreshed"
         );
-
-        let directory = std::env::temp_dir().join(format!(
-            "lyrune-library-cache-test-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
-        let path = directory.join("library.json");
-        LibraryCacheStore::save_to(&path, &cache).expect("save library cache");
-        let restored = LibraryCacheStore::load_from(&path).expect("load library cache");
-        assert_eq!(
-            restored
-                .fresh_playlist(10001, &playlist.id, 400, Duration::from_secs(300))
-                .expect("restored playlist snapshot")
-                .tracks[0]
-                .mid,
-            "refreshed"
-        );
-        fs::remove_dir_all(directory).expect("remove test library cache directory");
     }
 
     #[test]
-    fn search_queue_snapshot_remains_available_for_playback_restore() {
+    fn search_queue_snapshot_remains_available_within_session() {
         let mut cache = LibraryCache::default();
         let playlist = UserPlaylist {
             id: UserPlaylistId::Search {

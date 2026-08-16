@@ -5,8 +5,8 @@ use crate::icons::{MediaIcon, media_icon_hsla};
 use async_channel::Sender;
 use gpui::{
     AnyElement, App, Context, Image, ImageFormat, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _, Styled as _, Window,
-    div, img, prelude::FluentBuilder as _, px,
+    MouseButton, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, IndexPath, StyledExt as _, h_flex,
@@ -15,7 +15,13 @@ use gpui_component::{
     tooltip::Tooltip,
     v_flex,
 };
-use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
+use qqmusic_api::integration::{SearchAlbum, SearchArtist, Track, UserPlaylist, UserPlaylistId};
+
+#[derive(Clone)]
+pub enum TrackTableNavigation {
+    Artist(SearchArtist),
+    Album(SearchAlbum),
+}
 
 pub struct PlaylistListDelegate {
     playlists: Vec<UserPlaylist>,
@@ -207,10 +213,14 @@ pub struct TrackTableDelegate {
     show_added_at: bool,
     compact: bool,
     load_more_sender: Sender<()>,
+    navigation_sender: Sender<TrackTableNavigation>,
 }
 
 impl TrackTableDelegate {
-    pub fn new(load_more_sender: Sender<()>) -> Self {
+    pub fn new(
+        load_more_sender: Sender<()>,
+        navigation_sender: Sender<TrackTableNavigation>,
+    ) -> Self {
         Self {
             columns: track_columns(false, false),
             tracks: Vec::new(),
@@ -222,7 +232,61 @@ impl TrackTableDelegate {
             show_added_at: false,
             compact: false,
             load_more_sender,
+            navigation_sender,
         }
+    }
+
+    fn render_artists(&self, row_ix: usize, track: &Track, cx: &App) -> AnyElement {
+        if track.artist_details.is_empty() {
+            return div()
+                .w_full()
+                .truncate()
+                .text_xs()
+                .text_color(cx.theme().secondary_foreground)
+                .child(track.artists.clone())
+                .into_any_element();
+        }
+
+        let mut links = Vec::with_capacity(track.artist_details.len() * 2 - 1);
+        for (index, artist) in track.artist_details.iter().cloned().enumerate() {
+            if index > 0 {
+                links.push(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(" / ")
+                        .into_any_element(),
+                );
+            }
+            let sender = self.navigation_sender.clone();
+            let name = artist.name.clone();
+            let tooltip = format!("查看歌手：{name}");
+            let hover_color = cx.theme().primary;
+            links.push(
+                div()
+                    .id(format!("track-artist-{row_ix}-{index}"))
+                    .flex_shrink_0()
+                    .cursor_pointer()
+                    .text_color(cx.theme().secondary_foreground)
+                    .hover(move |style| style.text_color(hover_color))
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ = sender.try_send(TrackTableNavigation::Artist(artist.clone()));
+                    })
+                    .child(name)
+                    .into_any_element(),
+            );
+        }
+
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .text_xs()
+            .children(links)
+            .into_any_element()
     }
 
     pub fn reset(&mut self) {
@@ -409,7 +473,7 @@ impl TableDelegate for TrackTableDelegate {
                 }
             }
             "title" => {
-                let cover = match track.cover_url {
+                let cover = match track.cover_url.clone() {
                     Some(url) => img(cached_image_source(url))
                         .size(px(44.))
                         .flex_shrink_0()
@@ -451,16 +515,9 @@ impl TableDelegate for TrackTableDelegate {
                                     } else {
                                         cx.theme().foreground
                                     })
-                                    .child(track.title),
+                                    .child(track.title.clone()),
                             )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(cx.theme().secondary_foreground)
-                                    .child(track.artists),
-                            ),
+                            .child(self.render_artists(row_ix, &track, cx)),
                     )
                     .into_any_element()
             }
@@ -468,9 +525,20 @@ impl TableDelegate for TrackTableDelegate {
                 let album = if track.album.is_empty() {
                     "—".to_owned()
                 } else {
-                    track.album
+                    track.album.clone()
                 };
-                let tooltip = album.clone();
+                let album_link = (!track.album_mid.trim().is_empty()
+                    && !track.album.trim().is_empty())
+                .then(|| SearchAlbum {
+                    mid: track.album_mid.clone(),
+                    title: track.album.clone(),
+                    cover_url: track.cover_url.clone(),
+                    artist: track.artists.clone(),
+                });
+                let tooltip = album_link.as_ref().map_or_else(
+                    || album.clone(),
+                    |album| format!("查看专辑：{}", album.title),
+                );
                 h_flex()
                     .id(("track-album", row_ix))
                     .w_full()
@@ -478,6 +546,17 @@ impl TableDelegate for TrackTableDelegate {
                     .truncate()
                     .text_color(cx.theme().secondary_foreground)
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .when_some(album_link, |this, album| {
+                        let sender = self.navigation_sender.clone();
+                        let hover_color = cx.theme().primary;
+                        this.cursor_pointer()
+                            .hover(move |style| style.text_color(hover_color))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                let _ = sender.try_send(TrackTableNavigation::Album(album.clone()));
+                            })
+                    })
                     .child(album)
                     .into_any_element()
             }

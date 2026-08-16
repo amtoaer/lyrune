@@ -84,6 +84,14 @@ mod tests {
         );
 
         if let Some(track) = tracks.first() {
+            assert!(
+                track.artists.trim().is_empty() || !track.artist_details.is_empty(),
+                "first liked track has artists but no artist navigation metadata"
+            );
+            assert!(
+                track.album.trim().is_empty() || !track.album_mid.trim().is_empty(),
+                "first liked track has an album but no album navigation metadata"
+            );
             let options = ProtocolClient::new()
                 .expect("create protocol client")
                 .playback_options(&credential, track)

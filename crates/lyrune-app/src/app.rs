@@ -16,6 +16,7 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     spinner::Spinner,
     table::{DataTable, TableEvent, TableState},
+    tooltip::Tooltip,
     v_flex,
 };
 use tokio::runtime::{Builder, Runtime};
@@ -26,15 +27,17 @@ use crate::credentials::CredentialStore;
 use crate::design::{self, ColorTheme};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, lyrune_icon, media_icon, media_icon_hsla};
-use crate::library::{PlaylistListDelegate, TrackTableDelegate, format_duration, playlist_cover};
+use crate::library::{
+    PlaylistListDelegate, TrackTableDelegate, TrackTableNavigation, format_duration, playlist_cover,
+};
 #[cfg(target_os = "linux")]
 use crate::mpris::{
     MprisCommand, MprisHandle, MprisLoopStatus, MprisPlaybackStatus, MprisSnapshot, MprisTrack,
 };
 use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::settings::{
-    AppSettings, CdnCacheStore, LibraryCache, LibraryCacheStore, PersistedLibraryView,
-    PersistedPlayback, PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
+    AppSettings, CdnCacheStore, LibraryCache, PersistedLibraryView, PersistedPlayback,
+    PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
 };
 use crate::singleflight::SingleFlight;
 use qqmusic_api::integration::{
@@ -459,8 +462,6 @@ pub struct LyruneView {
     seek_preview: Option<Duration>,
     settings: AppSettings,
     library_cache: LibraryCache,
-    library_cache_saves: async_channel::Sender<LibraryCache>,
-    library_cache_writer: Option<JoinHandle<()>>,
     shuffle: bool,
     repeat_mode: RepeatMode,
     pending_playback_restore: Option<PersistedPlayback>,
@@ -515,16 +516,7 @@ impl LyruneView {
         };
         let playback_quality = settings.playback_quality;
         let pending_playback_restore = settings.current_playback.clone();
-        let library_cache = LibraryCacheStore::load().unwrap_or_default();
-        let (library_cache_saves, library_cache_save_receiver) = async_channel::unbounded();
-        let library_cache_writer = RUNTIME.spawn(async move {
-            while let Ok(mut cache) = library_cache_save_receiver.recv().await {
-                while let Ok(newer) = library_cache_save_receiver.try_recv() {
-                    cache = newer;
-                }
-                let _ = tokio::task::spawn_blocking(move || LibraryCacheStore::save(&cache)).await;
-            }
-        });
+        let library_cache = LibraryCache::default();
 
         let playlist_list =
             cx.new(|cx| ListState::new(PlaylistListDelegate::new(), window, cx).searchable(false));
@@ -534,11 +526,16 @@ impl LyruneView {
                 .context_menu(false)
         });
         let (load_more_sender, load_more_receiver) = async_channel::bounded(1);
+        let (track_navigation_sender, track_navigation_receiver) = async_channel::unbounded();
         let track_table = cx.new(|cx| {
-            TableState::new(TrackTableDelegate::new(load_more_sender), window, cx)
-                .col_selectable(false)
-                .col_movable(false)
-                .sortable(false)
+            TableState::new(
+                TrackTableDelegate::new(load_more_sender, track_navigation_sender),
+                window,
+                cx,
+            )
+            .col_selectable(false)
+            .col_movable(false)
+            .sortable(false)
         });
         let progress_slider = cx.new(|_| progress_slider_state(0.));
         let volume_slider = cx.new(|_| volume_slider_state(settings.volume));
@@ -599,6 +596,25 @@ impl LyruneView {
             while load_more_receiver.recv().await.is_ok() {
                 if this
                     .update(cx, |this, cx| this.load_playlist_page(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(navigation) = track_navigation_receiver.recv().await {
+                if this
+                    .update_in(cx, |this, window, cx| match navigation {
+                        TrackTableNavigation::Artist(artist) => {
+                            this.open_search_artist(artist, window, cx)
+                        }
+                        TrackTableNavigation::Album(album) => {
+                            this.open_home_playlist(album.into_playlist(), window, cx)
+                        }
+                    })
                     .is_err()
                 {
                     break;
@@ -674,8 +690,6 @@ impl LyruneView {
             seek_preview: None,
             settings,
             library_cache,
-            library_cache_saves,
-            library_cache_writer: Some(library_cache_writer),
             shuffle: false,
             repeat_mode: RepeatMode::Off,
             pending_playback_restore,
@@ -1533,7 +1547,6 @@ impl LyruneView {
                             playlists.clone(),
                             unix_timestamp_secs(),
                         );
-                        this.persist_library_cache();
                         this.apply_library(account_id, profile, playlists, force_refresh, cx);
                     }
                     Err(error) => {
@@ -2038,7 +2051,7 @@ impl LyruneView {
                 match result {
                     Ok(page) => {
                         let new_tracks = page.tracks.len();
-                        let cache_changed = this.credential.as_ref().is_some_and(|credential| {
+                        if let Some(credential) = &this.credential {
                             this.library_cache.store_playlist_page(
                                 credential.music_id,
                                 page.playlist.clone(),
@@ -2048,10 +2061,7 @@ impl LyruneView {
                                 offset,
                                 unix_timestamp_secs(),
                                 cache_revision,
-                            )
-                        });
-                        if cache_changed {
-                            this.persist_library_cache();
+                            );
                         }
                         this.page_offset = page.next_offset;
                         this.selected_playlist = Some(page.playlist.clone());
@@ -2198,7 +2208,6 @@ impl LyruneView {
                         unix_timestamp_secs(),
                         cache_revision,
                     );
-                    this.persist_library_cache();
                     this.persist_current_playback();
                     cx.notify();
                 }
@@ -2809,12 +2818,6 @@ impl LyruneView {
 
     fn persist_settings(&self) {
         let _ = SettingsStore::save(&self.settings);
-    }
-
-    fn persist_library_cache(&self) {
-        let _ = self
-            .library_cache_saves
-            .send_blocking(self.library_cache.clone());
     }
 
     fn persist_current_playback(&mut self) {
@@ -4853,15 +4856,92 @@ impl LyruneView {
                 ))
                 .into_any_element(),
         };
-        let (title, album, artists) = track
-            .map(|track| (track.title, track.album, track.artists))
-            .unwrap_or_else(|| {
-                (
-                    "尚未播放".to_owned(),
-                    "从播放列表中双击一首歌曲".to_owned(),
-                    String::new(),
-                )
-            });
+        let title_text = track
+            .as_ref()
+            .map(|track| track.title.clone())
+            .unwrap_or_else(|| "尚未播放".to_owned());
+        let album_link = track.as_ref().and_then(|track| {
+            (!track.album_mid.trim().is_empty() && !track.album.trim().is_empty()).then(|| {
+                SearchAlbum {
+                    mid: track.album_mid.clone(),
+                    title: track.album.clone(),
+                    cover_url: track.cover_url.clone(),
+                    artist: track.artists.clone(),
+                }
+            })
+        });
+        let title = div()
+            .id("player-track-title")
+            .w_full()
+            .truncate()
+            .font_medium()
+            .when_some(album_link, |this, album| {
+                let tooltip = format!("查看专辑：{}", album.title);
+                let hover_color = theme.primary;
+                this.cursor_pointer()
+                    .hover(move |style| style.text_color(hover_color))
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_home_playlist(album.clone().into_playlist(), window, cx);
+                    }))
+            })
+            .child(title_text);
+        let artists = match track.as_ref() {
+            Some(track) if !track.artist_details.is_empty() => {
+                let mut links = Vec::with_capacity(track.artist_details.len() * 2 - 1);
+                for (index, artist) in track.artist_details.iter().cloned().enumerate() {
+                    if index > 0 {
+                        links.push(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(theme.muted_foreground)
+                                .child(" / ")
+                                .into_any_element(),
+                        );
+                    }
+                    let name = artist.name.clone();
+                    let tooltip = format!("查看歌手：{name}");
+                    let hover_color = theme.primary;
+                    links.push(
+                        div()
+                            .id(format!("player-artist-{index}"))
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .text_color(theme.secondary_foreground)
+                            .hover(move |style| style.text_color(hover_color))
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip.clone()).build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_search_artist(artist.clone(), window, cx);
+                            }))
+                            .child(name)
+                            .into_any_element(),
+                    );
+                }
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_sm()
+                    .children(links)
+                    .into_any_element()
+            }
+            Some(track) => div()
+                .w_full()
+                .truncate()
+                .text_sm()
+                .text_color(theme.secondary_foreground)
+                .child(track.artists.clone())
+                .into_any_element(),
+            None => div()
+                .w_full()
+                .truncate()
+                .text_sm()
+                .text_color(theme.secondary_foreground)
+                .child("从播放列表中双击一首歌曲")
+                .into_any_element(),
+        };
 
         h_flex()
             .h(px(112.))
@@ -4889,20 +4969,8 @@ impl LyruneView {
                             .min_w_0()
                             .flex_1()
                             .gap_1()
-                            .child(div().truncate().font_medium().child(title))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(theme.secondary_foreground)
-                                    .child(if artists.is_empty() {
-                                        album
-                                    } else if compact || album.is_empty() {
-                                        artists
-                                    } else {
-                                        format!("{artists} · {album}")
-                                    }),
-                            ),
+                            .child(title)
+                            .child(artists),
                     ),
             )
             .child(
@@ -5353,11 +5421,6 @@ impl Drop for LyruneView {
             audio.stop();
         }
         self.persist_settings();
-        self.persist_library_cache();
-        self.library_cache_saves.close();
-        if let Some(task) = self.library_cache_writer.take() {
-            let _ = RUNTIME.block_on(task);
-        }
         if let Some(task) = self.cdn_maintenance.take() {
             task.abort();
         }
@@ -5393,6 +5456,7 @@ mod tests {
             master_size_bytes: None,
             title: mid.to_owned(),
             artists: String::new(),
+            artist_details: Vec::new(),
             album: String::new(),
             album_mid: String::new(),
             cover_url: None,

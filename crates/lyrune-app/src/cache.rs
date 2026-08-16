@@ -954,6 +954,7 @@ mod tests {
             master_size_bytes: None,
             title: title.to_owned(),
             artists: String::new(),
+            artist_details: Vec::new(),
             album: String::new(),
             album_mid: String::new(),
             cover_url: None,

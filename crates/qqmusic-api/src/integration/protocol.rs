@@ -1104,10 +1104,11 @@ fn parse_track(value: &Value) -> Result<Track> {
     let master_size_bytes = integer_array_field(file, &["size_new", "sizeNew"], 0);
     let atmos_stereo_size_bytes = integer_array_field(file, &["size_new", "sizeNew"], 1);
     let atmos_surround_size_bytes = integer_array_field(file, &["size_new", "sizeNew"], 2);
-    let artists = value
+    let artist_values = value
         .get("singer")
         .or_else(|| value.get("singers"))
-        .and_then(Value::as_array)
+        .and_then(Value::as_array);
+    let artists = artist_values
         .map(|artists| {
             artists
                 .iter()
@@ -1115,6 +1116,29 @@ fn parse_track(value: &Value) -> Result<Track> {
                 .filter(|name| !name.is_empty())
                 .collect::<Vec<_>>()
                 .join(" / ")
+        })
+        .unwrap_or_default();
+    let artist_details = artist_values
+        .map(|artists| {
+            artists
+                .iter()
+                .filter_map(|artist| {
+                    let mid =
+                        string_field(artist, &["singerMID", "singerMid", "singer_mid", "mid"])
+                            .filter(|mid| !mid.trim().is_empty())?;
+                    let name = string_field(artist, &["name", "title", "singerName"])
+                        .filter(|name| !name.trim().is_empty())?;
+                    let cover_url = string_field(artist, &["singerPic", "picUrl", "pic"])
+                        .filter(|url| !url.trim().is_empty())
+                        .map(force_https)
+                        .or_else(|| singer_cover_url(&mid));
+                    Some(SearchArtist {
+                        mid,
+                        name,
+                        cover_url,
+                    })
+                })
+                .collect()
         })
         .unwrap_or_default();
     let album = value.get("album").unwrap_or(&Value::Null);
@@ -1140,6 +1164,7 @@ fn parse_track(value: &Value) -> Result<Track> {
         master_size_bytes,
         title,
         artists,
+        artist_details,
         album: album_name,
         album_mid,
         cover_url,
@@ -1826,7 +1851,10 @@ mod tests {
             "mid": "song-mid",
             "title": "A Song",
             "interval": 245,
-            "singer": [{ "name": "Artist A" }, { "name": "Artist B" }],
+            "singer": [
+                { "name": "Artist A", "mid": "artist-a" },
+                { "name": "Artist B", "mid": "artist-b" }
+            ],
             "album": { "name": "Album", "mid": "album-mid" },
             "file": { "media_mid": "different-media-mid" }
         }))
@@ -1835,6 +1863,21 @@ mod tests {
         assert_eq!(track.mid, "song-mid");
         assert_eq!(track.media_mid.as_deref(), Some("different-media-mid"));
         assert_eq!(track.artists, "Artist A / Artist B");
+        assert_eq!(
+            track
+                .artist_details
+                .iter()
+                .map(|artist| artist.mid.as_str())
+                .collect::<Vec<_>>(),
+            ["artist-a", "artist-b"]
+        );
+        let mut persisted_track = serde_json::to_value(&track).unwrap();
+        persisted_track
+            .as_object_mut()
+            .unwrap()
+            .remove("artist_details");
+        let restored_track: Track = serde_json::from_value(persisted_track).unwrap();
+        assert!(restored_track.artist_details.is_empty());
         assert_eq!(
             playback_filename(&track, Quality::High),
             "M800different-media-mid.mp3"

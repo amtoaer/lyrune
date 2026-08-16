@@ -149,7 +149,7 @@ pub struct SearchPage<T> {
     pub next_offset: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SearchArtist {
     pub mid: String,
     pub name: String,
@@ -214,6 +214,8 @@ pub struct Track {
     pub master_size_bytes: Option<u64>,
     pub title: String,
     pub artists: String,
+    #[serde(default)]
+    pub artist_details: Vec<SearchArtist>,
     pub album: String,
     pub album_mid: String,
     pub cover_url: Option<String>,

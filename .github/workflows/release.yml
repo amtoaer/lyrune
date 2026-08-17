@@ -133,72 +133,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  package-arch:
-    name: Arch Linux ${{ matrix.asset_arch }}
-    needs:
-      - validate
-      - build-linux
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            asset_arch: amd64
-          - runner: ubuntu-24.04-arm
-            asset_arch: arm64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    steps:
-      - name: Check out tagged source
-        uses: actions/checkout@v6
-
-      - name: Install Arch Linux packaging dependencies
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends makepkg zstd
-
-      - name: Download Linux archive
-        uses: actions/download-artifact@v8
-        with:
-          name: release-linux-${{ matrix.asset_arch }}
-          path: linux-archive
-
-      - name: Create Arch Linux package
-        shell: bash
-        env:
-          VERSION: ${{ needs.validate.outputs.version }}
-          ASSET_ARCH: ${{ matrix.asset_arch }}
-        run: |
-          set -euo pipefail
-          archive_name="lyrune-v$VERSION-linux-$ASSET_ARCH"
-          binary_root="$(mktemp -d)"
-          tar -C "$binary_root" -xzf "linux-archive/$archive_name.tar.gz"
-
-          package_root="$(mktemp -d)"
-          install -m644 packaging/arch/PKGBUILD.release "$package_root/PKGBUILD.release"
-          install -m755 "$binary_root/$archive_name/lyrune" "$package_root/lyrune"
-          install -m644 packaging/arch/lyrune.desktop "$package_root/lyrune.desktop"
-          install -m644 crates/lyrune-app/assets/lyrune.svg "$package_root/lyrune.svg"
-          install -m644 THIRD_PARTY_NOTICES.md "$package_root/THIRD_PARTY_NOTICES.md"
-          install -m644 packaging/arch/license-unknown.txt "$package_root/license-unknown.txt"
-          package_version="${VERSION//-/_}"
-          mkdir -p dist
-          (
-            cd "$package_root"
-            LYRUNE_PKGVER="$package_version" \
-              PKGDEST="$GITHUB_WORKSPACE/dist" \
-              makepkg --clean --cleanbuild --force --nodeps --noconfirm -p PKGBUILD.release
-          )
-
-      - name: Upload Arch Linux release asset
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-archlinux-${{ matrix.asset_arch }}
-          path: dist/lyrune-${{ needs.validate.outputs.version }}-1-*.pkg.tar.zst
-          if-no-files-found: error
-          retention-days: 7
-
   build-windows:
     name: Windows ${{ matrix.asset_arch }}
     needs: validate
@@ -331,7 +265,6 @@ jobs:
     needs:
       - validate
       - build-linux
-      - package-arch
       - build-windows
       - build-macos
     runs-on: ubuntu-24.04

@@ -44,6 +44,47 @@ pub struct PersistedWindowSize {
     pub height: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LyricFrameRate {
+    Fps30,
+    #[default]
+    Fps60,
+    Fps120,
+    Display,
+}
+
+impl LyricFrameRate {
+    pub const ALL: [Self; 4] = [Self::Fps30, Self::Fps60, Self::Fps120, Self::Display];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Fps30 => "lyrics-fps-30",
+            Self::Fps60 => "lyrics-fps-60",
+            Self::Fps120 => "lyrics-fps-120",
+            Self::Display => "lyrics-fps-display",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fps30 => "30",
+            Self::Fps60 => "60",
+            Self::Fps120 => "120",
+            Self::Display => "默认",
+        }
+    }
+
+    pub const fn frame_interval(self) -> Option<Duration> {
+        match self {
+            Self::Fps30 => Some(Duration::from_nanos(1_000_000_000 / 30)),
+            Self::Fps60 => Some(Duration::from_nanos(1_000_000_000 / 60)),
+            Self::Fps120 => Some(Duration::from_nanos(1_000_000_000 / 120)),
+            Self::Display => None,
+        }
+    }
+}
+
 impl PersistedPlayback {
     pub fn resume_position(&self, duration_seconds: u64) -> Duration {
         let position = Duration::from_millis(self.position_ms);
@@ -63,6 +104,9 @@ pub struct AppSettings {
     pub last_nonzero_volume: f32,
     pub color_theme: ColorTheme,
     pub playback_quality: Quality,
+    #[serde(alias = "lyric_frame_rate")]
+    pub lyric_highlight_frame_rate: LyricFrameRate,
+    pub lyric_scroll_frame_rate: LyricFrameRate,
     pub last_library_view: Option<PersistedLibraryView>,
     pub current_playback: Option<PersistedPlayback>,
     pub window_size: Option<PersistedWindowSize>,
@@ -76,6 +120,8 @@ impl Default for AppSettings {
             last_nonzero_volume: 1.,
             color_theme: ColorTheme::default(),
             playback_quality: Quality::default(),
+            lyric_highlight_frame_rate: LyricFrameRate::Fps30,
+            lyric_scroll_frame_rate: LyricFrameRate::Fps60,
             last_library_view: None,
             current_playback: None,
             window_size: None,
@@ -490,10 +536,40 @@ mod tests {
         assert_eq!(settings.last_nonzero_volume, 1.);
         assert_eq!(settings.color_theme, ColorTheme::CatppuccinLatte);
         assert_eq!(settings.playback_quality, Quality::Standard);
+        assert_eq!(settings.lyric_highlight_frame_rate, LyricFrameRate::Fps30);
+        assert_eq!(settings.lyric_scroll_frame_rate, LyricFrameRate::Fps60);
         assert_eq!(settings.last_library_view, None);
         assert_eq!(settings.current_playback, None);
         assert_eq!(settings.window_size, None);
         assert_eq!(settings.sidebar_width, None);
+    }
+
+    #[test]
+    fn lyric_frame_rates_map_to_expected_intervals() {
+        assert_eq!(
+            LyricFrameRate::Fps30.frame_interval(),
+            Some(Duration::from_nanos(1_000_000_000 / 30))
+        );
+        assert_eq!(
+            LyricFrameRate::Fps60.frame_interval(),
+            Some(Duration::from_nanos(1_000_000_000 / 60))
+        );
+        assert_eq!(
+            LyricFrameRate::Fps120.frame_interval(),
+            Some(Duration::from_nanos(1_000_000_000 / 120))
+        );
+        assert_eq!(LyricFrameRate::Display.frame_interval(), None);
+    }
+
+    #[test]
+    fn legacy_lyric_frame_rate_becomes_the_highlight_rate() {
+        let settings = serde_json::from_value::<AppSettings>(serde_json::json!({
+            "lyric_frame_rate": "fps120"
+        }))
+        .expect("deserialize legacy lyric frame rate");
+
+        assert_eq!(settings.lyric_highlight_frame_rate, LyricFrameRate::Fps120);
+        assert_eq!(settings.lyric_scroll_frame_rate, LyricFrameRate::Fps60);
     }
 
     #[test]
@@ -503,6 +579,8 @@ mod tests {
             last_nonzero_volume: -1.,
             color_theme: ColorTheme::CatppuccinMocha,
             playback_quality: Quality::High,
+            lyric_highlight_frame_rate: LyricFrameRate::Fps30,
+            lyric_scroll_frame_rate: LyricFrameRate::Fps60,
             last_library_view: None,
             current_playback: None,
             window_size: None,
@@ -526,6 +604,8 @@ mod tests {
             last_nonzero_volume: 0.64,
             color_theme: ColorTheme::EverforestDark,
             playback_quality: Quality::HiRes,
+            lyric_highlight_frame_rate: LyricFrameRate::Fps120,
+            lyric_scroll_frame_rate: LyricFrameRate::Display,
             last_library_view: Some(PersistedLibraryView {
                 account_id: 10001,
                 playlist_id: UserPlaylistId::Created { tid: 84, dir_id: 0 },
@@ -558,6 +638,14 @@ mod tests {
         assert_eq!(restored.last_nonzero_volume, expected.last_nonzero_volume);
         assert_eq!(restored.color_theme, expected.color_theme);
         assert_eq!(restored.playback_quality, expected.playback_quality);
+        assert_eq!(
+            restored.lyric_highlight_frame_rate,
+            expected.lyric_highlight_frame_rate
+        );
+        assert_eq!(
+            restored.lyric_scroll_frame_rate,
+            expected.lyric_scroll_frame_rate
+        );
         assert_eq!(restored.last_library_view, expected.last_library_view);
         assert_eq!(restored.current_playback, expected.current_playback);
         assert_eq!(restored.window_size, expected.window_size);

@@ -47,8 +47,8 @@ use crate::mpris::{
 };
 use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::settings::{
-    AppSettings, CdnCacheStore, LibraryCache, PersistedLibraryView, PersistedPlayback,
-    PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
+    AppSettings, CdnCacheStore, LibraryCache, LyricFrameRate, PersistedLibraryView,
+    PersistedPlayback, PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
 };
 use crate::singleflight::SingleFlight;
 use qqmusic_api::integration::{
@@ -67,6 +67,8 @@ const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
 const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
 const LYRIC_ROW_HEIGHT: f32 = 104.;
+const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
+const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
 const TRANSLATION_ALIGNMENT_TOLERANCE: Duration = Duration::from_millis(500);
 
 fn readable_lyric_color(sampled_rgb: [f32; 3], overlay: Hsla) -> Hsla {
@@ -113,15 +115,13 @@ enum LyricLayoutStyle {
 struct PreparedLyricFragment {
     layout: Arc<LineLayout>,
     ruby_layout: Option<Arc<LineLayout>>,
-    width: Pixels,
-    text_offset: Pixels,
-    ruby_offset: Pixels,
     timing: Option<(Duration, Duration)>,
 }
 
 #[derive(Clone, Debug)]
 struct PreparedLyricLine {
     fragments: Vec<PreparedLyricFragment>,
+    font_size: Pixels,
     line_height: Pixels,
     ruby_line_height: Pixels,
     has_word_timing: bool,
@@ -137,12 +137,12 @@ struct PreparedLyricTranslation {
 struct LyricLayoutCacheSource {
     lyrics: usize,
     mid: String,
+    compact: bool,
     narrow: bool,
     font_family: SharedString,
 }
 
 struct CachedLyricRow {
-    id: SharedString,
     normal: Option<Arc<PreparedLyricLine>>,
     active: Option<Arc<PreparedLyricLine>>,
     translation: Option<Arc<PreparedLyricTranslation>>,
@@ -152,7 +152,6 @@ struct CachedLyricRow {
 #[derive(Default)]
 struct LyricLayoutCache {
     source: Option<LyricLayoutCacheSource>,
-    scroll_id: SharedString,
     rows: Vec<CachedLyricRow>,
 }
 
@@ -189,18 +188,37 @@ fn lyric_highlight_progress(start: Duration, end: Duration, position: Duration) 
     position.saturating_sub(start).as_secs_f32() / end.saturating_sub(start).as_secs_f32()
 }
 
+fn lyric_motion_progress(start: Duration, position: Duration, duration: Duration) -> f32 {
+    if duration.is_zero() || position >= start.saturating_add(duration) {
+        return 1.;
+    }
+    let progress = position.saturating_sub(start).as_secs_f32() / duration.as_secs_f32();
+    1. - (1. - progress.clamp(0., 1.)).powi(3)
+}
+
+fn lyric_line_opacity(anchor: usize, index: usize) -> f32 {
+    match index.abs_diff(anchor) {
+        0 => 1.,
+        1 => 0.72,
+        2 => 0.48,
+        3 => 0.3,
+        _ => 0.16,
+    }
+}
+
 impl PreparedLyricLine {
     fn new(
         line: &LyricLine,
         style: LyricLayoutStyle,
+        compact: bool,
         narrow: bool,
         font_family: &SharedString,
         window: &Window,
     ) -> Self {
         let active = style == LyricLayoutStyle::Active;
-        let font_size = match (active, narrow) {
-            (true, true) => px(24.),
-            (true, false) => px(28.),
+        let font_size = match (active, compact) {
+            (true, true) => px(22.),
+            (true, false) => px(24.),
             (false, true) => px(17.),
             (false, false) => px(19.),
         };
@@ -246,17 +264,9 @@ impl PreparedLyricLine {
                         .text_system()
                         .layout_line(ruby, ruby_font_size, &[run], None)
                 });
-                let width = ruby_layout
-                    .as_ref()
-                    .map_or(layout.width, |ruby| layout.width.max(ruby.width));
                 fragments.push(PreparedLyricFragment {
-                    text_offset: (width - layout.width) / 2.,
-                    ruby_offset: ruby_layout
-                        .as_ref()
-                        .map_or(px(0.), |ruby| (width - ruby.width) / 2.),
                     layout,
                     ruby_layout,
-                    width,
                     timing,
                 });
             };
@@ -283,6 +293,7 @@ impl PreparedLyricLine {
 
         Self {
             fragments,
+            font_size,
             line_height: font_size * 1.3,
             ruby_line_height,
             has_word_timing,
@@ -318,6 +329,7 @@ impl LyricLayoutCache {
         &mut self,
         lyrics: &Arc<ParsedLyrics>,
         mid: &str,
+        compact: bool,
         narrow: bool,
         font_family: &SharedString,
     ) {
@@ -325,6 +337,7 @@ impl LyricLayoutCache {
         let matches = self.source.as_ref().is_some_and(|source| {
             source.lyrics == lyrics_identity
                 && source.mid == mid
+                && source.compact == compact
                 && source.narrow == narrow
                 && source.font_family == *font_family
         });
@@ -335,13 +348,12 @@ impl LyricLayoutCache {
         self.source = Some(LyricLayoutCacheSource {
             lyrics: lyrics_identity,
             mid: mid.to_owned(),
+            compact,
             narrow,
             font_family: font_family.clone(),
         });
-        self.scroll_id = format!("lyrics-{mid}").into();
         self.rows = (0..lyrics.lines.len())
-            .map(|index| CachedLyricRow {
-                id: format!("lyrics-{mid}-{index}").into(),
+            .map(|_| CachedLyricRow {
                 normal: None,
                 active: None,
                 translation: None,
@@ -350,19 +362,12 @@ impl LyricLayoutCache {
             .collect();
     }
 
-    fn scroll_id(&self) -> SharedString {
-        self.scroll_id.clone()
-    }
-
-    fn row_id(&self, index: usize) -> SharedString {
-        self.rows[index].id.clone()
-    }
-
     fn line(
         &mut self,
         index: usize,
         lyric: &LyricLine,
         style: LyricLayoutStyle,
+        compact: bool,
         narrow: bool,
         font_family: &SharedString,
         window: &Window,
@@ -376,6 +381,7 @@ impl LyricLayoutCache {
                 Arc::new(PreparedLyricLine::new(
                     lyric,
                     style,
+                    compact,
                     narrow,
                     font_family,
                     window,
@@ -414,26 +420,34 @@ impl PreparedLyricsElement {
         origin: Point<Pixels>,
         line_height: Pixels,
         color: Hsla,
+        scale: f32,
         window: &mut Window,
     ) -> anyhow::Result<()> {
-        let baseline = (line_height - layout.ascent - layout.descent) / 2. + layout.ascent;
+        let ascent = layout.ascent * scale;
+        let descent = layout.descent * scale;
+        let baseline = (line_height - ascent - descent) / 2. + ascent;
         window.paint_layer(
-            Bounds::new(origin, size(layout.width, line_height)),
+            Bounds::new(origin, size(layout.width * scale, line_height)),
             |window| {
                 for run in &layout.runs {
                     for glyph in &run.glyphs {
                         let origin = point(
-                            origin.x + glyph.position.x,
-                            origin.y + baseline + glyph.position.y,
+                            origin.x + glyph.position.x * scale,
+                            origin.y + baseline + glyph.position.y * scale,
                         );
                         if glyph.is_emoji {
-                            window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)?;
+                            window.paint_emoji(
+                                origin,
+                                run.font_id,
+                                glyph.id,
+                                layout.font_size * scale,
+                            )?;
                         } else {
                             window.paint_glyph(
                                 origin,
                                 run.font_id,
                                 glyph.id,
-                                layout.font_size,
+                                layout.font_size * scale,
                                 color,
                             )?;
                         }
@@ -450,6 +464,7 @@ impl PreparedLyricsElement {
         bounds: Bounds<Pixels>,
         style: LyricLayoutStyle,
         opacity: f32,
+        target_font_size: Pixels,
         foreground: Hsla,
         position: Duration,
         window: &mut Window,
@@ -458,10 +473,10 @@ impl PreparedLyricsElement {
             return Ok(());
         }
 
-        let origin = point(
-            origin.x,
-            origin.y + (bounds.size.height - line.height()) / 2.,
-        );
+        let scale = f32::from(target_font_size) / f32::from(line.font_size);
+        let line_height = line.line_height * scale;
+        let height = line.ruby_line_height + line_height;
+        let origin = point(origin.x, origin.y + (bounds.size.height - height) / 2.);
         let base_origin_y = origin.y + line.ruby_line_height;
         let base_color = foreground.opacity(
             opacity
@@ -476,7 +491,12 @@ impl PreparedLyricsElement {
         let mut x = origin.x;
 
         for fragment in &line.fragments {
-            let text_origin = point(x + fragment.text_offset, base_origin_y);
+            let text_width = fragment.layout.width * scale;
+            let fragment_width = fragment
+                .ruby_layout
+                .as_ref()
+                .map_or(text_width, |ruby| text_width.max(ruby.width));
+            let text_origin = point(x + (fragment_width - text_width) / 2., base_origin_y);
             if style == LyricLayoutStyle::Active && line.has_word_timing {
                 if let Some((start, end)) = fragment.timing {
                     let progress = lyric_highlight_progress(start, end, position);
@@ -484,29 +504,32 @@ impl PreparedLyricsElement {
                         Self::paint_layout(
                             &fragment.layout,
                             text_origin,
-                            line.line_height,
+                            line_height,
                             base_color,
+                            scale,
                             window,
                         )?;
                     } else if progress >= 1. {
                         Self::paint_layout(
                             &fragment.layout,
                             text_origin,
-                            line.line_height,
+                            line_height,
                             highlight_color,
+                            scale,
                             window,
                         )?;
                     } else {
                         Self::paint_layout(
                             &fragment.layout,
                             text_origin,
-                            line.line_height,
+                            line_height,
                             base_color,
+                            scale,
                             window,
                         )?;
                         let highlight_bounds = Bounds::new(
                             point(text_origin.x, bounds.top()),
-                            size(fragment.layout.width * progress, bounds.size.height),
+                            size(text_width * progress, bounds.size.height),
                         );
                         window.with_content_mask(
                             Some(ContentMask {
@@ -516,8 +539,9 @@ impl PreparedLyricsElement {
                                 Self::paint_layout(
                                     &fragment.layout,
                                     text_origin,
-                                    line.line_height,
+                                    line_height,
                                     highlight_color,
+                                    scale,
                                     window,
                                 )
                             },
@@ -527,8 +551,9 @@ impl PreparedLyricsElement {
                     Self::paint_layout(
                         &fragment.layout,
                         text_origin,
-                        line.line_height,
+                        line_height,
                         base_color,
+                        scale,
                         window,
                     )?;
                 }
@@ -536,8 +561,9 @@ impl PreparedLyricsElement {
                 Self::paint_layout(
                     &fragment.layout,
                     text_origin,
-                    line.line_height,
+                    line_height,
                     highlight_color,
+                    scale,
                     window,
                 )?;
             }
@@ -545,13 +571,14 @@ impl PreparedLyricsElement {
             if let Some(ruby) = &fragment.ruby_layout {
                 Self::paint_layout(
                     ruby,
-                    point(x + fragment.ruby_offset, origin.y),
+                    point(x + (fragment_width - ruby.width) / 2., origin.y),
                     line.ruby_line_height,
                     ruby_color,
+                    1.,
                     window,
                 )?;
             }
-            x += fragment.width;
+            x += fragment_width;
         }
         Ok(())
     }
@@ -614,6 +641,8 @@ impl Element for PreparedLyricsElement {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for (index, row) in self.rows.iter().enumerate() {
                 let emphasis = row.emphasis.clamp(0., 1.);
+                let target_font_size =
+                    row.normal.font_size + (row.active.font_size - row.normal.font_size) * emphasis;
                 let row_bounds = Bounds::new(
                     point(
                         bounds.origin.x,
@@ -636,6 +665,7 @@ impl Element for PreparedLyricsElement {
                     lyric_bounds,
                     LyricLayoutStyle::Normal,
                     row.opacity * (1. - emphasis),
+                    target_font_size,
                     self.foreground,
                     self.position,
                     window,
@@ -646,6 +676,7 @@ impl Element for PreparedLyricsElement {
                     lyric_bounds,
                     LyricLayoutStyle::Active,
                     row.opacity * emphasis,
+                    target_font_size,
                     self.foreground,
                     self.position,
                     window,
@@ -656,6 +687,7 @@ impl Element for PreparedLyricsElement {
                         point(row_bounds.origin.x, lyric_bounds.bottom() + px(4.)),
                         translation.line_height,
                         self.foreground.opacity(row.opacity * 0.72),
+                        1.,
                         window,
                     );
                 }
@@ -1041,6 +1073,7 @@ enum MainContent {
     Search,
     Artist,
     Playlist,
+    Settings,
 }
 
 #[derive(Clone, Copy)]
@@ -1170,6 +1203,7 @@ fn resolved_playlist_scroll_row(
 #[derive(Clone)]
 enum NavigationPage {
     Home,
+    Settings,
     Search {
         query: String,
         category: SearchCategory,
@@ -1188,6 +1222,7 @@ impl NavigationPage {
     fn same_destination(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Home, Self::Home) => true,
+            (Self::Settings, Self::Settings) => true,
             (Self::Search { query, .. }, Self::Search { query: other, .. }) => query == other,
             (Self::Artist { artist, .. }, Self::Artist { artist: other, .. }) => {
                 artist.mid == other.mid
@@ -1449,6 +1484,9 @@ pub struct LyruneView {
     _window_subscription: Option<Subscription>,
     window_tick_wake: Option<async_channel::Sender<()>>,
     background_tick_wake: Option<async_channel::Sender<()>>,
+    lyric_animation_frame_pending: bool,
+    active_lyric_frame_rate: Option<LyricFrameRate>,
+    next_lyric_animation_frame: Option<Instant>,
     #[cfg(target_os = "linux")]
     mpris: Option<MprisHandle>,
     #[cfg(target_os = "linux")]
@@ -1700,6 +1738,9 @@ impl LyruneView {
             _window_subscription: None,
             window_tick_wake: None,
             background_tick_wake: None,
+            lyric_animation_frame_pending: false,
+            active_lyric_frame_rate: None,
+            next_lyric_animation_frame: None,
             #[cfg(target_os = "linux")]
             mpris: None,
             #[cfg(target_os = "linux")]
@@ -1817,6 +1858,85 @@ impl LyruneView {
         if let Some(wake) = &self.background_tick_wake {
             let _ = wake.try_send(());
         }
+    }
+
+    fn lyric_motion_is_active(&self) -> bool {
+        let Some(mid) = self.current_track_data().map(|track| track.mid.as_str()) else {
+            return false;
+        };
+        let Some(lyrics) = self.lyrics_cache.get(mid) else {
+            return false;
+        };
+        let Some(active) = lyrics
+            .active_index(self.position)
+            .filter(|active| *active > 0)
+        else {
+            return false;
+        };
+        self.position
+            < lyrics.lines[active]
+                .start
+                .saturating_add(LYRIC_SCROLL_DURATION)
+    }
+
+    fn lyric_animation_frame_rate(&self, reduce_motion: bool) -> LyricFrameRate {
+        if !reduce_motion && self.lyric_motion_is_active() {
+            self.settings.lyric_scroll_frame_rate
+        } else {
+            self.settings.lyric_highlight_frame_rate
+        }
+    }
+
+    fn update_lyric_animation_frame_rate(
+        &mut self,
+        now: Instant,
+        reduce_motion: bool,
+    ) -> LyricFrameRate {
+        let frame_rate = self.lyric_animation_frame_rate(reduce_motion);
+        if self.active_lyric_frame_rate != Some(frame_rate) {
+            self.active_lyric_frame_rate = Some(frame_rate);
+            self.next_lyric_animation_frame =
+                frame_rate.frame_interval().map(|interval| now + interval);
+        }
+        frame_rate
+    }
+
+    fn request_lyric_animation_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        self.update_lyric_animation_frame_rate(now, cx.reduce_motion());
+        if self.lyric_animation_frame_pending {
+            return;
+        }
+
+        self.lyric_animation_frame_pending = true;
+        cx.on_next_frame(window, |this, window, cx| {
+            this.lyric_animation_frame_pending = false;
+            if !this.cover_backdrop_expanded || !this.playback_is_advancing() {
+                this.active_lyric_frame_rate = None;
+                this.next_lyric_animation_frame = None;
+                return;
+            }
+
+            let now = cx.background_executor().now();
+            let frame_rate = this.update_lyric_animation_frame_rate(now, cx.reduce_motion());
+            let Some(interval) = frame_rate.frame_interval() else {
+                cx.notify();
+                return;
+            };
+            let deadline = this.next_lyric_animation_frame.unwrap_or(now);
+            if now < deadline {
+                this.request_lyric_animation_frame(window, cx);
+                return;
+            }
+
+            let delay = now.saturating_duration_since(deadline);
+            this.next_lyric_animation_frame = Some(if delay < interval {
+                deadline + interval
+            } else {
+                now + interval
+            });
+            cx.notify();
+        });
     }
 
     pub(crate) fn window_size(&self) -> Option<PersistedWindowSize> {
@@ -2037,6 +2157,7 @@ impl LyruneView {
     fn current_navigation_page(&self, cx: &App) -> Option<NavigationPage> {
         match self.main_content {
             MainContent::Home => Some(NavigationPage::Home),
+            MainContent::Settings => Some(NavigationPage::Settings),
             MainContent::Search => Some(NavigationPage::Search {
                 query: self.search_query.clone(),
                 category: self.search_category,
@@ -2081,6 +2202,13 @@ impl LyruneView {
                 if !self.home_loaded && !self.home_loading {
                     self.load_home(cx);
                 }
+                cx.notify();
+            }
+            NavigationPage::Settings => {
+                self.main_content = MainContent::Settings;
+                self.playlist_list.update(cx, |list, cx| {
+                    list.set_selected_index(None, window, cx);
+                });
                 cx.notify();
             }
             NavigationPage::Search { query, category } => {
@@ -2128,6 +2256,14 @@ impl LyruneView {
         let target = NavigationPage::Home;
         let current = self.current_navigation_page(cx);
         self.navigation_history.record(current, &target);
+        self.apply_navigation_page(target, window, cx);
+    }
+
+    fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = NavigationPage::Settings;
+        let current = self.current_navigation_page(cx);
+        self.navigation_history.record(current, &target);
+        self.account_menu_open = false;
         self.apply_navigation_page(target, window, cx);
     }
 
@@ -4008,6 +4144,41 @@ impl LyruneView {
         cx.notify();
     }
 
+    fn set_preferred_playback_quality(&mut self, quality: Quality, cx: &mut Context<Self>) {
+        if self.settings.playback_quality == quality {
+            return;
+        }
+        self.settings.playback_quality = quality;
+        self.persist_settings();
+        cx.notify();
+    }
+
+    fn set_lyric_highlight_frame_rate(
+        &mut self,
+        frame_rate: LyricFrameRate,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.lyric_highlight_frame_rate == frame_rate {
+            return;
+        }
+        self.settings.lyric_highlight_frame_rate = frame_rate;
+        self.active_lyric_frame_rate = None;
+        self.next_lyric_animation_frame = None;
+        self.persist_settings();
+        cx.notify();
+    }
+
+    fn set_lyric_scroll_frame_rate(&mut self, frame_rate: LyricFrameRate, cx: &mut Context<Self>) {
+        if self.settings.lyric_scroll_frame_rate == frame_rate {
+            return;
+        }
+        self.settings.lyric_scroll_frame_rate = frame_rate;
+        self.active_lyric_frame_rate = None;
+        self.next_lyric_animation_frame = None;
+        self.persist_settings();
+        cx.notify();
+    }
+
     fn dismiss_popovers(&mut self, cx: &mut Context<Self>) {
         if self.account_menu_open || self.quality_menu_open {
             self.account_menu_open = false;
@@ -4612,21 +4783,6 @@ impl LyruneView {
         {
             avatar = avatar.src(cached_image_source(url));
         }
-        let selected_theme = self.settings.color_theme;
-        let theme_buttons = ColorTheme::ALL
-            .into_iter()
-            .map(|color_theme| {
-                Button::new(color_theme.id())
-                    .label(color_theme.label())
-                    .ghost()
-                    .w_full()
-                    .h(px(44.))
-                    .selected(selected_theme == color_theme)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_color_theme(color_theme, window, cx)
-                    }))
-            })
-            .collect::<Vec<_>>();
 
         div()
             .relative()
@@ -4663,27 +4819,212 @@ impl LyruneView {
                             .child(div().truncate().font_medium().child(name))
                             .child(
                                 div()
-                                    .pt_1()
                                     .text_xs()
-                                    .font_medium()
                                     .text_color(theme.muted_foreground)
-                                    .child("主题配色"),
+                                    .child("QQ 音乐账号"),
                             )
-                            .children(theme_buttons)
                             .child(
-                                div().border_t_1().border_color(theme.border).pt_2().child(
-                                    Button::new("logout")
-                                        .label("退出登录")
-                                        .outline()
-                                        .w_full()
-                                        .h(px(44.))
-                                        .on_click(cx.listener(|this, _, _, cx| this.logout(cx))),
-                                ),
+                                Button::new("open-settings")
+                                    .ghost()
+                                    .w_full()
+                                    .h(px(44.))
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .gap_2()
+                                            .child(media_icon_hsla(
+                                                MediaIcon::Settings,
+                                                theme.secondary_foreground,
+                                                px(18.),
+                                            ))
+                                            .child("设置"),
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.show_settings(window, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .border_t_1()
+                                    .border_color(theme.border)
+                                    .pt_2()
+                                    .child(
+                                        Button::new("logout")
+                                            .label("退出登录")
+                                            .outline()
+                                            .w_full()
+                                            .h(px(44.))
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.logout(cx)),
+                                            ),
+                                    ),
                             ),
                     )
                     .with_priority(10),
                 )
             })
+            .into_any_element()
+    }
+
+    fn render_settings_page(&mut self, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let selected_theme = self.settings.color_theme;
+        let theme_rows = ColorTheme::ALL
+            .chunks(2)
+            .map(|row| {
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .children(row.iter().copied().map(|color_theme| {
+                        Button::new(format!("settings-theme-{}", color_theme.id()))
+                            .label(color_theme.label())
+                            .ghost()
+                            .flex_1()
+                            .h(px(38.))
+                            .selected(selected_theme == color_theme)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.set_color_theme(color_theme, window, cx)
+                            }))
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let preferred_quality = self.settings.playback_quality;
+        let quality_rows = Quality::ALL
+            .chunks(2)
+            .map(|row| {
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .children(row.iter().copied().map(|quality| {
+                        Button::new(format!("settings-quality-{}", quality.cache_id()))
+                            .label(quality.label())
+                            .ghost()
+                            .flex_1()
+                            .h(px(38.))
+                            .selected(preferred_quality == quality)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_preferred_playback_quality(quality, cx)
+                            }))
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let selected_highlight_frame_rate = self.settings.lyric_highlight_frame_rate;
+        let highlight_frame_rate_buttons = LyricFrameRate::ALL
+            .into_iter()
+            .map(|frame_rate| {
+                Button::new(format!("lyrics-highlight-{}", frame_rate.id()))
+                    .label(frame_rate.label())
+                    .ghost()
+                    .flex_1()
+                    .h(px(36.))
+                    .selected(selected_highlight_frame_rate == frame_rate)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_lyric_highlight_frame_rate(frame_rate, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let selected_scroll_frame_rate = self.settings.lyric_scroll_frame_rate;
+        let scroll_frame_rate_buttons = LyricFrameRate::ALL
+            .into_iter()
+            .map(|frame_rate| {
+                Button::new(format!("lyrics-scroll-{}", frame_rate.id()))
+                    .label(frame_rate.label())
+                    .ghost()
+                    .flex_1()
+                    .h(px(36.))
+                    .selected(selected_scroll_frame_rate == frame_rate)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_lyric_scroll_frame_rate(frame_rate, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .child(
+                h_flex().w_full().items_start().justify_center().child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(760.))
+                        .gap_6()
+                        .px_6()
+                        .pt_8()
+                        .pb_8()
+                        .child(
+                            div()
+                                .text_size(if narrow { px(22.) } else { px(24.) })
+                                .font_semibold()
+                                .child("设置"),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_4()
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .child(div().font_medium().child("主题配色"))
+                                        .children(theme_rows),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(div().font_medium().child("首选播放音质"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("应用于后续加载的歌曲"),
+                                        )
+                                        .children(quality_rows),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(div().font_medium().child("歌词动画帧率"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("越高越流畅，也会增加资源消耗"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.secondary_foreground)
+                                                .child("逐字高亮"),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .gap_1()
+                                                .children(highlight_frame_rate_buttons),
+                                        )
+                                        .child(
+                                            div()
+                                                .pt_1()
+                                                .text_xs()
+                                                .text_color(theme.secondary_foreground)
+                                                .child("歌词滚动"),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .gap_1()
+                                                .children(scroll_frame_rate_buttons),
+                                        ),
+                                ),
+                        ),
+                ),
+            )
             .into_any_element()
     }
 
@@ -6423,6 +6764,7 @@ impl LyruneView {
         &mut self,
         mid: &str,
         foreground: Hsla,
+        compact: bool,
         narrow: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -6468,22 +6810,35 @@ impl LyruneView {
 
         let font_family: SharedString = design::system_ui_font_family().into();
         self.lyric_layout_cache
-            .reset_if_needed(&lyrics, mid, narrow, &font_family);
+            .reset_if_needed(&lyrics, mid, compact, narrow, &font_family);
 
         let active = lyrics.active_index(self.position);
         let anchor = active.unwrap_or(0);
-        let motion_duration = if self.cover_backdrop_expanded {
-            Duration::from_millis(360)
+        let motion_enabled = self.cover_backdrop_expanded && !cx.reduce_motion();
+        let scroll_progress = if motion_enabled && anchor > 0 {
+            lyric_motion_progress(
+                lyrics.lines[anchor].start,
+                self.position,
+                LYRIC_SCROLL_DURATION,
+            )
         } else {
-            Duration::ZERO
+            1.
         };
-        let scroll_offset = transition(
-            (self.lyric_layout_cache.scroll_id(), "scroll-offset"),
-            px(anchor as f32 * LYRIC_ROW_HEIGHT),
-            Transition::new(motion_duration),
-            window,
-            cx,
-        );
+        let scroll_anchor = if anchor > 0 {
+            anchor as f32 - (1. - scroll_progress)
+        } else {
+            0.
+        };
+        let scroll_offset = px(scroll_anchor * LYRIC_ROW_HEIGHT);
+        let style_progress = if motion_enabled && anchor > 0 {
+            lyric_motion_progress(
+                lyrics.lines[anchor].start,
+                self.position,
+                LYRIC_STYLE_DURATION,
+            )
+        } else {
+            1.
+        };
         let render_radius = ((f32::from(window.viewport_size().height) * 0.65 / LYRIC_ROW_HEIGHT)
             .ceil() as usize)
             + 2;
@@ -6496,34 +6851,29 @@ impl LyruneView {
             .skip(render_start)
             .take(render_end - render_start)
             .map(|(index, line)| {
-                let current = active == Some(index);
-                let distance = index.abs_diff(anchor);
-                let target_opacity = match distance {
-                    0 => 1.,
-                    1 => 0.72,
-                    2 => 0.48,
-                    3 => 0.3,
-                    _ => 0.16,
+                let target_opacity = lyric_line_opacity(anchor, index);
+                let opacity = if active.is_some() && motion_enabled && anchor > 0 {
+                    let previous_opacity = lyric_line_opacity(anchor - 1, index);
+                    previous_opacity + (target_opacity - previous_opacity) * style_progress
+                } else {
+                    target_opacity
                 };
-                let line_id = self.lyric_layout_cache.row_id(index);
-                let opacity = transition(
-                    (line_id.clone(), "opacity"),
-                    target_opacity,
-                    Transition::new(motion_duration.min(Duration::from_millis(240))),
-                    window,
-                    cx,
-                );
-                let emphasis = transition(
-                    (line_id, "emphasis"),
-                    if current { 1. } else { 0. },
-                    Transition::new(motion_duration.min(Duration::from_millis(240))),
-                    window,
-                    cx,
-                );
+                let emphasis = active.map_or(0., |active| {
+                    if motion_enabled && active > 0 {
+                        let previous = if index == active - 1 { 1. } else { 0. };
+                        let target = if index == active { 1. } else { 0. };
+                        previous + (target - previous) * style_progress
+                    } else if index == active {
+                        1.
+                    } else {
+                        0.
+                    }
+                });
                 let normal = self.lyric_layout_cache.line(
                     index,
                     line,
                     LyricLayoutStyle::Normal,
+                    compact,
                     narrow,
                     &font_family,
                     window,
@@ -6532,6 +6882,7 @@ impl LyruneView {
                     index,
                     line,
                     LyricLayoutStyle::Active,
+                    compact,
                     narrow,
                     &font_family,
                     window,
@@ -6650,8 +7001,14 @@ impl LyruneView {
                     window,
                     cx,
                 );
-                let lyrics =
-                    self.render_lyrics_panel(&track_mid, lyric_foreground, narrow, window, cx);
+                let lyrics = self.render_lyrics_panel(
+                    &track_mid,
+                    lyric_foreground,
+                    compact,
+                    narrow,
+                    window,
+                    cx,
+                );
                 let backdrop_images = div()
                     .absolute()
                     .inset_0()
@@ -7266,7 +7623,10 @@ impl LyruneView {
                     .map(AudioPlayer::position)
                     .unwrap_or_default();
             }
-            window.request_animation_frame();
+            self.request_lyric_animation_frame(window, cx);
+        } else {
+            self.active_lyric_frame_rate = None;
+            self.next_lyric_animation_frame = None;
         }
 
         let theme = cx.theme().clone();
@@ -7321,6 +7681,7 @@ impl LyruneView {
             MainContent::Search => self.render_search(compact, narrow, cx),
             MainContent::Artist => self.render_artist_content(compact, narrow, cx),
             MainContent::Playlist => self.render_playlist_content(compact, narrow, cx),
+            MainContent::Settings => self.render_settings_page(narrow, cx),
         };
         let search_width = if narrow {
             px(268.)
@@ -7436,7 +7797,14 @@ impl LyruneView {
                             .left(px(24.))
                             .child(history_navigation),
                     )
-                    .child(div().absolute().top(px(17.)).right(px(24.)).child(account)),
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(17.))
+                            .right(px(24.))
+                            .size(px(44.))
+                            .child(account),
+                    ),
             )
             .child(page);
         v_flex()
@@ -7513,8 +7881,8 @@ mod tests {
     use super::{
         NavigationHistory, NavigationPage, PlaybackQueue, PlaylistScrollPosition, SearchCategory,
         canonical_queue_track_index, format_playback_time, insert_external_track_after_current,
-        insert_track_after_current, parse_lyrics, playlist_title_is_long, readable_lyric_color,
-        resolved_playlist_scroll_row,
+        insert_track_after_current, lyric_motion_progress, parse_lyrics, playlist_title_is_long,
+        readable_lyric_color, resolved_playlist_scroll_row,
     };
     use gpui::{Pixels, black, px, white};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
@@ -7556,6 +7924,22 @@ mod tests {
         assert_eq!(
             readable_lyric_color([0.95, 0.95, 0.95], white().opacity(0.28)),
             black()
+        );
+    }
+
+    #[test]
+    fn lyric_motion_is_derived_from_playback_position() {
+        let start = Duration::from_secs(10);
+        let duration = Duration::from_millis(400);
+
+        assert_eq!(lyric_motion_progress(start, start, duration), 0.);
+        assert!(
+            (lyric_motion_progress(start, start + duration / 2, duration) - 0.875).abs() < 0.001
+        );
+        assert_eq!(lyric_motion_progress(start, start + duration, duration), 1.);
+        assert_eq!(
+            lyric_motion_progress(start, start + Duration::from_secs(1), duration),
+            1.
         );
     }
 

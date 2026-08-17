@@ -960,7 +960,6 @@ mod tests {
             album_mid: String::new(),
             cover_url: None,
             duration_seconds: 0,
-            added_at: None,
         }
     }
 

@@ -1225,7 +1225,6 @@ fn parse_track(value: &Value) -> Result<Track> {
         album_mid,
         cover_url,
         duration_seconds: integer_field(value, &["interval"]).unwrap_or_default(),
-        added_at: integer_field(wrapper, &["addTime", "add_time"]).map(|value| value as i64),
     })
 }
 

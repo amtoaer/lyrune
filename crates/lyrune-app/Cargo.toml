@@ -24,7 +24,6 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 stream-download.workspace = true
-time.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 xxhash-rust.workspace = true

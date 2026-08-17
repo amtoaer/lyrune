@@ -21,6 +21,8 @@ pub struct PersistedPlayback {
     #[serde(default)]
     pub queue_tracks: Vec<Track>,
     #[serde(default)]
+    pub queue_modified: bool,
+    #[serde(default)]
     pub queue_continuation: Option<PersistedQueueContinuation>,
 }
 
@@ -215,7 +217,7 @@ impl LibraryCache {
         }
     }
 
-    pub fn set_track_liked(&mut self, account_id: u64, mut track: Track, liked: bool, now: u64) {
+    pub fn set_track_liked(&mut self, account_id: u64, track: Track, liked: bool) {
         let update_count = |playlist: &mut UserPlaylist| {
             playlist.track_count = if liked {
                 playlist.track_count.saturating_add(1)
@@ -246,7 +248,6 @@ impl LibraryCache {
             .position(|item| item.mid == track.mid);
         match (liked, index) {
             (true, None) => {
-                track.added_at = Some(now as i64);
                 snapshot.tracks.insert(0, track);
                 snapshot.next_offset = snapshot.next_offset.saturating_add(1);
             }
@@ -479,7 +480,6 @@ mod tests {
             album_mid: String::new(),
             cover_url: None,
             duration_seconds: 180,
-            added_at: None,
         }
     }
 
@@ -538,6 +538,7 @@ mod tests {
                 track_mid: "restored-track".to_owned(),
                 position_ms: 92_345,
                 queue_tracks: vec![track("restored-track")],
+                queue_modified: true,
                 queue_continuation: Some(PersistedQueueContinuation::Radar {
                     next_page: 4,
                     has_more: true,
@@ -572,6 +573,7 @@ mod tests {
             track_mid: "track-mid".to_owned(),
             position_ms: 92_345,
             queue_tracks: vec![track("track-mid")],
+            queue_modified: false,
             queue_continuation: None,
         };
         assert_eq!(playback.resume_position(180), Duration::from_millis(92_345));
@@ -580,6 +582,20 @@ mod tests {
         assert_eq!(playback.resume_position(180), Duration::ZERO);
         playback.position_ms = 200_000;
         assert_eq!(playback.resume_position(180), Duration::ZERO);
+    }
+
+    #[test]
+    fn persisted_playback_defaults_old_queues_to_unmodified() {
+        let playback: PersistedPlayback = serde_json::from_value(serde_json::json!({
+            "account_id": 10001,
+            "playlist_id": UserPlaylistId::Liked,
+            "track_mid": "track-mid",
+            "position_ms": 1234,
+            "queue_tracks": [track("track-mid")]
+        }))
+        .expect("deserialize playback without queue_modified");
+
+        assert!(!playback.queue_modified);
     }
 
     #[test]
@@ -746,7 +762,7 @@ mod tests {
         assert_eq!(cache.track_liked(10001, "missing", 399, ttl), None);
         assert_eq!(cache.track_liked(10001, "first", 400, ttl), None);
 
-        cache.set_track_liked(10001, track("second"), true, 200);
+        cache.set_track_liked(10001, track("second"), true);
         let snapshot = cache
             .cached_playlist(10001, &UserPlaylistId::Liked)
             .expect("liked playlist snapshot");
@@ -760,7 +776,7 @@ mod tests {
         );
         assert_eq!(snapshot.next_offset, 2);
 
-        cache.set_track_liked(10001, track("first"), false, 201);
+        cache.set_track_liked(10001, track("first"), false);
         let snapshot = cache
             .cached_playlist(10001, &UserPlaylistId::Liked)
             .expect("updated liked playlist snapshot");

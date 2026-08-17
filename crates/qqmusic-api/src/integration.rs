@@ -222,7 +222,6 @@ pub struct Track {
     pub album_mid: String,
     pub cover_url: Option<String>,
     pub duration_seconds: u64,
-    pub added_at: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]

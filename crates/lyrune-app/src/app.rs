@@ -32,7 +32,7 @@ use crate::design::{self, ColorTheme};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, lyrune_icon, media_icon, media_icon_hsla};
 use crate::library::{
-    PlaylistListDelegate, TrackTableDelegate, TrackTableNavigation, format_duration, playlist_cover,
+    PlaylistListDelegate, TrackTableDelegate, TrackTableEvent, format_duration, playlist_cover,
 };
 #[cfg(target_os = "linux")]
 use crate::mpris::{
@@ -252,6 +252,26 @@ fn insert_track_after_current(
     insert_index
 }
 
+fn insert_external_track_after_current(
+    queue: &mut PlaybackQueue,
+    current_index: Option<usize>,
+    track: Track,
+) -> usize {
+    let index = insert_track_after_current(&mut queue.tracks, current_index, track);
+    queue.modified = true;
+    index
+}
+
+fn canonical_queue_track_index(
+    queue: &PlaybackQueue,
+    playlist_id: &UserPlaylistId,
+    track_mid: &str,
+) -> Option<usize> {
+    (!queue.modified && queue.playlist_id == *playlist_id)
+        .then(|| queue.tracks.iter().position(|track| track.mid == track_mid))
+        .flatten()
+}
+
 fn resolved_playlist_scroll_row(
     requested_row: usize,
     track_count: usize,
@@ -359,6 +379,7 @@ struct PlaybackLocation {
 struct PlaybackQueue {
     playlist_id: UserPlaylistId,
     tracks: Vec<Track>,
+    modified: bool,
     continuation: Option<PersistedQueueContinuation>,
 }
 
@@ -587,10 +608,10 @@ impl LyruneView {
                 .context_menu(false)
         });
         let (load_more_sender, load_more_receiver) = async_channel::bounded(1);
-        let (track_navigation_sender, track_navigation_receiver) = async_channel::unbounded();
+        let (track_event_sender, track_event_receiver) = async_channel::unbounded();
         let track_table = cx.new(|cx| {
             TableState::new(
-                TrackTableDelegate::new(load_more_sender, track_navigation_sender),
+                TrackTableDelegate::new(load_more_sender, track_event_sender),
                 window,
                 cx,
             )
@@ -666,15 +687,16 @@ impl LyruneView {
         .detach();
 
         cx.spawn_in(window, async move |this, cx| {
-            while let Ok(navigation) = track_navigation_receiver.recv().await {
+            while let Ok(event) = track_event_receiver.recv().await {
                 if this
-                    .update_in(cx, |this, window, cx| match navigation {
-                        TrackTableNavigation::Artist(artist) => {
+                    .update_in(cx, |this, window, cx| match event {
+                        TrackTableEvent::Artist(artist) => {
                             this.open_search_artist(artist, window, cx)
                         }
-                        TrackTableNavigation::Album(album) => {
+                        TrackTableEvent::Album(album) => {
                             this.open_home_playlist(album.into_playlist(), window, cx)
                         }
+                        TrackTableEvent::Unlike(track) => this.unlike_track(track, cx),
                     })
                     .is_err()
                 {
@@ -1316,13 +1338,14 @@ impl LyruneView {
         self.home_recommendation_loading = None;
         let current_index = self.current_track;
         let queue_index = if let Some(queue) = &mut self.playback_queue {
-            insert_track_after_current(&mut queue.tracks, current_index, track)
+            insert_external_track_after_current(queue, current_index, track)
         } else {
             self.playback_queue = Some(PlaybackQueue {
                 playlist_id: UserPlaylistId::Search {
                     query: self.search_query.clone(),
                 },
                 tracks: vec![track],
+                modified: false,
                 continuation: None,
             });
             0
@@ -1459,6 +1482,7 @@ impl LyruneView {
                         this.playback_queue = Some(PlaybackQueue {
                             playlist_id: UserPlaylistId::Recommendation { kind },
                             tracks,
+                            modified: false,
                             continuation: Some(continuation),
                         });
                         this.start_playback(0, Duration::ZERO, None, true, cx);
@@ -1971,16 +1995,11 @@ impl LyruneView {
         let mut playlist = artist.into_playlist();
         playlist.track_count = self.artist_track_count;
 
-        if let Some(queue_index) = self.playback_queue.as_ref().and_then(|queue| {
-            (queue.playlist_id == playlist.id)
-                .then(|| {
-                    queue
-                        .tracks
-                        .iter()
-                        .position(|track| track.mid == selected_track.mid)
-                })
-                .flatten()
-        }) {
+        if let Some(queue_index) = self
+            .playback_queue
+            .as_ref()
+            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, &selected_track.mid))
+        {
             if self.current_track == Some(queue_index) {
                 if self.loading_track.is_none() {
                     self.toggle_playback(cx);
@@ -2082,7 +2101,9 @@ impl LyruneView {
         }
         self.track_table.update(cx, |table, cx| {
             table.clear_selection(cx);
-            table.delegate_mut().reset();
+            table
+                .delegate_mut()
+                .reset(playlist.id == UserPlaylistId::Liked);
             table.refresh(cx);
             cx.notify();
         });
@@ -2119,7 +2140,6 @@ impl LyruneView {
                 table
                     .delegate_mut()
                     .append(snapshot.tracks, snapshot.has_more);
-                table.refresh(cx);
                 cx.notify();
             });
             self.restore_pending_playlist_scroll(cx);
@@ -2217,7 +2237,6 @@ impl LyruneView {
                         }
                         this.track_table.update(cx, |table, cx| {
                             table.delegate_mut().append(page.tracks, page.has_more);
-                            table.refresh(cx);
                             cx.notify();
                         });
                         if offset == 0 {
@@ -2261,6 +2280,7 @@ impl LyruneView {
             self.playback_queue = Some(PlaybackQueue {
                 playlist_id: restore.playlist_id,
                 tracks: restore.queue_tracks,
+                modified: restore.queue_modified,
                 continuation: restore.queue_continuation,
             });
             self.start_playback(index, resume_at, None, false, cx);
@@ -2284,6 +2304,7 @@ impl LyruneView {
         self.playback_queue = Some(PlaybackQueue {
             playlist_id: playlist.id.clone(),
             tracks,
+            modified: false,
             continuation: None,
         });
         self.queue_recommendation_loading = false;
@@ -2378,16 +2399,11 @@ impl LyruneView {
             return;
         };
         let selected_mid = tracks[index].mid.as_str();
-        if let Some(queue_index) = self.playback_queue.as_ref().and_then(|queue| {
-            (queue.playlist_id == playlist.id)
-                .then(|| {
-                    queue
-                        .tracks
-                        .iter()
-                        .position(|track| track.mid == selected_mid)
-                })
-                .flatten()
-        }) {
+        if let Some(queue_index) = self
+            .playback_queue
+            .as_ref()
+            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, selected_mid))
+        {
             if self.current_track == Some(queue_index) {
                 if self.loading_track.is_none() {
                     self.toggle_playback(cx);
@@ -3004,6 +3020,10 @@ impl LyruneView {
                 .as_ref()
                 .map(|queue| queue.tracks.clone())
                 .unwrap_or_default(),
+            queue_modified: self
+                .playback_queue
+                .as_ref()
+                .is_some_and(|queue| queue.modified),
             queue_continuation: self
                 .playback_queue
                 .as_ref()
@@ -3025,21 +3045,11 @@ impl LyruneView {
     }
 
     fn sync_table_playback_state(&mut self, cx: &mut Context<Self>) {
-        let visible = self.playback_queue.as_ref().is_some_and(|queue| {
-            self.selected_playlist
-                .as_ref()
-                .is_some_and(|playlist| playlist.id == queue.playlist_id)
-        });
-        let current_mid = visible
-            .then(|| self.current_track_data().map(|track| track.mid.clone()))
-            .flatten();
-        let loading_mid = visible
-            .then(|| {
-                self.loading_track
-                    .and_then(|index| self.playback_queue.as_ref()?.tracks.get(index))
-                    .map(|track| track.mid.clone())
-            })
-            .flatten();
+        let current_mid = self.current_track_data().map(|track| track.mid.clone());
+        let loading_mid = self
+            .loading_track
+            .and_then(|index| self.playback_queue.as_ref()?.tracks.get(index))
+            .map(|track| track.mid.clone());
         let (playing, loading) = {
             let table = self.track_table.read(cx);
             let tracks = table.delegate().tracks();
@@ -3254,14 +3264,26 @@ impl LyruneView {
         let Some(track) = self.current_track_data().cloned() else {
             return;
         };
+        let Some(liked) = self.liked_tracks.get(&track.mid).copied() else {
+            self.ensure_track_like_state(track.mid.clone(), cx);
+            return;
+        };
+        self.set_track_liked(track, !liked, cx);
+    }
+
+    fn unlike_track(&mut self, track: Track, cx: &mut Context<Self>) {
+        if self.liked_toggle_loading.contains(&track.mid) {
+            return;
+        }
+        self.liked_tracks.insert(track.mid.clone(), true);
+        self.set_track_liked(track, false, cx);
+    }
+
+    fn set_track_liked(&mut self, track: Track, liked: bool, cx: &mut Context<Self>) {
         let mid = track.mid.clone();
         if self.liked_toggle_loading.contains(&mid) {
             return;
         }
-        let Some(previous) = self.liked_tracks.get(&mid).copied() else {
-            self.ensure_track_like_state(mid, cx);
-            return;
-        };
         let Some(credential) = self.credential.clone() else {
             return;
         };
@@ -3278,9 +3300,8 @@ impl LyruneView {
             cx.notify();
             return;
         }
-        let liked = !previous;
         let account_id = credential.music_id;
-        self.liked_tracks.insert(mid.clone(), liked);
+        let previous = self.liked_tracks.insert(mid.clone(), liked);
         self.liked_toggle_loading.insert(mid.clone());
         cx.notify();
 
@@ -3317,7 +3338,11 @@ impl LyruneView {
                     }
                     Err(error) => {
                         if this.liked_tracks.get(&mid) == Some(&liked) {
-                            this.liked_tracks.insert(mid.clone(), previous);
+                            if let Some(previous) = previous {
+                                this.liked_tracks.insert(mid.clone(), previous);
+                            } else {
+                                this.liked_tracks.remove(&mid);
+                            }
                         }
                         this.status = StatusMessage::error(format!(
                             "{}失败：{error:#}",
@@ -3342,9 +3367,8 @@ impl LyruneView {
         liked: bool,
         cx: &mut Context<Self>,
     ) {
-        let now = unix_timestamp_secs();
         self.library_cache
-            .set_track_liked(account_id, track.clone(), liked, now);
+            .set_track_liked(account_id, track.clone(), liked);
         self.playlist_list.update(cx, |list, cx| {
             list.delegate_mut().update_liked_track_count(liked);
             cx.notify();
@@ -3364,12 +3388,9 @@ impl LyruneView {
             };
         }
         let page_changed = self.track_table.update(cx, |table, cx| {
-            let changed = table
-                .delegate_mut()
-                .set_track_liked(track, liked, now as i64);
+            let changed = table.delegate_mut().set_track_liked(track, liked);
             if changed {
                 table.clear_selection(cx);
-                table.refresh(cx);
             }
             cx.notify();
             changed
@@ -4633,13 +4654,7 @@ impl LyruneView {
                 .px_3()
                 .rounded(px(10.))
                 .selected(is_current)
-                .tooltip(format!(
-                    "{} {title}",
-                    match source {
-                        SongRowSource::Search => "双击播放",
-                        SongRowSource::Artist => "播放",
-                    }
-                ))
+                .tooltip(format!("播放 {title}"))
                 .child(
                     h_flex()
                         .size_full()
@@ -4722,15 +4737,10 @@ impl LyruneView {
                                 .child(duration),
                         ),
                 )
-                .on_click(
-                    cx.listener(move |this, event: &ClickEvent, _, cx| match source {
-                        SongRowSource::Search if event.click_count() == 2 => {
-                            this.select_search_track(index, cx);
-                        }
-                        SongRowSource::Search => {}
-                        SongRowSource::Artist => this.select_artist_track(index, cx),
-                    }),
-                )
+                .on_click(cx.listener(move |this, _, _, cx| match source {
+                    SongRowSource::Search => this.select_search_track(index, cx),
+                    SongRowSource::Artist => this.select_artist_track(index, cx),
+                }))
             })
             .collect::<Vec<_>>();
         v_flex().w_full().gap_1().children(rows).into_any_element()
@@ -5885,7 +5895,7 @@ impl LyruneView {
                             .w(search_width)
                             .border_2()
                             .rounded(px(999.))
-                            .text_size(px(16.))
+                            .text_size(theme.font_size)
                             .aria_label("搜索")
                             .prefix(media_icon_hsla(
                                 MediaIcon::Search,
@@ -5993,9 +6003,9 @@ impl Render for LyruneView {
 #[cfg(test)]
 mod tests {
     use super::{
-        NavigationHistory, NavigationPage, PlaylistScrollPosition, SearchCategory,
-        format_playback_time, insert_track_after_current, playlist_title_is_long,
-        resolved_playlist_scroll_row,
+        NavigationHistory, NavigationPage, PlaybackQueue, PlaylistScrollPosition, SearchCategory,
+        canonical_queue_track_index, format_playback_time, insert_external_track_after_current,
+        insert_track_after_current, playlist_title_is_long, resolved_playlist_scroll_row,
     };
     use gpui::{Pixels, px};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
@@ -6021,7 +6031,6 @@ mod tests {
             album_mid: String::new(),
             cover_url: None,
             duration_seconds: 180,
-            added_at: None,
         }
     }
 
@@ -6175,5 +6184,23 @@ mod tests {
 
         assert_eq!(inserted, 1);
         assert_eq!(mids(&tracks), ["A", "C", "B"]);
+    }
+
+    #[test]
+    fn search_insertion_prevents_reusing_the_source_playlist_queue() {
+        let playlist_id = UserPlaylistId::Liked;
+        let mut queue = PlaybackQueue {
+            playlist_id: playlist_id.clone(),
+            tracks: vec![track("A"), track("B")],
+            modified: false,
+            continuation: None,
+        };
+
+        let inserted = insert_external_track_after_current(&mut queue, Some(0), track("search"));
+
+        assert_eq!(inserted, 1);
+        assert_eq!(mids(&queue.tracks), ["A", "search", "B"]);
+        assert!(queue.modified);
+        assert_eq!(canonical_queue_track_index(&queue, &playlist_id, "B"), None);
     }
 }

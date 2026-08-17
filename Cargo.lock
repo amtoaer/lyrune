@@ -4001,7 +4001,6 @@ dependencies = [
  "serde",
  "serde_json",
  "stream-download",
- "time",
  "tokio",
  "tokio-util",
  "tray-icon",

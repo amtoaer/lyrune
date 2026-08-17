@@ -17,9 +17,10 @@ use gpui_component::{
 use qqmusic_api::integration::{SearchAlbum, SearchArtist, Track, UserPlaylist, UserPlaylistId};
 
 #[derive(Clone)]
-pub enum TrackTableNavigation {
+pub enum TrackTableEvent {
     Artist(SearchArtist),
     Album(SearchAlbum),
+    Unlike(Track),
 }
 
 pub struct PlaylistListDelegate {
@@ -223,29 +224,26 @@ pub struct TrackTableDelegate {
     playing_index: Option<usize>,
     loading_index: Option<usize>,
     playback_active: bool,
-    show_added_at: bool,
+    show_liked_actions: bool,
     compact: bool,
     load_more_sender: Sender<()>,
-    navigation_sender: Sender<TrackTableNavigation>,
+    event_sender: Sender<TrackTableEvent>,
 }
 
 impl TrackTableDelegate {
-    pub fn new(
-        load_more_sender: Sender<()>,
-        navigation_sender: Sender<TrackTableNavigation>,
-    ) -> Self {
+    pub fn new(load_more_sender: Sender<()>, event_sender: Sender<TrackTableEvent>) -> Self {
         Self {
-            columns: track_columns(false, false),
+            columns: track_columns(false),
             tracks: Vec::new(),
             loading: false,
             has_more: false,
             playing_index: None,
             loading_index: None,
             playback_active: false,
-            show_added_at: false,
+            show_liked_actions: false,
             compact: false,
             load_more_sender,
-            navigation_sender,
+            event_sender,
         }
     }
 
@@ -271,7 +269,7 @@ impl TrackTableDelegate {
                         .into_any_element(),
                 );
             }
-            let sender = self.navigation_sender.clone();
+            let sender = self.event_sender.clone();
             let name = artist.name.clone();
             let hover_color = cx.theme().primary;
             links.push(
@@ -284,7 +282,7 @@ impl TrackTableDelegate {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
-                        let _ = sender.try_send(TrackTableNavigation::Artist(artist.clone()));
+                        let _ = sender.try_send(TrackTableEvent::Artist(artist.clone()));
                     })
                     .child(name)
                     .into_any_element(),
@@ -300,30 +298,27 @@ impl TrackTableDelegate {
             .into_any_element()
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self, show_liked_actions: bool) {
         self.tracks.clear();
         self.loading = true;
         self.has_more = false;
         self.playing_index = None;
         self.loading_index = None;
         self.playback_active = false;
-        self.show_added_at = false;
-        self.columns = track_columns(false, self.compact);
+        self.show_liked_actions = show_liked_actions;
+        self.columns = track_columns(self.compact);
     }
 
     pub fn append(&mut self, tracks: Vec<Track>, has_more: bool) {
         self.tracks.extend(tracks);
         self.loading = false;
         self.has_more = has_more;
-        self.show_added_at = self.tracks.iter().any(|track| track.added_at.is_some());
-        self.columns = track_columns(self.show_added_at, self.compact);
     }
 
-    pub fn set_track_liked(&mut self, mut track: Track, liked: bool, added_at: i64) -> bool {
+    pub fn set_track_liked(&mut self, track: Track, liked: bool) -> bool {
         let index = self.tracks.iter().position(|item| item.mid == track.mid);
         match (liked, index) {
             (true, None) => {
-                track.added_at = Some(added_at);
                 self.tracks.insert(0, track);
             }
             (false, Some(index)) => {
@@ -331,8 +326,6 @@ impl TrackTableDelegate {
             }
             _ => return false,
         }
-        self.show_added_at = self.tracks.iter().any(|track| track.added_at.is_some());
-        self.columns = track_columns(self.show_added_at, self.compact);
         true
     }
 
@@ -356,7 +349,7 @@ impl TrackTableDelegate {
             return false;
         }
         self.compact = compact;
-        self.columns = track_columns(self.show_added_at, compact);
+        self.columns = track_columns(compact);
         true
     }
 
@@ -375,8 +368,8 @@ impl TrackTableDelegate {
         self.playing_index = None;
         self.loading_index = None;
         self.playback_active = false;
-        self.show_added_at = false;
-        self.columns = track_columns(false, self.compact);
+        self.show_liked_actions = false;
+        self.columns = track_columns(self.compact);
     }
 }
 
@@ -570,38 +563,60 @@ impl TableDelegate for TrackTableDelegate {
                     .truncate()
                     .text_color(cx.theme().secondary_foreground)
                     .when_some(album_link, |this, album| {
-                        let sender = self.navigation_sender.clone();
+                        let sender = self.event_sender.clone();
                         let hover_color = cx.theme().primary;
                         this.cursor_pointer()
                             .hover(move |style| style.text_color(hover_color))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
-                                let _ = sender.try_send(TrackTableNavigation::Album(album.clone()));
+                                let _ = sender.try_send(TrackTableEvent::Album(album.clone()));
                             })
                     })
                     .child(album)
                     .into_any_element()
             }
-            "added_at" => h_flex()
-                .w_full()
-                .h_full()
-                .text_color(cx.theme().muted_foreground)
-                .child(
-                    track
-                        .added_at
-                        .map(format_date)
-                        .unwrap_or_else(|| "—".to_owned()),
-                )
-                .into_any_element(),
-            "duration" => h_flex()
-                .w_full()
-                .h_full()
-                .justify_end()
-                .text_right()
-                .text_color(cx.theme().muted_foreground)
-                .child(format_duration(track.duration_seconds))
-                .into_any_element(),
+            "duration" => {
+                let group = format!("track-row-{row_ix}");
+                let sender = self.event_sender.clone();
+                let hover_background = cx.theme().muted;
+                let duration = format_duration(track.duration_seconds);
+                h_flex()
+                    .w_full()
+                    .h_full()
+                    .justify_end()
+                    .gap_1()
+                    .text_right()
+                    .text_color(cx.theme().muted_foreground)
+                    .when(self.show_liked_actions, |cell| {
+                        cell.child(
+                            div()
+                                .id(("unlike-track", row_ix))
+                                .size(px(28.))
+                                .flex_shrink_0()
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .opacity(0.)
+                                .group_hover(group, |style| style.opacity(1.))
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(hover_background))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    let _ = sender.try_send(TrackTableEvent::Unlike(track.clone()));
+                                })
+                                .child(media_icon_hsla(
+                                    MediaIcon::HeartFilled,
+                                    cx.theme().danger,
+                                    px(16.),
+                                )),
+                        )
+                    })
+                    .child(duration)
+                    .into_any_element()
+            }
             _ => div().into_any_element(),
         }
     }
@@ -621,7 +636,7 @@ impl TableDelegate for TrackTableDelegate {
     }
 }
 
-fn track_columns(show_added_at: bool, compact: bool) -> Vec<Column> {
+fn track_columns(compact: bool) -> Vec<Column> {
     let mut columns = vec![
         Column::new("number", "#")
             .width(px(48.))
@@ -636,13 +651,6 @@ fn track_columns(show_added_at: bool, compact: bool) -> Vec<Column> {
             Column::new("album", "专辑")
                 .width(px(240.))
                 .min_width(px(136.)),
-        );
-    }
-    if show_added_at && !compact {
-        columns.push(
-            Column::new("added_at", "添加日期")
-                .width(px(124.))
-                .min_width(px(104.)),
         );
     }
     columns.push(
@@ -676,13 +684,4 @@ fn playlist_subtitle(playlist: &UserPlaylist) -> String {
 
 pub fn format_duration(seconds: u64) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
-}
-
-fn format_date(timestamp: i64) -> String {
-    time::OffsetDateTime::from_unix_timestamp(timestamp)
-        .map(|date| {
-            let (year, month, day) = date.to_calendar_date();
-            format!("{year:04}-{:02}-{day:02}", month as u8)
-        })
-        .unwrap_or_else(|_| "—".to_owned())
 }

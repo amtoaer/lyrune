@@ -5,6 +5,7 @@ mod design;
 mod http;
 mod icons;
 mod library;
+mod lyrics_cache;
 #[cfg(target_os = "linux")]
 mod mpris;
 mod player;

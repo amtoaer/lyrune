@@ -41,6 +41,7 @@ use crate::icons::{MediaIcon, lyrune_icon, media_icon, media_icon_hsla};
 use crate::library::{
     PlaylistListDelegate, TrackTableDelegate, TrackTableEvent, format_duration, playlist_cover,
 };
+use crate::lyrics_cache::LyricDiskCache;
 #[cfg(target_os = "linux")]
 use crate::mpris::{
     MprisCommand, MprisHandle, MprisLoopStatus, MprisPlaybackStatus, MprisSnapshot, MprisTrack,
@@ -65,6 +66,7 @@ const PROGRESS_TICK: Duration = Duration::from_millis(250);
 const PLAYBACK_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
 const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const LYRIC_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
 const LYRIC_ROW_HEIGHT: f32 = 104.;
 const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
@@ -701,6 +703,29 @@ struct ParsedLyrics {
     lines: Vec<LyricLine>,
 }
 
+#[derive(Clone)]
+struct MemoryLyrics {
+    parsed: Arc<ParsedLyrics>,
+    fetched_at_secs: u64,
+}
+
+impl MemoryLyrics {
+    fn is_fresh(&self, now_secs: u64) -> bool {
+        now_secs.saturating_sub(self.fetched_at_secs) < LYRIC_CACHE_TTL.as_secs()
+    }
+}
+
+enum LyricLoadEvent {
+    Disk {
+        lyrics: MemoryLyrics,
+        fresh: bool,
+    },
+    Network {
+        result: anyhow::Result<MemoryLyrics>,
+        had_cached: bool,
+    },
+}
+
 impl ParsedLyrics {
     fn active_index(&self, position: Duration) -> Option<usize> {
         self.lines
@@ -799,14 +824,18 @@ fn provider_translation(text: &str) -> Option<String> {
 }
 
 fn parse_timed_lyrics(raw: &str) -> Vec<LyricLine> {
-    let qrc = parse_qrc(raw);
-    if qrc.is_empty() { parse_lrc(raw) } else { qrc }
+    let Some(content) = extract_qrc_content(raw) else {
+        return parse_lrc(raw);
+    };
+    let qrc = parse_qrc(&content);
+    if qrc.is_empty() {
+        parse_lrc(&content)
+    } else {
+        qrc
+    }
 }
 
-fn parse_qrc(raw: &str) -> Vec<LyricLine> {
-    let Some(content) = extract_qrc_content(raw) else {
-        return Vec::new();
-    };
+fn parse_qrc(content: &str) -> Vec<LyricLine> {
     let mut lines = content
         .lines()
         .filter_map(|raw_line| {
@@ -830,20 +859,199 @@ fn extract_qrc_content(raw: &str) -> Option<String> {
         return Some(raw.to_owned());
     }
 
+    extract_qrc_content_strict(raw).or_else(|| extract_qrc_content_relaxed(raw))
+}
+
+fn extract_qrc_content_strict(raw: &str) -> Option<String> {
     let mut reader = Reader::from_str(raw);
+    let mut lyric_content = None;
     loop {
         match reader.read_event() {
             Ok(Event::Start(element) | Event::Empty(element)) => {
-                for attribute in element.attributes().flatten() {
-                    if attribute.key.as_ref() == b"LyricContent" {
-                        let decoded = reader.decoder().decode(attribute.value.as_ref()).ok()?;
-                        return unescape(&decoded).ok().map(|content| content.into_owned());
+                for attribute in element.attributes() {
+                    let attribute = attribute.ok()?;
+                    let decoded = reader.decoder().decode(attribute.value.as_ref()).ok()?;
+                    let decoded = unescape(&decoded).ok()?.into_owned();
+                    if attribute.key.as_ref() == b"LyricContent" && lyric_content.is_none() {
+                        lyric_content = Some(decoded);
                     }
                 }
             }
-            Ok(Event::Eof) | Err(_) => return None,
+            Ok(Event::Text(text)) => {
+                let decoded = reader.decoder().decode(text.as_ref()).ok()?;
+                unescape(&decoded).ok()?;
+            }
+            Ok(Event::Eof) => return lyric_content,
+            Err(_) => return None,
             _ => {}
         }
+    }
+}
+
+fn extract_qrc_content_relaxed(raw: &str) -> Option<String> {
+    const TAG_NAME: &str = "<Lyric_1";
+    let bytes = raw.as_bytes();
+    let mut search_from = 0;
+
+    while let Some(offset) = raw[search_from..].find(TAG_NAME) {
+        let mut cursor = search_from + offset + TAG_NAME.len();
+        if bytes
+            .get(cursor)
+            .is_some_and(|byte| is_xml_name_byte(*byte))
+        {
+            search_from = cursor;
+            continue;
+        }
+
+        loop {
+            skip_ascii_whitespace(bytes, &mut cursor);
+            if cursor >= bytes.len() || bytes[cursor] == b'>' || bytes[cursor..].starts_with(b"/>")
+            {
+                break;
+            }
+
+            let name_start = cursor;
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| is_xml_name_byte(*byte))
+            {
+                cursor += 1;
+            }
+            if cursor == name_start {
+                break;
+            }
+            let name = &raw[name_start..cursor];
+
+            skip_ascii_whitespace(bytes, &mut cursor);
+            if bytes.get(cursor) != Some(&b'=') {
+                break;
+            }
+            cursor += 1;
+            skip_ascii_whitespace(bytes, &mut cursor);
+            let Some(quote @ (b'"' | b'\'')) = bytes.get(cursor).copied() else {
+                break;
+            };
+            cursor += 1;
+            let value_start = cursor;
+
+            if name == "LyricContent" {
+                while let Some(relative_end) =
+                    bytes[cursor..].iter().position(|byte| *byte == quote)
+                {
+                    let value_end = cursor + relative_end;
+                    if qrc_attribute_tail_is_valid(&raw[value_end + 1..]) {
+                        return Some(decode_qrc_entities(&raw[value_start..value_end]));
+                    }
+                    cursor = value_end + 1;
+                }
+                break;
+            }
+
+            let Some(relative_end) = bytes[cursor..].iter().position(|byte| *byte == quote) else {
+                break;
+            };
+            cursor += relative_end + 1;
+        }
+
+        search_from = search_from + offset + TAG_NAME.len();
+    }
+
+    None
+}
+
+fn qrc_attribute_tail_is_valid(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut cursor = 0;
+    loop {
+        skip_ascii_whitespace(bytes, &mut cursor);
+        if bytes[cursor..].starts_with(b"/>") || bytes.get(cursor) == Some(&b'>') {
+            return true;
+        }
+
+        let name_start = cursor;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| is_xml_name_byte(*byte))
+        {
+            cursor += 1;
+        }
+        if cursor == name_start {
+            return false;
+        }
+
+        skip_ascii_whitespace(bytes, &mut cursor);
+        if bytes.get(cursor) != Some(&b'=') {
+            return false;
+        }
+        cursor += 1;
+        skip_ascii_whitespace(bytes, &mut cursor);
+        let Some(quote @ (b'"' | b'\'')) = bytes.get(cursor).copied() else {
+            return false;
+        };
+        cursor += 1;
+        let Some(relative_end) = bytes[cursor..].iter().position(|byte| *byte == quote) else {
+            return false;
+        };
+        cursor += relative_end + 1;
+    }
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], cursor: &mut usize) {
+    while bytes
+        .get(*cursor)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        *cursor += 1;
+    }
+}
+
+fn is_xml_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'.' | b'-')
+}
+
+fn decode_qrc_entities(input: &str) -> String {
+    let mut decoded = String::with_capacity(input.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = input[cursor..].find('&') {
+        let entity_start = cursor + relative_start;
+        decoded.push_str(&input[cursor..entity_start]);
+        let Some(relative_end) = input[entity_start + 1..].find(';') else {
+            decoded.push_str(&input[entity_start..]);
+            return decoded;
+        };
+        let entity_end = entity_start + 1 + relative_end;
+        let entity = &input[entity_start + 1..entity_end];
+        if let Some(character) = decode_qrc_entity(entity) {
+            decoded.push(character);
+            cursor = entity_end + 1;
+        } else {
+            decoded.push('&');
+            cursor = entity_start + 1;
+        }
+    }
+
+    decoded.push_str(&input[cursor..]);
+    decoded
+}
+
+fn decode_qrc_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "apos" => Some('\''),
+        "gt" => Some('>'),
+        "lt" => Some('<'),
+        "quot" => Some('"'),
+        _ => entity
+            .strip_prefix("#x")
+            .or_else(|| entity.strip_prefix("#X"))
+            .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+            .or_else(|| {
+                entity
+                    .strip_prefix('#')
+                    .and_then(|digits| digits.parse::<u32>().ok())
+            })
+            .and_then(char::from_u32),
     }
 }
 
@@ -1462,7 +1670,9 @@ pub struct LyruneView {
     backdrop_current_url: Option<String>,
     backdrop_previous_url: Option<String>,
     backdrop_crossfade_phase: bool,
-    lyrics_cache: HashMap<String, Arc<ParsedLyrics>>,
+    lyric_disk_cache: Option<LyricDiskCache>,
+    lyrics_cache: HashMap<String, MemoryLyrics>,
+    pending_lyrics_cache: HashMap<String, MemoryLyrics>,
     lyric_layout_cache: LyricLayoutCache,
     lyrics_loading: HashSet<String>,
     lyrics_errors: HashMap<String, String>,
@@ -1514,6 +1724,7 @@ impl LyruneView {
                 None
             }
         };
+        let lyric_disk_cache = LyricDiskCache::new().ok();
         let cdn_cache = match CdnCacheStore::load() {
             Ok(cache) => cache,
             Err(error) => {
@@ -1713,7 +1924,9 @@ impl LyruneView {
             backdrop_current_url: None,
             backdrop_previous_url: None,
             backdrop_crossfade_phase: false,
+            lyric_disk_cache,
             lyrics_cache: HashMap::new(),
+            pending_lyrics_cache: HashMap::new(),
             lyric_layout_cache: LyricLayoutCache::default(),
             lyrics_loading: HashSet::new(),
             lyrics_errors: HashMap::new(),
@@ -1868,13 +2081,14 @@ impl LyruneView {
             return false;
         };
         let Some(active) = lyrics
+            .parsed
             .active_index(self.position)
             .filter(|active| *active > 0)
         else {
             return false;
         };
         self.position
-            < lyrics.lines[active]
+            < lyrics.parsed.lines[active]
                 .start
                 .saturating_add(LYRIC_SCROLL_DURATION)
     }
@@ -3543,42 +3757,149 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) {
         let mid = track.mid.clone();
-        if mid.is_empty()
-            || self.lyrics_cache.contains_key(&mid)
+        if mid.is_empty() {
+            return;
+        }
+
+        let current_is_same_track = self
+            .current_track_data()
+            .is_some_and(|current| current.mid == mid);
+        if !current_is_same_track && let Some(pending) = self.pending_lyrics_cache.remove(&mid) {
+            self.lyrics_cache.insert(mid.clone(), pending);
+            cx.notify();
+        }
+        let had_cached = self.lyrics_cache.contains_key(&mid);
+        if self
+            .pending_lyrics_cache
+            .get(&mid)
+            .is_some_and(|lyrics| current_is_same_track && lyrics.is_fresh(unix_timestamp_secs()))
+            || self
+                .lyrics_cache
+                .get(&mid)
+                .is_some_and(|lyrics| lyrics.is_fresh(unix_timestamp_secs()))
             || !self.lyrics_loading.insert(mid.clone())
         {
             return;
         }
+
         self.lyrics_errors.remove(&mid);
         cx.notify();
 
-        let (sender, receiver) = async_channel::bounded(1);
+        let disk_cache = self.lyric_disk_cache.clone();
+        let (sender, receiver) = async_channel::bounded(2);
+        let worker_mid = mid.clone();
         drop(RUNTIME.spawn(async move {
-            let result = client.lyrics(&credential, &track).await.map(|result| {
-                Arc::new(parse_lyrics(
-                    &result.lyric,
-                    result.trans_lyric.as_deref(),
-                    result.roma_lyric.as_deref(),
-                ))
-            });
-            let _ = sender.send(result).await;
+            let mut had_cached = had_cached;
+            if !had_cached
+                && let Some(cache) = disk_cache.as_ref()
+                && let Ok(Some(cached)) = cache.load(&worker_mid).await
+            {
+                let fresh = cached.is_fresh(unix_timestamp_secs(), LYRIC_CACHE_TTL);
+                let lyrics = MemoryLyrics {
+                    parsed: Arc::new(parse_lyrics(
+                        &cached.lyrics.lyric,
+                        cached.lyrics.trans_lyric.as_deref(),
+                        cached.lyrics.roma_lyric.as_deref(),
+                    )),
+                    fetched_at_secs: cached.fetched_at_secs,
+                };
+                if sender
+                    .send(LyricLoadEvent::Disk { lyrics, fresh })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if fresh {
+                    return;
+                }
+                had_cached = true;
+            }
+
+            let result = match client.lyrics(&credential, &track).await {
+                Ok(result) => {
+                    let fetched_at_secs = unix_timestamp_secs();
+                    if let Some(cache) = disk_cache.as_ref() {
+                        let _ = cache.save(fetched_at_secs, &result).await;
+                    }
+                    Ok(MemoryLyrics {
+                        parsed: Arc::new(parse_lyrics(
+                            &result.lyric,
+                            result.trans_lyric.as_deref(),
+                            result.roma_lyric.as_deref(),
+                        )),
+                        fetched_at_secs,
+                    })
+                }
+                Err(error) => Err(error),
+            };
+            let _ = sender
+                .send(LyricLoadEvent::Network { result, had_cached })
+                .await;
         }));
 
         cx.spawn(async move |this, cx| {
-            let Ok(result) = receiver.recv().await else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.lyrics_loading.remove(&mid);
-                match result {
-                    Ok(lyrics) => {
-                        this.lyrics_cache.insert(mid.clone(), lyrics);
-                    }
-                    Err(error) => {
-                        this.lyrics_errors.insert(mid.clone(), format!("{error:#}"));
-                    }
+            while let Ok(event) = receiver.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        match event {
+                            LyricLoadEvent::Disk { lyrics, fresh } => {
+                                this.lyrics_errors.remove(&mid);
+                                this.lyrics_cache.insert(mid.clone(), lyrics);
+                                if fresh {
+                                    this.lyrics_loading.remove(&mid);
+                                }
+                            }
+                            LyricLoadEvent::Network { result, had_cached } => {
+                                this.lyrics_loading.remove(&mid);
+                                match result {
+                                    Ok(lyrics) => {
+                                        this.lyrics_errors.remove(&mid);
+                                        let is_current = this
+                                            .current_track_data()
+                                            .is_some_and(|track| track.mid == mid);
+                                        let unchanged = this
+                                            .lyrics_cache
+                                            .get(&mid)
+                                            .is_some_and(|cached| cached.parsed == lyrics.parsed);
+                                        if had_cached && is_current {
+                                            if unchanged {
+                                                if let Some(cached) =
+                                                    this.lyrics_cache.get_mut(&mid)
+                                                {
+                                                    cached.fetched_at_secs = lyrics.fetched_at_secs;
+                                                }
+                                                this.pending_lyrics_cache.remove(&mid);
+                                            } else {
+                                                this.pending_lyrics_cache
+                                                    .insert(mid.clone(), lyrics);
+                                            }
+                                        } else {
+                                            this.pending_lyrics_cache.remove(&mid);
+                                            this.lyrics_cache.insert(mid.clone(), lyrics);
+                                        }
+                                    }
+                                    Err(error) if !had_cached => {
+                                        this.lyrics_errors
+                                            .insert(mid.clone(), format!("{error:#}"));
+                                    }
+                                    Err(_) => {
+                                        this.lyrics_errors.remove(&mid);
+                                    }
+                                }
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
                 }
-                cx.notify();
+            }
+            let _ = this.update(cx, |this, cx| {
+                if !this.lyrics_cache.contains_key(&mid) && this.lyrics_loading.remove(&mid) {
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -6795,7 +7116,11 @@ impl LyruneView {
                 .into_any_element()
         };
 
-        let Some(lyrics) = self.lyrics_cache.get(mid).cloned() else {
+        let Some(lyrics) = self
+            .lyrics_cache
+            .get(mid)
+            .map(|lyrics| lyrics.parsed.clone())
+        else {
             if self.lyrics_loading.contains(mid) {
                 return message("正在加载歌词…", None);
             }
@@ -7880,9 +8205,9 @@ impl Render for LyruneView {
 mod tests {
     use super::{
         NavigationHistory, NavigationPage, PlaybackQueue, PlaylistScrollPosition, SearchCategory,
-        canonical_queue_track_index, format_playback_time, insert_external_track_after_current,
-        insert_track_after_current, lyric_motion_progress, parse_lyrics, playlist_title_is_long,
-        readable_lyric_color, resolved_playlist_scroll_row,
+        canonical_queue_track_index, extract_qrc_content, format_playback_time,
+        insert_external_track_after_current, insert_track_after_current, lyric_motion_progress,
+        parse_lyrics, playlist_title_is_long, readable_lyric_color, resolved_playlist_scroll_row,
     };
     use gpui::{Pixels, black, px, white};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
@@ -8044,6 +8369,55 @@ mod tests {
         assert_eq!(lyrics.lines.len(), 2);
         assert_eq!(lyrics.lines[0].text, "中文");
         assert_eq!(lyrics.lines[1].text, "歌词");
+    }
+
+    #[test]
+    fn extracts_qrc_content_with_malformed_xml_characters() {
+        let content = extract_qrc_content(
+            r#"<QrcInfos><LyricInfo><Lyric_1 LyricContent="[0,500]Recording & Mix <live>(0,500)&#10;[500,500]Marcus "MarcLo" Lomax &amp; &#x41;&apos;s(500,500)" Source='qq'/></LyricInfo></QrcInfos>"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            content,
+            "[0,500]Recording & Mix <live>(0,500)\n[500,500]Marcus \"MarcLo\" Lomax & A's(500,500)"
+        );
+    }
+
+    #[test]
+    fn parses_all_lines_after_an_unescaped_qrc_quote() {
+        let lyrics = parse_lyrics(
+            r#"<QrcInfos><LyricInfo><Lyric_1 LyricContent="[0,500]Marcus "MarcLo" Lomax(0,500)&#10;[500,500]second(500,500)&#10;[1000,500]third(1000,500)"/></LyricInfo></QrcInfos>"#,
+            None,
+            None,
+        );
+
+        assert_eq!(lyrics.lines.len(), 3);
+        assert_eq!(lyrics.lines[0].text, "Marcus \"MarcLo\" Lomax");
+        assert_eq!(lyrics.lines[2].text, "third");
+    }
+
+    #[test]
+    fn falls_back_to_lrc_inside_the_qrc_wrapper() {
+        let lyrics = parse_lyrics(
+            r#"<QrcInfos><LyricInfo><Lyric_1 LyricContent="[00:01.000]first&#10;[00:02.000]second"/></LyricInfo></QrcInfos>"#,
+            None,
+            None,
+        );
+
+        assert_eq!(lyrics.lines.len(), 2);
+        assert_eq!(lyrics.lines[0].text, "first");
+        assert_eq!(lyrics.lines[1].text, "second");
+    }
+
+    #[test]
+    fn rejects_a_truncated_qrc_wrapper_instead_of_returning_a_prefix() {
+        assert_eq!(
+            extract_qrc_content(
+                r#"<QrcInfos><LyricInfo><Lyric_1 LyricContent="[0,500]first(0,500)"#
+            ),
+            None
+        );
     }
 
     #[test]

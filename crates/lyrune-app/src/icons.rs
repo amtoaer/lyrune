@@ -55,6 +55,8 @@ pub fn lyrune_icon(theme: ColorTheme, size: Pixels) -> AnyElement {
 pub enum MediaIcon {
     Back,
     Forward,
+    ChevronUp,
+    ChevronDown,
     Home,
     Search,
     Music,
@@ -85,6 +87,8 @@ impl MediaIcon {
         match self {
             Self::Back => r#"<path d="m15 18-6-6 6-6"/>"#,
             Self::Forward => r#"<path d="m9 18 6-6-6-6"/>"#,
+            Self::ChevronUp => r#"<path d="m18 15-6-6-6 6"/>"#,
+            Self::ChevronDown => r#"<path d="m6 9 6 6 6-6"/>"#,
             Self::Home => {
                 r#"<path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/>"#
             }

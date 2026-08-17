@@ -23,6 +23,7 @@ cookie = "0.18.1"
 directories = "6.0"
 dotenvy = "0.15"
 ecb = { version = "0.1", features = ["alloc"] }
+flate2 = "1"
 futures-util = "0.3"
 # Keep the Zed source URL unqualified so Cargo unifies it with gpui-component's
 # transitive dependencies. Cargo.lock pins every Zed crate to 24e25552.
@@ -42,6 +43,7 @@ ksni = { version = "0.3.6", features = ["blocking"] }
 md5 = "0.8"
 mpris-server = { version = "0.10.0", default-features = false, features = ["tokio"] }
 qrcode = "0.14.1"
+quick-xml = "0.41"
 qqmusic-api = { package = "netease-qq-music-api", path = "crates/qqmusic-api" }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = [

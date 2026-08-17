@@ -65,9 +65,12 @@ pub enum MprisCommand {
     SetVolume(f64),
 }
 
-struct MprisUpdate {
-    snapshot: MprisSnapshot,
-    seeked: bool,
+enum MprisUpdate {
+    State {
+        snapshot: MprisSnapshot,
+        seeked: bool,
+    },
+    Position(i64),
 }
 
 #[derive(Clone)]
@@ -77,17 +80,23 @@ pub struct MprisHandle {
 
 impl MprisHandle {
     pub fn update(&self, snapshot: MprisSnapshot) {
-        let _ = self.updates.try_send(MprisUpdate {
+        let _ = self.updates.try_send(MprisUpdate::State {
             snapshot,
             seeked: false,
         });
     }
 
     pub fn seeked(&self, snapshot: MprisSnapshot) {
-        let _ = self.updates.try_send(MprisUpdate {
+        let _ = self.updates.try_send(MprisUpdate::State {
             snapshot,
             seeked: true,
         });
+    }
+
+    pub fn update_position(&self, position_micros: i64) {
+        let _ = self
+            .updates
+            .try_send(MprisUpdate::Position(position_micros));
     }
 }
 
@@ -254,7 +263,13 @@ fn send_command(commands: &Sender<MprisCommand>, command: MprisCommand) {
 }
 
 async fn apply_update(player: &Player, update: MprisUpdate) -> ZbusResult<()> {
-    let snapshot = update.snapshot;
+    let (snapshot, seeked) = match update {
+        MprisUpdate::State { snapshot, seeked } => (snapshot, seeked),
+        MprisUpdate::Position(position_micros) => {
+            player.set_position(Time::from_micros(position_micros));
+            return Ok(());
+        }
+    };
     player.set_position(Time::from_micros(snapshot.position_micros));
     player.set_metadata(metadata(snapshot.track)).await?;
     player
@@ -270,7 +285,7 @@ async fn apply_update(player: &Player, update: MprisUpdate) -> ZbusResult<()> {
     player
         .set_playback_status(playback_status(snapshot.playback_status))
         .await?;
-    if update.seeked {
+    if seeked {
         player
             .seeked(Time::from_micros(snapshot.position_micros))
             .await?;

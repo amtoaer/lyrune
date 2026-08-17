@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -23,13 +24,14 @@ use gpui_component::{
     table::{DataTable, TableEvent, TableState},
     v_flex,
 };
+use quick_xml::{Reader, escape::unescape, events::Event};
 use tokio::runtime::{Builder, Runtime};
 use tokio::task::JoinHandle;
 
 use crate::cache::AudioCache;
 use crate::credentials::CredentialStore;
 use crate::design::{self, ColorTheme};
-use crate::http::cached_image_source;
+use crate::http::{blurred_cover, blurred_image_source, cached_image_source};
 use crate::icons::{MediaIcon, lyrune_icon, media_icon, media_icon_hsla};
 use crate::library::{
     PlaylistListDelegate, TrackTableDelegate, TrackTableEvent, format_duration, playlist_cover,
@@ -58,6 +60,284 @@ const PROGRESS_TICK: Duration = Duration::from_millis(250);
 const PLAYBACK_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
 const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const PLAYER_BAR_HEIGHT: f32 = 112.;
+const LYRIC_ROW_HEIGHT: f32 = 104.;
+const LYRIC_PROGRESS_TICK: Duration = Duration::from_millis(16);
+const TRANSLATION_ALIGNMENT_TOLERANCE: Duration = Duration::from_millis(500);
+
+fn readable_lyric_color(sampled_rgb: [f32; 3], overlay: Hsla) -> Hsla {
+    let overlay = overlay.to_rgb();
+    let blended = [
+        sampled_rgb[0] * (1. - overlay.a) + overlay.r * overlay.a,
+        sampled_rgb[1] * (1. - overlay.a) + overlay.g * overlay.a,
+        sampled_rgb[2] * (1. - overlay.a) + overlay.b * overlay.a,
+    ];
+    let linear = blended.map(|channel| {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    let luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+    if luminance > 0.179 { black() } else { white() }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LyricWord {
+    range: Range<usize>,
+    start: Duration,
+    end: Duration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LyricLine {
+    start: Duration,
+    text: String,
+    words: Vec<LyricWord>,
+    translation: Option<String>,
+}
+
+impl LyricWord {
+    fn highlight_progress(&self, position: Duration) -> f32 {
+        if position <= self.start {
+            return 0.;
+        }
+        if position >= self.end || self.end <= self.start {
+            return 1.;
+        }
+
+        position.saturating_sub(self.start).as_secs_f32()
+            / self.end.saturating_sub(self.start).as_secs_f32()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ParsedLyrics {
+    lines: Vec<LyricLine>,
+}
+
+impl ParsedLyrics {
+    fn active_index(&self, position: Duration) -> Option<usize> {
+        self.lines
+            .partition_point(|line| line.start <= position)
+            .checked_sub(1)
+    }
+}
+
+fn parse_lyrics(original: &str, translated: Option<&str>) -> ParsedLyrics {
+    let mut original = parse_timed_lyrics(original);
+    let translated = translated.map(parse_timed_lyrics).unwrap_or_default();
+    if original.is_empty() {
+        original = translated;
+        return ParsedLyrics { lines: original };
+    }
+
+    if original.len() == translated.len() {
+        for (line, translation) in original.iter_mut().zip(translated) {
+            line.translation = provider_translation(&translation.text);
+        }
+    } else {
+        let mut search_from = 0;
+        for line in &mut original {
+            let Some((offset, translation)) = translated[search_from..]
+                .iter()
+                .enumerate()
+                .take_while(|(_, translation)| {
+                    translation.start <= line.start.saturating_add(TRANSLATION_ALIGNMENT_TOLERANCE)
+                })
+                .filter(|(_, translation)| {
+                    line.start.abs_diff(translation.start) <= TRANSLATION_ALIGNMENT_TOLERANCE
+                })
+                .min_by_key(|(_, translation)| line.start.abs_diff(translation.start))
+            else {
+                continue;
+            };
+            line.translation = provider_translation(&translation.text);
+            search_from += offset + 1;
+        }
+    }
+
+    ParsedLyrics { lines: original }
+}
+
+fn provider_translation(text: &str) -> Option<String> {
+    (!text.trim().is_empty() && text.trim() != "//").then(|| text.to_owned())
+}
+
+fn parse_timed_lyrics(raw: &str) -> Vec<LyricLine> {
+    let qrc = parse_qrc(raw);
+    if qrc.is_empty() { parse_lrc(raw) } else { qrc }
+}
+
+fn parse_qrc(raw: &str) -> Vec<LyricLine> {
+    let Some(content) = extract_qrc_content(raw) else {
+        return Vec::new();
+    };
+    let mut lines = content
+        .lines()
+        .filter_map(|raw_line| {
+            let raw_line = raw_line.trim_start_matches('\u{feff}');
+            let (start, consumed) = parse_qrc_line_timestamp(raw_line)?;
+            let (text, words) = parse_qrc_words(&raw_line[consumed..]);
+            (!text.is_empty()).then_some(LyricLine {
+                start,
+                text,
+                words,
+                translation: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    lines.sort_by_key(|line| line.start);
+    lines
+}
+
+fn extract_qrc_content(raw: &str) -> Option<String> {
+    if !raw.trim_start().starts_with('<') {
+        return Some(raw.to_owned());
+    }
+
+    let mut reader = Reader::from_str(raw);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                for attribute in element.attributes().flatten() {
+                    if attribute.key.as_ref() == b"LyricContent" {
+                        let decoded = reader.decoder().decode(attribute.value.as_ref()).ok()?;
+                        return unescape(&decoded).ok().map(|content| content.into_owned());
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+    }
+}
+
+fn parse_qrc_line_timestamp(input: &str) -> Option<(Duration, usize)> {
+    let end = input.strip_prefix('[')?.find(']')? + 1;
+    let (start, duration) = input[1..end].split_once(',')?;
+    let start = start.parse::<u64>().ok()?;
+    duration.parse::<u64>().ok()?;
+    Some((Duration::from_millis(start), end + 1))
+}
+
+fn parse_qrc_words(input: &str) -> (String, Vec<LyricWord>) {
+    let mut text = String::with_capacity(input.len());
+    let mut words = Vec::new();
+    let mut cursor = 0;
+    while let Some(open) = input[cursor..].find('(').map(|offset| cursor + offset) {
+        let Some(close) = input[open + 1..].find(')').map(|offset| open + 1 + offset) else {
+            break;
+        };
+        if let Some((start, duration)) = parse_qrc_word_timestamp(&input[open + 1..close]) {
+            let range_start = text.len();
+            text.push_str(&input[cursor..open]);
+            let range_end = text.len();
+            if range_start < range_end {
+                words.push(LyricWord {
+                    range: range_start..range_end,
+                    start,
+                    end: start.saturating_add(duration),
+                });
+            }
+            cursor = close + 1;
+        } else {
+            text.push_str(&input[cursor..=open]);
+            cursor = open + 1;
+        }
+    }
+    text.push_str(&input[cursor..]);
+    trim_lyric_text(text, words)
+}
+
+fn parse_qrc_word_timestamp(input: &str) -> Option<(Duration, Duration)> {
+    let mut parts = input.split(',');
+    let start = parts.next()?.parse::<u64>().ok()?;
+    let duration = parts.next()?.parse::<u64>().ok()?;
+    Some((
+        Duration::from_millis(start),
+        Duration::from_millis(duration),
+    ))
+}
+
+fn trim_lyric_text(text: String, words: Vec<LyricWord>) -> (String, Vec<LyricWord>) {
+    let start = text.len() - text.trim_start().len();
+    let end = text.trim_end().len();
+    if start >= end {
+        return (String::new(), Vec::new());
+    }
+    if start == 0 && end == text.len() {
+        return (text, words);
+    }
+
+    let words = words
+        .into_iter()
+        .filter_map(|word| {
+            let range_start = word.range.start.clamp(start, end);
+            let range_end = word.range.end.clamp(start, end);
+            (range_start < range_end).then_some(LyricWord {
+                range: range_start - start..range_end - start,
+                start: word.start,
+                end: word.end,
+            })
+        })
+        .collect();
+    (text[start..end].to_owned(), words)
+}
+
+fn parse_lrc(raw: &str) -> Vec<LyricLine> {
+    let mut lines = Vec::new();
+    for raw_line in raw.lines() {
+        let mut remainder = raw_line.trim_start_matches('\u{feff}');
+        let mut timestamps = Vec::new();
+        while let Some((timestamp, consumed)) = parse_lrc_timestamp(remainder) {
+            timestamps.push(timestamp);
+            remainder = &remainder[consumed..];
+        }
+        let text = remainder.trim();
+        if text.is_empty() {
+            continue;
+        }
+        lines.extend(timestamps.into_iter().map(|start| LyricLine {
+            start,
+            text: text.to_owned(),
+            words: Vec::new(),
+            translation: None,
+        }));
+    }
+    lines.sort_by_key(|line| line.start);
+    lines
+}
+
+fn parse_lrc_timestamp(input: &str) -> Option<(Duration, usize)> {
+    if !input.starts_with('[') {
+        return None;
+    }
+    let end = input.find(']')?;
+    let (minutes, seconds) = input[1..end].split_once(':')?;
+    let minutes = minutes.parse::<u64>().ok()?;
+    let (seconds, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
+    let seconds = seconds.parse::<u64>().ok()?;
+    if seconds >= 60 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let milliseconds = match fraction.len() {
+        0 => 0,
+        1 => fraction.parse::<u64>().ok()? * 100,
+        2 => fraction.parse::<u64>().ok()? * 10,
+        _ => fraction[..3].parse::<u64>().ok()?,
+    };
+    Some((
+        Duration::from_millis(
+            minutes
+                .saturating_mul(60_000)
+                .saturating_add(seconds.saturating_mul(1_000))
+                .saturating_add(milliseconds),
+        ),
+        end + 1,
+    ))
+}
 
 fn progress_slider_state(value: f32) -> SliderState {
     SliderState::new()
@@ -539,6 +819,14 @@ pub struct LyruneView {
     seek_preview: Option<Duration>,
     progress_hovered: bool,
     progress_hover_fraction: Option<f32>,
+    cover_backdrop_expanded: bool,
+    cover_backdrop_fully_expanded: bool,
+    backdrop_current_url: Option<String>,
+    backdrop_previous_url: Option<String>,
+    backdrop_crossfade_phase: bool,
+    lyrics_cache: HashMap<String, Arc<ParsedLyrics>>,
+    lyrics_loading: HashSet<String>,
+    lyrics_errors: HashMap<String, String>,
     settings: AppSettings,
     library_cache: LibraryCache,
     liked_tracks: HashMap<String, bool>,
@@ -557,6 +845,8 @@ pub struct LyruneView {
     _window_subscription: Option<Subscription>,
     #[cfg(target_os = "linux")]
     mpris: Option<MprisHandle>,
+    #[cfg(target_os = "linux")]
+    last_mpris_position_sync: Instant,
 }
 
 impl LyruneView {
@@ -774,6 +1064,14 @@ impl LyruneView {
             seek_preview: None,
             progress_hovered: false,
             progress_hover_fraction: None,
+            cover_backdrop_expanded: false,
+            cover_backdrop_fully_expanded: false,
+            backdrop_current_url: None,
+            backdrop_previous_url: None,
+            backdrop_crossfade_phase: false,
+            lyrics_cache: HashMap::new(),
+            lyrics_loading: HashSet::new(),
+            lyrics_errors: HashMap::new(),
             settings,
             library_cache,
             liked_tracks: HashMap::new(),
@@ -795,6 +1093,8 @@ impl LyruneView {
             _window_subscription: None,
             #[cfg(target_os = "linux")]
             mpris: None,
+            #[cfg(target_os = "linux")]
+            last_mpris_position_sync: Instant::now(),
         };
         view.attach_window(window, cx);
         view.start_cdn_maintenance();
@@ -833,7 +1133,20 @@ impl LyruneView {
     pub(crate) fn start_background_tick(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(PROGRESS_TICK).await;
+                let interval = match this.read_with(cx, |this, _| {
+                    if this.cover_backdrop_expanded
+                        && this.playback_started
+                        && this.loading_track.is_none()
+                    {
+                        LYRIC_PROGRESS_TICK
+                    } else {
+                        PROGRESS_TICK
+                    }
+                }) {
+                    Ok(interval) => interval,
+                    Err(_) => break,
+                };
+                cx.background_executor().timer(interval).await;
                 if this.update(cx, |this, cx| this.tick(cx)).is_err() {
                     break;
                 }
@@ -1592,6 +1905,8 @@ impl LyruneView {
                             StatusMessage::error(format!("继续加载推荐歌曲失败：{error:#}"));
                     }
                 }
+                #[cfg(target_os = "linux")]
+                this.sync_mpris(false);
                 cx.notify();
             });
         })
@@ -2377,6 +2692,8 @@ impl LyruneView {
                         cache_revision,
                     );
                     this.persist_current_playback();
+                    #[cfg(target_os = "linux")]
+                    this.sync_mpris(false);
                     cx.notify();
                 }
             });
@@ -2416,6 +2733,52 @@ impl LyruneView {
         self.pending_playback_restore = None;
         self.replace_playback_queue(playlist, tracks, has_more, cx);
         self.start_playback(index, Duration::ZERO, None, true, cx);
+    }
+
+    fn ensure_track_lyrics(
+        &mut self,
+        client: ProtocolClient,
+        credential: QqCredential,
+        track: Track,
+        cx: &mut Context<Self>,
+    ) {
+        let mid = track.mid.clone();
+        if mid.is_empty()
+            || self.lyrics_cache.contains_key(&mid)
+            || !self.lyrics_loading.insert(mid.clone())
+        {
+            return;
+        }
+        self.lyrics_errors.remove(&mid);
+        cx.notify();
+
+        let (sender, receiver) = async_channel::bounded(1);
+        drop(RUNTIME.spawn(async move {
+            let result = client
+                .lyrics(&credential, &track)
+                .await
+                .map(|result| Arc::new(parse_lyrics(&result.lyric, result.trans_lyric.as_deref())));
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.lyrics_loading.remove(&mid);
+                match result {
+                    Ok(lyrics) => {
+                        this.lyrics_cache.insert(mid.clone(), lyrics);
+                    }
+                    Err(error) => {
+                        this.lyrics_errors.insert(mid.clone(), format!("{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn start_playback(
@@ -2477,6 +2840,7 @@ impl LyruneView {
             .map(|location| location.urls.clone());
 
         audio.stop();
+        self.ensure_track_lyrics(client.clone(), credential.clone(), track.clone(), cx);
         self.play_generation = self.play_generation.wrapping_add(1);
         let generation = self.play_generation;
         self.current_track = Some(index);
@@ -3152,6 +3516,13 @@ impl LyruneView {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn sync_mpris_position(&self) {
+        if let Some(mpris) = &self.mpris {
+            mpris.update_position(duration_micros(self.position));
+        }
+    }
+
     fn sync_progress_slider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.seek_preview.is_none() {
             let progress = self
@@ -3185,7 +3556,11 @@ impl LyruneView {
             self.persist_current_playback();
         }
         #[cfg(target_os = "linux")]
-        self.sync_mpris(false);
+        if self.current_track.is_some() && self.last_mpris_position_sync.elapsed() >= PROGRESS_TICK
+        {
+            self.sync_mpris_position();
+            self.last_mpris_position_sync = Instant::now();
+        }
         cx.notify();
     }
 
@@ -5364,6 +5739,457 @@ impl LyruneView {
             .into_any_element()
     }
 
+    fn render_lyrics_panel(
+        &self,
+        mid: &str,
+        foreground: Hsla,
+        narrow: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let message = |title: &str, detail: Option<String>| {
+            v_flex()
+                .absolute()
+                .top(relative(0.44))
+                .left_0()
+                .right_0()
+                .gap_2()
+                .text_color(foreground)
+                .child(
+                    div()
+                        .text_size(if narrow { px(24.) } else { px(28.) })
+                        .font_semibold()
+                        .child(title.to_owned()),
+                )
+                .when_some(detail, |message, detail| {
+                    message.child(
+                        div()
+                            .line_clamp(2)
+                            .text_base()
+                            .text_color(foreground.opacity(0.68))
+                            .child(detail),
+                    )
+                })
+                .into_any_element()
+        };
+
+        let Some(lyrics) = self.lyrics_cache.get(mid) else {
+            if self.lyrics_loading.contains(mid) {
+                return message("正在加载歌词…", None);
+            }
+            if let Some(error) = self.lyrics_errors.get(mid) {
+                return message("歌词加载失败", Some(error.clone()));
+            }
+            return message("歌词暂未加载", None);
+        };
+        if lyrics.lines.is_empty() {
+            return message("暂无歌词", None);
+        }
+
+        let active = lyrics.active_index(self.position);
+        let anchor = active.unwrap_or(0);
+        let motion_duration = if self.cover_backdrop_expanded {
+            Duration::from_millis(360)
+        } else {
+            Duration::ZERO
+        };
+        let scroll_offset = transition(
+            (format!("lyrics-{mid}"), "scroll-offset"),
+            px(anchor as f32 * LYRIC_ROW_HEIGHT),
+            Transition::new(motion_duration),
+            window,
+            cx,
+        );
+        let render_radius = ((f32::from(window.viewport_size().height) * 0.65 / LYRIC_ROW_HEIGHT)
+            .ceil() as usize)
+            + 2;
+        let render_start = anchor.saturating_sub(render_radius);
+        let render_end = (anchor + render_radius + 1).min(lyrics.lines.len());
+        let rows = lyrics
+            .lines
+            .iter()
+            .enumerate()
+            .skip(render_start)
+            .take(render_end - render_start)
+            .map(|(index, line)| {
+                let current = active == Some(index);
+                let distance = index.abs_diff(anchor);
+                let target_opacity = match distance {
+                    0 => 1.,
+                    1 => 0.72,
+                    2 => 0.48,
+                    3 => 0.3,
+                    _ => 0.16,
+                };
+                let line_id = format!("lyrics-{mid}-{index}");
+                let opacity = transition(
+                    (line_id.clone(), "opacity"),
+                    target_opacity,
+                    Transition::new(motion_duration.min(Duration::from_millis(240))),
+                    window,
+                    cx,
+                );
+                let text_size = transition(
+                    (line_id, "text-size"),
+                    if current {
+                        if narrow { px(24.) } else { px(28.) }
+                    } else if narrow {
+                        px(17.)
+                    } else {
+                        px(19.)
+                    },
+                    Transition::new(motion_duration.min(Duration::from_millis(240))),
+                    window,
+                    cx,
+                );
+                let has_word_timing = !line.words.is_empty();
+                let base_text_color = if current && has_word_timing {
+                    foreground.opacity(opacity * 0.42)
+                } else {
+                    foreground.opacity(opacity)
+                };
+                let text = if current && has_word_timing {
+                    let mut cursor = 0;
+                    let mut fragments = Vec::with_capacity(line.words.len() * 2 + 1);
+                    for word in &line.words {
+                        if cursor < word.range.start {
+                            fragments.push(
+                                div()
+                                    .flex_shrink_0()
+                                    .whitespace_nowrap()
+                                    .child(line.text[cursor..word.range.start].to_owned())
+                                    .into_any_element(),
+                            );
+                        }
+
+                        let text = SharedString::from(line.text[word.range.clone()].to_owned());
+                        let progress = word.highlight_progress(self.position);
+                        let fragment = div().flex_shrink_0().whitespace_nowrap();
+                        fragments.push(if progress <= 0. {
+                            fragment.child(text).into_any_element()
+                        } else if progress >= 1. {
+                            fragment
+                                .text_color(foreground.opacity(opacity))
+                                .child(text)
+                                .into_any_element()
+                        } else {
+                            fragment
+                                .relative()
+                                .child(text.clone())
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .left_0()
+                                        .w(relative(progress))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_color(foreground.opacity(opacity))
+                                        .child(text),
+                                )
+                                .into_any_element()
+                        });
+                        cursor = word.range.end;
+                    }
+                    if cursor < line.text.len() {
+                        fragments.push(
+                            div()
+                                .flex_shrink_0()
+                                .whitespace_nowrap()
+                                .child(line.text[cursor..].to_owned())
+                                .into_any_element(),
+                        );
+                    }
+
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_baseline()
+                        .max_h(text_size * 2.6)
+                        .overflow_hidden()
+                        .children(fragments)
+                        .into_any_element()
+                } else {
+                    div()
+                        .line_clamp(2)
+                        .child(line.text.clone())
+                        .into_any_element()
+                };
+                v_flex()
+                    .h(px(LYRIC_ROW_HEIGHT))
+                    .flex_shrink_0()
+                    .justify_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(text_size)
+                            .line_height(text_size * 1.3)
+                            .text_color(base_text_color)
+                            .when(current, |line| line.font_semibold())
+                            .child(text),
+                    )
+                    .when_some(line.translation.clone(), |line, translation| {
+                        line.child(
+                            div()
+                                .line_clamp(1)
+                                .text_size(if narrow { px(13.) } else { px(14.) })
+                                .line_height(if narrow { px(18.) } else { px(20.) })
+                                .text_color(foreground.opacity(opacity * 0.72))
+                                .child(translation),
+                        )
+                    })
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        v_flex()
+            .absolute()
+            .top(relative(0.44))
+            .left_0()
+            .right_0()
+            .mt(-(scroll_offset + px(38.)))
+            .when(render_start > 0, |lyrics| {
+                lyrics.child(
+                    div()
+                        .h(px(render_start as f32 * LYRIC_ROW_HEIGHT))
+                        .flex_shrink_0(),
+                )
+            })
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn render_cover_backdrop(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
+        let track_mid = self
+            .current_track_data()
+            .map(|track| track.mid.clone())
+            .unwrap_or_default();
+        let viewport_width = f32::from(window.viewport_size().width);
+        let compact = viewport_width < 1120.;
+        let narrow = viewport_width < 900.;
+        let cover_size = px((viewport_width * if compact { 0.3 } else { 0.28 })
+            .min(f32::from(available_height) * 0.58)
+            .clamp(280., 520.));
+        let expansion_progress = transition(
+            ("cover-backdrop", "expansion-progress"),
+            if self.cover_backdrop_expanded { 1. } else { 0. },
+            Transition::new(Duration::from_millis(320)),
+            window,
+            cx,
+        );
+        if self.cover_backdrop_expanded && expansion_progress >= 1. {
+            self.cover_backdrop_fully_expanded = true;
+        }
+        let height = available_height * expansion_progress;
+        let theme = cx.theme().clone();
+
+        match self
+            .current_track_data()
+            .and_then(|track| track.cover_url.clone())
+        {
+            Some(url) => {
+                if self.backdrop_current_url.as_deref() != Some(url.as_str()) {
+                    self.backdrop_previous_url = self.backdrop_current_url.replace(url.clone());
+                    self.backdrop_crossfade_phase = !self.backdrop_crossfade_phase;
+                }
+                let current_backdrop_url = self
+                    .backdrop_current_url
+                    .clone()
+                    .unwrap_or_else(|| url.clone());
+                let previous_backdrop_url = self.backdrop_previous_url.clone();
+                let track_transition_duration = if self.cover_backdrop_expanded {
+                    Duration::from_millis(420)
+                } else {
+                    Duration::ZERO
+                };
+                let crossfade = transition(
+                    ("cover-backdrop", "track-crossfade"),
+                    if self.backdrop_crossfade_phase {
+                        1.
+                    } else {
+                        0.
+                    },
+                    Transition::new(track_transition_duration),
+                    window,
+                    cx,
+                );
+                let current_backdrop_opacity = if self.backdrop_crossfade_phase {
+                    crossfade
+                } else {
+                    1. - crossfade
+                };
+                let previous_backdrop_opacity = 1. - current_backdrop_opacity;
+                let cover_url = url.clone();
+                let mut lyric_foreground_target = blurred_cover(&current_backdrop_url, window, cx)
+                    .and_then(Result::ok)
+                    .map(|cover| {
+                        readable_lyric_color(cover.sampled_rgb(), theme.background.opacity(0.28))
+                    });
+                if lyric_foreground_target.is_none()
+                    && let Some(previous_url) = previous_backdrop_url.as_deref()
+                {
+                    lyric_foreground_target = blurred_cover(previous_url, window, cx)
+                        .and_then(Result::ok)
+                        .map(|cover| {
+                            readable_lyric_color(
+                                cover.sampled_rgb(),
+                                theme.background.opacity(0.28),
+                            )
+                        });
+                }
+                let lyric_foreground = transition(
+                    ("cover-backdrop", "lyric-foreground"),
+                    lyric_foreground_target.unwrap_or(theme.foreground),
+                    Transition::new(track_transition_duration),
+                    window,
+                    cx,
+                );
+                let lyrics =
+                    self.render_lyrics_panel(&track_mid, lyric_foreground, narrow, window, cx);
+                let backdrop_images = div()
+                    .absolute()
+                    .inset_0()
+                    .overflow_hidden()
+                    .when_some(previous_backdrop_url, |images, previous_url| {
+                        images.child(
+                            div()
+                                .absolute()
+                                .top(-px(3.))
+                                .right(-px(3.))
+                                .bottom(-px(3.))
+                                .left(-px(3.))
+                                .opacity(previous_backdrop_opacity)
+                                .child(
+                                    img(blurred_image_source(previous_url))
+                                        .size_full()
+                                        .object_fit(ObjectFit::Cover),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(-px(3.))
+                            .right(-px(3.))
+                            .bottom(-px(3.))
+                            .left(-px(3.))
+                            .opacity(current_backdrop_opacity)
+                            .child(
+                                img(blurred_image_source(current_backdrop_url))
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover),
+                            ),
+                    );
+                let content = h_flex()
+                    .absolute()
+                    .inset_0()
+                    .items_center()
+                    .justify_center()
+                    .px(if narrow {
+                        px(48.)
+                    } else if compact {
+                        px(64.)
+                    } else {
+                        px(96.)
+                    })
+                    .pt(px(84.))
+                    .pb(px(56.))
+                    .child(
+                        h_flex()
+                            .size_full()
+                            .max_w(px(1500.))
+                            .items_center()
+                            .justify_center()
+                            .gap(if compact { px(64.) } else { px(96.) })
+                            .when(!narrow, |layout| {
+                                layout.child(
+                                    div()
+                                        .size(cover_size)
+                                        .flex_shrink_0()
+                                        .rounded(px(20.))
+                                        .overflow_hidden()
+                                        .shadow_2xl()
+                                        .child(
+                                            img(cached_image_source(cover_url))
+                                                .size_full()
+                                                .rounded(px(20.))
+                                                .object_fit(ObjectFit::Cover),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .relative()
+                                    .h_full()
+                                    .min_w_0()
+                                    .max_w(px(680.))
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .child(lyrics),
+                            ),
+                    );
+
+                div()
+                    .id("cover-backdrop")
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(PLAYER_BAR_HEIGHT))
+                    .h(height)
+                    .overflow_hidden()
+                    .occlude()
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(available_height)
+                            .bg(theme.background)
+                            .child(backdrop_images)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .bg(theme.background.opacity(0.28)),
+                            )
+                            .child(content)
+                            .child(
+                                div()
+                                    .id("collapse-cover-backdrop")
+                                    .absolute()
+                                    .top(px(24.))
+                                    .left(px(24.))
+                                    .size(px(54.))
+                                    .rounded_full()
+                                    .bg(theme.background.opacity(0.58))
+                                    .shadow_md()
+                                    .cursor_pointer()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(|style| style.bg(theme.background.opacity(0.78)))
+                                    .child(media_icon_hsla(
+                                        MediaIcon::ChevronDown,
+                                        theme.foreground,
+                                        px(29.),
+                                    ))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cover_backdrop_expanded = false;
+                                        this.cover_backdrop_fully_expanded = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            None => div().into_any_element(),
+        }
+    }
+
     fn render_player_bar(
         &mut self,
         compact: bool,
@@ -5387,10 +6213,47 @@ impl LyruneView {
         let icon_accent = self.settings.color_theme.icon_accent();
         let cover_size = if narrow { px(44.) } else { px(52.) };
         let cover = match track.as_ref().and_then(|track| track.cover_url.clone()) {
-            Some(url) => img(cached_image_source(url))
+            Some(url) => div()
+                .id("player-cover")
+                .relative()
                 .size(cover_size)
                 .flex_shrink_0()
                 .rounded(px(10.))
+                .overflow_hidden()
+                .child(
+                    img(cached_image_source(url))
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
+                .child(
+                    div()
+                        .id("toggle-cover-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .opacity(0.)
+                        .hover(|style| style.opacity(1.))
+                        .bg(black().opacity(0.38))
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(media_icon(
+                            if self.cover_backdrop_expanded {
+                                MediaIcon::ChevronDown
+                            } else {
+                                MediaIcon::ChevronUp
+                            },
+                            "#ffffff",
+                            px(24.),
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cover_backdrop_expanded = !this.cover_backdrop_expanded;
+                            if !this.cover_backdrop_expanded {
+                                this.cover_backdrop_fully_expanded = false;
+                            }
+                            cx.notify();
+                        })),
+                )
                 .into_any_element(),
             None => div()
                 .size(cover_size)
@@ -5606,6 +6469,8 @@ impl LyruneView {
                                             ))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.shuffle = !this.shuffle;
+                                                #[cfg(target_os = "linux")]
+                                                this.sync_mpris(false);
                                                 cx.notify();
                                             })),
                                     )
@@ -5718,6 +6583,8 @@ impl LyruneView {
                                             ))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.repeat_mode = this.repeat_mode.next();
+                                                #[cfg(target_os = "linux")]
+                                                this.sync_mpris(false);
                                                 cx.notify();
                                             })),
                                     )
@@ -5776,7 +6643,7 @@ impl LyruneView {
 
         div()
             .relative()
-            .h(px(112.))
+            .h(px(PLAYER_BAR_HEIGHT))
             .w_full()
             .flex_shrink_0()
             .bg(theme.group_box)
@@ -5790,6 +6657,29 @@ impl LyruneView {
         let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);
         let popover_open = self.account_menu_open || self.quality_menu_open;
+        if self.cover_backdrop_fully_expanded {
+            return v_flex()
+                .relative()
+                .size_full()
+                .bg(theme.background)
+                .text_color(theme.foreground)
+                .child(div().flex_1().min_h_0())
+                .child(self.render_cover_backdrop(window, cx))
+                .child(self.render_player_bar(compact, narrow, window, cx))
+                .when(popover_open, |this| {
+                    this.child(
+                        deferred(
+                            div()
+                                .id("popover-dismiss-layer")
+                                .absolute()
+                                .inset_0()
+                                .on_click(cx.listener(|this, _, _, cx| this.dismiss_popovers(cx))),
+                        )
+                        .with_priority(5),
+                    )
+                })
+                .into_any_element();
+        }
         self.track_table.update(cx, |table, cx| {
             if table.delegate_mut().set_compact(compact) {
                 table.refresh(cx);
@@ -5961,6 +6851,7 @@ impl LyruneView {
                         ),
                 ),
             )
+            .child(self.render_cover_backdrop(window, cx))
             .child(self.render_player_bar(compact, narrow, window, cx))
             .when(popover_open, |this| {
                 this.child(
@@ -6006,9 +6897,10 @@ mod tests {
     use super::{
         NavigationHistory, NavigationPage, PlaybackQueue, PlaylistScrollPosition, SearchCategory,
         canonical_queue_track_index, format_playback_time, insert_external_track_after_current,
-        insert_track_after_current, playlist_title_is_long, resolved_playlist_scroll_row,
+        insert_track_after_current, parse_lyrics, playlist_title_is_long, readable_lyric_color,
+        resolved_playlist_scroll_row,
     };
-    use gpui::{Pixels, px};
+    use gpui::{Pixels, black, px, white};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
     use std::time::Duration;
 
@@ -6037,6 +6929,100 @@ mod tests {
 
     fn mids(tracks: &[Track]) -> Vec<&str> {
         tracks.iter().map(|track| track.mid.as_str()).collect()
+    }
+
+    #[test]
+    fn lyric_foreground_uses_the_higher_contrast_neutral() {
+        assert_eq!(
+            readable_lyric_color([0.05, 0.05, 0.05], black().opacity(0.28)),
+            white()
+        );
+        assert_eq!(
+            readable_lyric_color([0.95, 0.95, 0.95], white().opacity(0.28)),
+            black()
+        );
+    }
+
+    #[test]
+    fn parses_and_aligns_timestamped_lyrics() {
+        let lyrics = parse_lyrics(
+            "[ti:title]\n[00:01.20]first\n[00:10.000][00:20.000]repeat",
+            Some("[00:01.200]第一句\n[00:10.000]重复"),
+        );
+
+        assert_eq!(lyrics.lines.len(), 3);
+        assert_eq!(lyrics.lines[0].start, Duration::from_millis(1_200));
+        assert_eq!(lyrics.lines[0].text, "first");
+        assert_eq!(lyrics.lines[0].translation.as_deref(), Some("第一句"));
+        assert_eq!(lyrics.lines[2].start, Duration::from_secs(20));
+        assert_eq!(lyrics.active_index(Duration::from_secs(5)), Some(0));
+        assert_eq!(lyrics.active_index(Duration::from_secs(10)), Some(1));
+    }
+
+    #[test]
+    fn prefers_qrc_word_timing_and_preserves_lyric_parentheses() {
+        let lyrics = parse_lyrics(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<QrcInfos><LyricInfo LyricCount="1"><Lyric_1 LyricType="1" LyricContent="[1000,700]青(1000,300)い(1300,150)空（そら）(1450,250)&#10;[2000,500]次(2000,500)"/></LyricInfo></QrcInfos>"#,
+            Some("[00:01.000]蓝色天空\n[00:02.000]下一句"),
+        );
+
+        assert_eq!(lyrics.lines.len(), 2);
+        assert_eq!(lyrics.lines[0].start, Duration::from_secs(1));
+        assert_eq!(lyrics.lines[0].text, "青い空（そら）");
+        assert_eq!(lyrics.lines[0].words.len(), 3);
+        assert_eq!(
+            lyrics.lines[0].words[0].highlight_progress(Duration::from_millis(999)),
+            0.
+        );
+        assert!(
+            (lyrics.lines[0].words[0].highlight_progress(Duration::from_millis(1_100)) - 1. / 3.)
+                .abs()
+                < f32::EPSILON
+        );
+        assert_eq!(
+            lyrics.lines[0].words[2].highlight_progress(Duration::from_millis(1_700)),
+            1.
+        );
+        assert_eq!(lyrics.lines[0].translation.as_deref(), Some("蓝色天空"));
+        assert_eq!(lyrics.active_index(Duration::from_millis(1_999)), Some(0));
+        assert_eq!(lyrics.active_index(Duration::from_secs(2)), Some(1));
+    }
+
+    #[test]
+    fn aligns_qrc_translation_with_rounded_timestamps() {
+        let lyrics = parse_lyrics(
+            r#"<QrcInfos><LyricInfo><Lyric_1 LyricContent="[16013,500]原(16013,500)&#10;[22564,500]文(22564,500)"/></LyricInfo></QrcInfos>"#,
+            Some("[00:16.010]第一行\n[00:22.560]第二行"),
+        );
+
+        assert_eq!(lyrics.lines.len(), 2);
+        assert_eq!(lyrics.lines[0].translation.as_deref(), Some("第一行"));
+        assert_eq!(lyrics.lines[1].translation.as_deref(), Some("第二行"));
+    }
+
+    #[test]
+    fn preserves_literal_line_breaks_in_qrc_attributes() {
+        let lyrics = parse_lyrics(
+            "<QrcInfos><LyricInfo><Lyric_1 LyricContent=\"[ti:title]\r\n[0,500]中(0,250)文(250,250)\r\n[500,500]歌词(500,500)\"/></LyricInfo></QrcInfos>",
+            None,
+        );
+
+        assert_eq!(lyrics.lines.len(), 2);
+        assert_eq!(lyrics.lines[0].text, "中文");
+        assert_eq!(lyrics.lines[1].text, "歌词");
+    }
+
+    #[test]
+    fn omits_provider_translation_placeholders() {
+        let lyrics = parse_lyrics(
+            "[00:01.000]词：作者\n[00:02.000]//",
+            Some("[00:01.000]//\n[00:02.000]实际翻译"),
+        );
+
+        assert_eq!(lyrics.lines[0].translation, None);
+        assert_eq!(lyrics.lines[1].text, "//");
+        assert_eq!(lyrics.lines[1].translation.as_deref(), Some("实际翻译"));
     }
 
     fn playlist(diss_id: u64) -> NavigationPage {

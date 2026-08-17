@@ -1,4 +1,5 @@
 mod protocol;
+mod qrc_des;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

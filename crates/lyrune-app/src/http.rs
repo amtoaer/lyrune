@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,7 +7,11 @@ use anyhow::{Context as _, bail};
 use directories::ProjectDirs;
 use futures_util::{AsyncReadExt as _, future::BoxFuture};
 use gpui::http_client::{self, AsyncBody, HttpClient, Request, Response, Url};
-use gpui::{App, Asset, ImageCacheError, ImageSource, ImgResourceLoader, Resource, Window};
+use gpui::{
+    App, Asset, Image, ImageCacheError, ImageFormat, ImageSource, ImgResourceLoader, Resource,
+    Window,
+};
+use image::imageops::FilterType;
 
 use crate::app::RUNTIME;
 use crate::cache::cache_key;
@@ -15,6 +20,20 @@ const IMAGE_CACHE_DIR: &str = "images-v1";
 
 #[derive(Clone)]
 enum CachedImageFile {}
+
+#[derive(Clone)]
+enum BlurredCoverImage {}
+
+pub struct BlurredCover {
+    image: Arc<Image>,
+    sampled_rgb: [f32; 3],
+}
+
+impl BlurredCover {
+    pub fn sampled_rgb(&self) -> [f32; 3] {
+        self.sampled_rgb
+    }
+}
 
 impl Asset for CachedImageFile {
     type Source = String;
@@ -36,6 +55,24 @@ impl Asset for CachedImageFile {
     }
 }
 
+impl Asset for BlurredCoverImage {
+    type Source = String;
+    type Output = Result<Arc<BlurredCover>, ImageCacheError>;
+
+    fn load(
+        path: Self::Source,
+        _cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        async move {
+            RUNTIME
+                .spawn_blocking(move || generate_blurred_cover(Path::new(&path)))
+                .await
+                .context("等待模糊封面生成任务失败")?
+                .map_err(ImageCacheError::from)
+        }
+    }
+}
+
 pub fn cached_image_source(url: String) -> ImageSource {
     let source = url;
     (move |window: &mut Window, cx: &mut App| {
@@ -46,6 +83,78 @@ pub fn cached_image_source(url: String) -> ImageSource {
         window.use_asset::<ImgResourceLoader>(&Resource::Path(path), cx)
     })
     .into()
+}
+
+pub fn blurred_image_source(url: String) -> ImageSource {
+    let source = url;
+    (move |window: &mut Window, cx: &mut App| {
+        let cover = match blurred_cover(&source, window, cx)? {
+            Ok(cover) => cover,
+            Err(error) => return Some(Err(error)),
+        };
+        cover.image.clone().use_render_image(window, cx).map(Ok)
+    })
+    .into()
+}
+
+pub fn blurred_cover(
+    url: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Result<Arc<BlurredCover>, ImageCacheError>> {
+    let path = match window.use_asset::<CachedImageFile>(&url.to_owned(), cx)? {
+        Ok(path) => path,
+        Err(error) => return Some(Err(error)),
+    };
+    window.use_asset::<BlurredCoverImage>(&path.to_string_lossy().into_owned(), cx)
+}
+
+fn generate_blurred_cover(path: &Path) -> anyhow::Result<Arc<BlurredCover>> {
+    let image = image::ImageReader::open(path)
+        .context("无法打开待模糊的封面")?
+        .with_guessed_format()
+        .context("无法识别封面格式")?
+        .decode()
+        .context("无法解码待模糊的封面")?;
+    let blurred = image
+        .resize_to_fill(128, 128, FilterType::Triangle)
+        .blur(10.);
+    let sampled_rgb = sample_lyrics_region(&blurred);
+    let mut bytes = Cursor::new(Vec::new());
+    blurred
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .context("无法编码模糊封面")?;
+    Ok(Arc::new(BlurredCover {
+        image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes.into_inner())),
+        sampled_rgb,
+    }))
+}
+
+fn sample_lyrics_region(image: &image::DynamicImage) -> [f32; 3] {
+    let image = image.to_rgb8();
+    let (width, height) = image.dimensions();
+    let mut totals = [0_u64; 3];
+    let mut count = 0_u64;
+    for pixel in image
+        .rows()
+        .skip((height / 4) as usize)
+        .take((height / 2) as usize)
+    {
+        for color in pixel.skip((width / 2) as usize) {
+            totals[0] += u64::from(color[0]);
+            totals[1] += u64::from(color[1]);
+            totals[2] += u64::from(color[2]);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return [0.; 3];
+    }
+    [
+        totals[0] as f32 / count as f32 / 255.,
+        totals[1] as f32 / count as f32 / 255.,
+        totals[2] as f32 / count as f32 / 255.,
+    ]
 }
 
 async fn cache_image_file(client: Arc<dyn HttpClient>, url: String) -> anyhow::Result<PathBuf> {
@@ -182,6 +291,33 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(image_cache_key("https://example.com/cover.jpg").len(), 32);
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn creates_small_blurred_cover_in_memory() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lyrune-blurred-cover-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("cover.png");
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([120, 80, 200, 255]))
+            .save(&source)
+            .unwrap();
+
+        let blurred = generate_blurred_cover(&source).unwrap();
+        let decoded = image::load_from_memory(&blurred.image.bytes).unwrap();
+
+        assert_eq!(blurred.image.format, ImageFormat::Png);
+        assert_eq!((decoded.width(), decoded.height()), (128, 128));
+        assert!((blurred.sampled_rgb[0] - 120. / 255.).abs() < 0.01);
+        assert!((blurred.sampled_rgb[1] - 80. / 255.).abs() < 0.01);
+        assert!((blurred.sampled_rgb[2] - 200. / 255.).abs() < 0.01);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

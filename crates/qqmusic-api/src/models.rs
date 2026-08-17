@@ -232,6 +232,9 @@ pub struct LyricResult {
     pub lyric: String,
     /// 翻译歌词（若平台提供；缺失时为 [`None`]）。
     pub trans_lyric: Option<String>,
+    /// 罗马音歌词（若平台提供；缺失时为 [`None`]）。
+    #[serde(default)]
+    pub roma_lyric: Option<String>,
 }
 
 /// 播放链接结果。

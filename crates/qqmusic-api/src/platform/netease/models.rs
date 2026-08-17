@@ -396,6 +396,7 @@ impl NLyricResponse {
             } else {
                 Some(trans_lyric)
             },
+            roma_lyric: None,
         }
     }
 }

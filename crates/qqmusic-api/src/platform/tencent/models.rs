@@ -554,6 +554,7 @@ impl TLyricResponse {
             id: id.to_string(),
             lyric,
             trans_lyric,
+            roma_lyric: None,
         }
     }
 }

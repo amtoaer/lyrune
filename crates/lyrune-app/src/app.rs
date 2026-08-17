@@ -7975,7 +7975,13 @@ impl LyruneView {
                                 .id("popover-dismiss-layer")
                                 .absolute()
                                 .inset_0()
-                                .on_click(cx.listener(|this, _, _, cx| this.dismiss_popovers(cx))),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.dismiss_popovers(cx);
+                                    }),
+                                ),
                         )
                         .with_priority(5),
                     )
@@ -8170,7 +8176,13 @@ impl LyruneView {
                             .id("popover-dismiss-layer")
                             .absolute()
                             .inset_0()
-                            .on_click(cx.listener(|this, _, _, cx| this.dismiss_popovers(cx))),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.dismiss_popovers(cx);
+                                }),
+                            ),
                     )
                     .with_priority(5),
                 )

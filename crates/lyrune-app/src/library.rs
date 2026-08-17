@@ -37,7 +37,7 @@ impl PlaylistListDelegate {
 
     pub fn set_playlists(&mut self, playlists: Vec<UserPlaylist>) {
         self.playlists = playlists;
-        self.selected_index = (!self.playlists.is_empty()).then(IndexPath::default);
+        self.selected_index = None;
     }
 
     pub fn update_playlist(&mut self, index: usize, playlist: UserPlaylist) {

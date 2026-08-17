@@ -696,7 +696,7 @@ impl LyruneView {
             playlist_force_refresh: false,
             playlist_cache_revision: 0,
             playlist_page_requests: SingleFlight::default(),
-            main_content: MainContent::Playlist,
+            main_content: MainContent::Home,
             navigation_history: NavigationHistory::default(),
             home_playlists: Vec::new(),
             home_loading: false,
@@ -887,8 +887,10 @@ impl LyruneView {
                 Ok(Some(credential)) => {
                     this.account_state = AccountState::SignedIn;
                     this.credential = Some(credential.clone());
+                    this.main_content = MainContent::Home;
                     this.status = StatusMessage::info("已恢复 QQ 音乐登录，正在加载音乐库…");
                     this.persist_credential(credential.clone(), cx);
+                    this.load_home(cx);
                     this.load_library(false, cx);
                 }
                 Ok(None) => {
@@ -957,8 +959,10 @@ impl LyruneView {
                 self.account_state = AccountState::SignedIn;
                 self.qr_image = None;
                 self.credential = Some(credential.clone());
+                self.main_content = MainContent::Home;
                 self.status = StatusMessage::info("登录成功，正在加载音乐库…");
                 self.persist_credential(credential.clone(), cx);
+                self.load_home(cx);
                 self.load_library(false, cx);
             }
             LoginEvent::Expired => {
@@ -1667,9 +1671,9 @@ impl LyruneView {
             list.delegate_mut().set_playlists(playlists);
             cx.notify();
         });
-        if count > 0 {
+        if count > 0 && self.main_content == MainContent::Playlist {
             self.select_playlist_with_refresh(viewed_index.unwrap_or(0), force_refresh, false, cx);
-        } else {
+        } else if count == 0 {
             self.status = StatusMessage::info("QQ 音乐账号中没有可显示的歌单");
             cx.notify();
         }
@@ -3195,7 +3199,7 @@ impl LyruneView {
         self.profile = None;
         self.qr_image = None;
         self.library_loading = false;
-        self.main_content = MainContent::Playlist;
+        self.main_content = MainContent::Home;
         self.navigation_history.clear();
         self.home_playlists.clear();
         self.home_loading = false;
@@ -4190,7 +4194,6 @@ impl LyruneView {
                 .p_4()
                 .rounded(px(12.))
                 .bg(theme.muted.opacity(0.7))
-                .tooltip("播放专属雷达")
                 .when(recommendation_loading, |button| {
                     button
                         .bg(theme.muted.opacity(0.7))
@@ -4237,7 +4240,6 @@ impl LyruneView {
                 .p_4()
                 .rounded(px(12.))
                 .bg(theme.muted.opacity(0.7))
-                .tooltip("播放猜你喜欢")
                 .when(recommendation_loading, |button| {
                     button
                         .bg(theme.muted.opacity(0.7))

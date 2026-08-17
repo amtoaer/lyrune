@@ -2,15 +2,53 @@ use std::sync::{Arc, LazyLock};
 
 use gpui::{AnyElement, Hsla, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, img};
 
-static LYRUNE_ICON: LazyLock<Arc<Image>> = LazyLock::new(|| {
-    Arc::new(Image::from_bytes(
-        ImageFormat::Svg,
-        crate::tray::ICON_SVG.to_vec(),
-    ))
+use crate::design::ColorTheme;
+
+static LYRUNE_ICONS: LazyLock<[Arc<Image>; ColorTheme::ALL.len()]> = LazyLock::new(|| {
+    ColorTheme::ALL.map(|theme| {
+        Arc::new(Image::from_bytes(
+            ImageFormat::Svg,
+            themed_lyrune_svg(theme),
+        ))
+    })
 });
 
-pub fn lyrune_icon(size: Pixels) -> AnyElement {
-    img(LYRUNE_ICON.clone()).size(size).into_any_element()
+fn themed_lyrune_svg(theme: ColorTheme) -> Vec<u8> {
+    let colors = theme.logo_palette();
+    format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Lyrune</title>
+  <desc id="desc">A musical note moving forward on three smooth sound trails.</desc>
+  <rect x="32" y="32" width="448" height="448" rx="112" fill="{background}"/>
+  <g fill="none" stroke-linecap="round" stroke-width="25">
+    <path d="M82 185h108c48 0 58-48 106-48h30" stroke="{trail_primary}"/>
+    <path d="M82 248h102c50 0 62-48 112-48h30" stroke="{trail_secondary}"/>
+    <path d="M82 311h116c45 0 56-48 101-48h27" stroke="{trail_tertiary}"/>
+  </g>
+  <path d="M307 139 421 108v70l-114 31Z" fill="{foreground}"/>
+  <path d="M307 165v188" fill="none" stroke="{foreground}" stroke-width="34" stroke-linecap="round"/>
+  <ellipse cx="264" cy="361" rx="61" ry="42" transform="rotate(-15 264 361)" fill="{foreground}"/>
+  <path d="m249 337 38 22-38 22Z" fill="{background}"/>
+  <path d="M383 219h47" fill="none" stroke="{detail}" stroke-width="25" stroke-linecap="round"/>
+</svg>"#,
+        background = colors.background,
+        foreground = colors.foreground,
+        trail_primary = colors.trail_primary,
+        trail_secondary = colors.trail_secondary,
+        trail_tertiary = colors.trail_tertiary,
+        detail = colors.detail,
+    )
+    .into_bytes()
+}
+
+pub fn lyrune_icon(theme: ColorTheme, size: Pixels) -> AnyElement {
+    let index = ColorTheme::ALL
+        .iter()
+        .position(|candidate| *candidate == theme)
+        .expect("color theme is part of the built-in theme list");
+    img(LYRUNE_ICONS[index].clone())
+        .size(size)
+        .into_any_element()
 }
 
 #[derive(Clone, Copy)]
@@ -124,4 +162,20 @@ fn render_media_icon(icon: MediaIcon, color: &str, size: Pixels) -> AnyElement {
     )))
     .size(size)
     .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_theme_generates_a_valid_logo() {
+        for theme in ColorTheme::ALL {
+            resvg::usvg::Tree::from_data(
+                &themed_lyrune_svg(theme),
+                &resvg::usvg::Options::default(),
+            )
+            .expect("parse themed Lyrune logo");
+        }
+    }
 }

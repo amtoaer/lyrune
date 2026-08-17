@@ -488,7 +488,7 @@ mod tests {
         let settings: AppSettings = serde_json::from_str("{}").expect("deserialize defaults");
         assert_eq!(settings.volume, 1.);
         assert_eq!(settings.last_nonzero_volume, 1.);
-        assert_eq!(settings.color_theme, ColorTheme::LyruneNeutral);
+        assert_eq!(settings.color_theme, ColorTheme::CatppuccinLatte);
         assert_eq!(settings.playback_quality, Quality::Standard);
         assert_eq!(settings.last_library_view, None);
         assert_eq!(settings.current_playback, None);

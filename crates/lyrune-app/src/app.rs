@@ -3514,7 +3514,7 @@ impl LyruneView {
                     .border_color(theme.border)
                     .bg(theme.group_box)
                     .shadow_lg()
-                    .child(lyrune_icon(px(46.)))
+                    .child(lyrune_icon(self.settings.color_theme, px(46.)))
                     .child(div().text_2xl().font_bold().child("登录 Lyrune"))
                     .child(
                         div()
@@ -3645,7 +3645,7 @@ impl LyruneView {
                     .mb_2()
                     .px_5()
                     .gap_3()
-                    .child(lyrune_icon(px(42.)))
+                    .child(lyrune_icon(self.settings.color_theme, px(42.)))
                     .child(
                         v_flex()
                             .gap_0p5()

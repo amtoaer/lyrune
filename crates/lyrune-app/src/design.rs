@@ -59,91 +59,169 @@ pub(crate) fn system_monospace_font_family() -> &'static str {
 #[serde(rename_all = "kebab-case")]
 pub enum ColorTheme {
     #[default]
-    LyruneNeutral,
+    #[serde(alias = "lyrune-neutral")]
+    CatppuccinLatte,
     CatppuccinMocha,
+    AyuLight,
     AyuDark,
+    EverforestLight,
     EverforestDark,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct LogoPalette {
+    pub(crate) background: &'static str,
+    pub(crate) foreground: &'static str,
+    pub(crate) trail_primary: &'static str,
+    pub(crate) trail_secondary: &'static str,
+    pub(crate) trail_tertiary: &'static str,
+    pub(crate) detail: &'static str,
+}
+
 impl ColorTheme {
-    pub const ALL: [Self; 4] = [
-        Self::LyruneNeutral,
+    pub const ALL: [Self; 6] = [
+        Self::CatppuccinLatte,
         Self::CatppuccinMocha,
+        Self::AyuLight,
         Self::AyuDark,
+        Self::EverforestLight,
         Self::EverforestDark,
     ];
 
     pub const fn id(self) -> &'static str {
         match self {
-            Self::LyruneNeutral => "lyrune-neutral",
+            Self::CatppuccinLatte => "catppuccin-latte",
             Self::CatppuccinMocha => "catppuccin-mocha",
+            Self::AyuLight => "ayu-light",
             Self::AyuDark => "ayu-dark",
+            Self::EverforestLight => "everforest-light",
             Self::EverforestDark => "everforest-dark",
         }
     }
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::LyruneNeutral => "Lyrune Neutral",
+            Self::CatppuccinLatte => "Catppuccin Latte",
             Self::CatppuccinMocha => "Catppuccin Mocha",
+            Self::AyuLight => "Ayu Light",
             Self::AyuDark => "Ayu Dark",
+            Self::EverforestLight => "Everforest Light",
             Self::EverforestDark => "Everforest Dark",
         }
     }
 
     pub const fn icon_foreground(self) -> &'static str {
         match self {
-            Self::LyruneNeutral => "#18181b",
+            Self::CatppuccinLatte => "#4c4f69",
             Self::CatppuccinMocha => "#cdd6f4",
+            Self::AyuLight => "#5c6166",
             Self::AyuDark => "#b3b1ad",
+            Self::EverforestLight => "#5c6a72",
             Self::EverforestDark => "#d3c6aa",
         }
     }
 
     pub const fn icon_accent(self) -> &'static str {
         match self {
-            Self::LyruneNeutral => "#18181b",
+            Self::CatppuccinLatte => "#1e66f5",
             Self::CatppuccinMocha => "#89b4fa",
+            Self::AyuLight => "#22a4e6",
             Self::AyuDark => "#5ac1fe",
+            Self::EverforestLight => "#f57d26",
             Self::EverforestDark => "#e69875",
         }
     }
 
     pub const fn icon_on_accent(self) -> &'static str {
         match self {
-            Self::LyruneNeutral => "#fafafa",
+            Self::CatppuccinLatte => "#eff1f5",
             Self::CatppuccinMocha => "#1e1e2e",
+            Self::AyuLight => "#ffffff",
             Self::AyuDark => "#1f2430",
+            Self::EverforestLight => "#fdf6e3",
             Self::EverforestDark => "#262e34",
+        }
+    }
+
+    pub(crate) const fn logo_palette(self) -> LogoPalette {
+        match self {
+            Self::CatppuccinLatte => LogoPalette {
+                background: "#ccd0da",
+                foreground: "#4c4f69",
+                trail_primary: "#1e66f5",
+                trail_secondary: "#179299",
+                trail_tertiary: "#fe640b",
+                detail: "#d20f39",
+            },
+            Self::CatppuccinMocha => LogoPalette {
+                background: "#313244",
+                foreground: "#cdd6f4",
+                trail_primary: "#89b4fa",
+                trail_secondary: "#94e2d5",
+                trail_tertiary: "#fab387",
+                detail: "#f38ba8",
+            },
+            Self::AyuLight => LogoPalette {
+                background: "#ebeef0",
+                foreground: "#5c6166",
+                trail_primary: "#22a4e6",
+                trail_secondary: "#4cbf99",
+                trail_tertiary: "#e59645",
+                detail: "#f07171",
+            },
+            Self::AyuDark => LogoPalette {
+                background: "#1f2127",
+                foreground: "#b3b1ad",
+                trail_primary: "#5ac1fe",
+                trail_secondary: "#95e6cb",
+                trail_tertiary: "#ffb454",
+                detail: "#f07178",
+            },
+            Self::EverforestLight => LogoPalette {
+                background: "#efebd4",
+                foreground: "#5c6a72",
+                trail_primary: "#3a94c5",
+                trail_secondary: "#35a77c",
+                trail_tertiary: "#f57d26",
+                detail: "#f85552",
+            },
+            Self::EverforestDark => LogoPalette {
+                background: "#343f44",
+                foreground: "#d3c6aa",
+                trail_primary: "#7fbbb3",
+                trail_secondary: "#83c092",
+                trail_tertiary: "#e69875",
+                detail: "#e67e80",
+            },
         }
     }
 
     fn palette(self) -> Palette {
         match self {
-            Self::LyruneNeutral => Palette {
+            Self::CatppuccinLatte => Palette {
                 mode: ThemeMode::Light,
-                background: "#f7f7f8",
-                surface: "#ffffff",
-                surface_alt: "#fafafa",
-                sidebar: "#fafafa",
-                outer: "#f4f4f5",
-                foreground: "#18181b",
-                subtext_foreground: "#52525b",
-                muted: "#f4f4f5",
-                muted_foreground: "#71717a",
-                border: "#e4e4e7",
-                primary: "#18181b",
-                primary_foreground: "#fafafa",
-                primary_hover: "#27272a",
-                primary_active: "#09090b",
-                accent: "#f4f4f5",
-                accent_foreground: "#18181b",
-                active: "#e4e4e7",
-                hover: "#f4f4f5",
-                ring: "#a1a1aa",
-                emotion: "#e11d48",
-                emotion_foreground: "#ffffff",
-                scrollbar_thumb: "#d4d4d8",
+                background: "#eff1f5",
+                surface: "#e6e9ef",
+                surface_alt: "#ccd0da",
+                sidebar: "#e6e9ef",
+                outer: "#dce0e8",
+                foreground: "#4c4f69",
+                subtext_foreground: "#6c6f85",
+                muted: "#ccd0da",
+                muted_foreground: "#9ca0b0",
+                border: "#ccd0da",
+                primary: "#1e66f5",
+                primary_foreground: "#eff1f5",
+                primary_hover: "#209fb5",
+                primary_active: "#1e66f5",
+                accent: "#dfe2e9",
+                accent_foreground: "#4c4f69",
+                active: "#1e66f51f",
+                hover: "#ccd0da99",
+                ring: "#8839ef",
+                emotion: "#ea76cb",
+                emotion_foreground: "#eff1f5",
+                scrollbar_thumb: "#bcc0cc",
             },
             Self::CatppuccinMocha => Palette {
                 mode: ThemeMode::Dark,
@@ -170,6 +248,31 @@ impl ColorTheme {
                 emotion_foreground: "#1e1e2e",
                 scrollbar_thumb: "#45475a",
             },
+            Self::AyuLight => Palette {
+                mode: ThemeMode::Light,
+                background: "#fcfcfc",
+                surface: "#f8f9fa",
+                surface_alt: "#ebeef0",
+                sidebar: "#f8f9fa",
+                outer: "#ebeef0",
+                foreground: "#5c6166",
+                subtext_foreground: "#828e9f",
+                muted: "#ebeef0",
+                muted_foreground: "#939498",
+                border: "#6b7d8f1f",
+                primary: "#22a4e6",
+                primary_foreground: "#ffffff",
+                primary_hover: "#1a91cd",
+                primary_active: "#1a91cd",
+                accent: "#f3f4f5",
+                accent_foreground: "#5c6166",
+                active: "#035bd626",
+                hover: "#6b7d8f1f",
+                ring: "#f29718",
+                emotion: "#e65050",
+                emotion_foreground: "#ffffff",
+                scrollbar_thumb: "#c5c5c8",
+            },
             Self::AyuDark => Palette {
                 mode: ThemeMode::Dark,
                 background: "#0d1016",
@@ -194,6 +297,31 @@ impl ColorTheme {
                 emotion: "#f07178",
                 emotion_foreground: "#0d1016",
                 scrollbar_thumb: "#bfbdb64c",
+            },
+            Self::EverforestLight => Palette {
+                mode: ThemeMode::Light,
+                background: "#fdf6e3",
+                surface: "#f4f0d9",
+                surface_alt: "#efebd4",
+                sidebar: "#f4f0d9",
+                outer: "#efebd4",
+                foreground: "#5c6a72",
+                subtext_foreground: "#829181",
+                muted: "#efebd4",
+                muted_foreground: "#939f91",
+                border: "#e0dcc7",
+                primary: "#f57d26",
+                primary_foreground: "#fdf6e3",
+                primary_hover: "#dfa000",
+                primary_active: "#f57d26",
+                accent: "#e6e2cc",
+                accent_foreground: "#5c6a72",
+                active: "#8da10122",
+                hover: "#efebd499",
+                ring: "#3a94c5",
+                emotion: "#f85552",
+                emotion_foreground: "#fdf6e3",
+                scrollbar_thumb: "#bdc3af",
             },
             Self::EverforestDark => Palette {
                 mode: ThemeMode::Dark,
@@ -368,5 +496,12 @@ mod tests {
             assert_eq!(restored, theme);
             assert_eq!(json, format!("\"{}\"", theme.id()));
         }
+    }
+
+    #[test]
+    fn legacy_neutral_theme_migrates_to_catppuccin_latte() {
+        let restored: ColorTheme =
+            serde_json::from_str("\"lyrune-neutral\"").expect("deserialize legacy theme");
+        assert_eq!(restored, ColorTheme::CatppuccinLatte);
     }
 }

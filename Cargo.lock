@@ -3979,7 +3979,7 @@ dependencies = [
 
 [[package]]
 name = "lyrune"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4307,7 +4307,7 @@ dependencies = [
 
 [[package]]
 name = "netease-qq-music-api"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aes",
  "anyhow",

@@ -7410,7 +7410,6 @@ impl LyruneView {
                                     .relative()
                                     .h_full()
                                     .min_w_0()
-                                    .max_w(px(680.))
                                     .flex_1()
                                     .overflow_hidden()
                                     .child(lyrics),

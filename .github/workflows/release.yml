@@ -1,0 +1,329 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  RUST_VERSION: "1.97.0"
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Match tag and Cargo versions
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tag must use the form vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          if [[ "$version" != "$manifest_version" ]]; then
+            echo "tag version $version does not match Cargo version $manifest_version" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build-linux:
+    name: Linux ${{ matrix.asset_arch }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset_arch: amd64
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Install system build and packaging dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            clang \
+            cmake \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libglib2.0-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            libzstd-dev \
+            libvulkan1 \
+            makepkg \
+            pkg-config \
+            zstd
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target "${{ matrix.target }}"
+          rustup override set "$RUST_VERSION"
+
+      - name: Restore Rust build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: release-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            release-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
+
+      - name: Build Lyrune
+        shell: bash
+        run: cargo build --locked --release --package lyrune --target "${{ matrix.target }}"
+
+      - name: Create Linux archive and Arch Linux package
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/lyrune"
+          strip --strip-unneeded "$binary"
+
+          archive_name="lyrune-v$VERSION-linux-$ASSET_ARCH"
+          archive_root="dist/$archive_name"
+          mkdir -p "$archive_root"
+          install -m755 "$binary" "$archive_root/lyrune"
+          install -m644 README.md "$archive_root/README.md"
+          install -m644 THIRD_PARTY_NOTICES.md "$archive_root/THIRD_PARTY_NOTICES.md"
+          install -m644 packaging/arch/license-unknown.txt "$archive_root/license-unknown.txt"
+          tar -C dist -czf "dist/$archive_name.tar.gz" "$archive_name"
+
+          package_root="$(mktemp -d)"
+          install -m644 packaging/arch/PKGBUILD.release "$package_root/PKGBUILD.release"
+          install -m755 "$binary" "$package_root/lyrune"
+          install -m644 packaging/arch/lyrune.desktop "$package_root/lyrune.desktop"
+          install -m644 crates/lyrune-app/assets/lyrune.svg "$package_root/lyrune.svg"
+          install -m644 THIRD_PARTY_NOTICES.md "$package_root/THIRD_PARTY_NOTICES.md"
+          install -m644 packaging/arch/license-unknown.txt "$package_root/license-unknown.txt"
+          package_version="${VERSION//-/_}"
+          (
+            cd "$package_root"
+            LYRUNE_PKGVER="$package_version" \
+              PKGDEST="$GITHUB_WORKSPACE/dist" \
+              makepkg --clean --cleanbuild --force --nodeps --noconfirm -p PKGBUILD.release
+          )
+
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-${{ matrix.asset_arch }}
+          path: |
+            dist/lyrune-v${{ needs.validate.outputs.version }}-linux-${{ matrix.asset_arch }}.tar.gz
+            dist/lyrune-${{ needs.validate.outputs.version }}-1-*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    name: Windows ${{ matrix.asset_arch }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            asset_arch: amd64
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_VERSION --profile minimal --target "${{ matrix.target }}"
+          rustup override set $env:RUST_VERSION
+
+      - name: Restore Rust build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: release-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            release-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
+
+      - name: Build Lyrune
+        shell: pwsh
+        run: cargo build --locked --release --package lyrune --target "${{ matrix.target }}"
+
+      - name: Create Windows archive
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archiveName = "lyrune-v$env:VERSION-windows-$env:ASSET_ARCH"
+          $archiveRoot = Join-Path "dist" $archiveName
+          New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
+          Copy-Item "target\$env:TARGET\release\lyrune.exe" "$archiveRoot\lyrune.exe"
+          Copy-Item "README.md" "$archiveRoot\README.md"
+          Copy-Item "THIRD_PARTY_NOTICES.md" "$archiveRoot\THIRD_PARTY_NOTICES.md"
+          Copy-Item "packaging\arch\license-unknown.txt" "$archiveRoot\license-unknown.txt"
+          Compress-Archive -Path $archiveRoot -DestinationPath "dist\$archiveName.zip" -CompressionLevel Optimal
+
+      - name: Upload Windows release asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-${{ matrix.asset_arch }}
+          path: dist/lyrune-v${{ needs.validate.outputs.version }}-windows-${{ matrix.asset_arch }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    name: macOS arm64
+    needs: validate
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target aarch64-apple-darwin
+          rustup override set "$RUST_VERSION"
+
+      - name: Restore Rust build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: release-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            release-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-
+
+      - name: Build Lyrune
+        shell: bash
+        run: cargo build --locked --release --package lyrune --target aarch64-apple-darwin
+
+      - name: Create macOS application archive
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive_name="lyrune-v$VERSION-macos-arm64"
+          archive_root="dist/$archive_name"
+          app_root="$archive_root/Lyrune.app/Contents"
+          mkdir -p "$app_root/MacOS" "$app_root/Resources"
+
+          strip -x target/aarch64-apple-darwin/release/lyrune
+          install -m755 target/aarch64-apple-darwin/release/lyrune "$app_root/MacOS/lyrune"
+          install -m644 packaging/macos/Info.plist "$app_root/Info.plist"
+          plutil -replace CFBundleShortVersionString -string "$VERSION" "$app_root/Info.plist"
+          plutil -replace CFBundleVersion -string "$VERSION" "$app_root/Info.plist"
+          install -m644 README.md "$archive_root/README.md"
+          install -m644 THIRD_PARTY_NOTICES.md "$archive_root/THIRD_PARTY_NOTICES.md"
+          install -m644 packaging/arch/license-unknown.txt "$archive_root/license-unknown.txt"
+
+          codesign --force --deep --sign - "$archive_root/Lyrune.app"
+          codesign --verify --deep --strict "$archive_root/Lyrune.app"
+          tar -C dist -czf "dist/$archive_name.tar.gz" "$archive_name"
+
+      - name: Upload macOS release asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-arm64
+          path: dist/lyrune-v${{ needs.validate.outputs.version }}-macos-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create draft release
+    needs:
+      - validate
+      - build-linux
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\0' \
+            | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS
+
+      - name: Create or update draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --json isDraft --jq .isDraft > release-draft.txt 2>/dev/null; then
+            if [[ "$(cat release-draft.txt)" != "true" ]]; then
+              echo "release $TAG is already published; refusing to replace its assets" >&2
+              exit 1
+            fi
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            gh release create "$TAG" release-assets/* \
+              --draft \
+              --generate-notes \
+              --title "Lyrune $TAG" \
+              --verify-tag
+          fi

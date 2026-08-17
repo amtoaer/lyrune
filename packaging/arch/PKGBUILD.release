@@ -1,0 +1,49 @@
+# Maintainer: amtoaer <amtoaer@gmail.com>
+
+pkgname=lyrune
+pkgver="${LYRUNE_PKGVER:-1.0.0}"
+pkgrel=1
+pkgdesc='Fast native QQ Music desktop client built with Rust and GPUI'
+arch=('x86_64' 'aarch64')
+url='https://github.com/amtoaer/lyrune'
+license=('LicenseRef-Unknown')
+options=('!debug' '!lto' '!strip')
+depends=(
+  'alsa-lib'
+  'fontconfig'
+  'gcc-libs'
+  'glibc'
+  'libxcb'
+  'libxkbcommon'
+  'libxkbcommon-x11'
+  'vulkan-driver'
+  'vulkan-icd-loader'
+  'wayland'
+)
+optdepends=('org.freedesktop.secrets: persist QQ Music credentials')
+source=(
+  'lyrune'
+  'lyrune.desktop'
+  'lyrune.svg'
+  'THIRD_PARTY_NOTICES.md'
+  'license-unknown.txt'
+)
+sha256sums=(
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+  'SKIP'
+)
+
+package() {
+  install -Dm755 "${srcdir}/lyrune" "${pkgdir}/usr/bin/lyrune"
+  install -Dm644 "${srcdir}/lyrune.desktop" \
+    "${pkgdir}/usr/share/applications/lyrune.desktop"
+  install -Dm644 "${srcdir}/lyrune.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/lyrune.svg"
+  install -Dm644 "${srcdir}/THIRD_PARTY_NOTICES.md" \
+    "${pkgdir}/usr/share/doc/lyrune/THIRD_PARTY_NOTICES.md"
+  install -Dm644 "${srcdir}/license-unknown.txt" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/license-unknown.txt"
+}

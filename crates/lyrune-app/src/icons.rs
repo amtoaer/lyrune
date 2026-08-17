@@ -1,4 +1,5 @@
-use std::sync::{Arc, LazyLock};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui::{AnyElement, Hsla, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, img};
 
@@ -12,6 +13,9 @@ static LYRUNE_ICONS: LazyLock<[Arc<Image>; ColorTheme::ALL.len()]> = LazyLock::n
         ))
     })
 });
+
+static MEDIA_ICONS: LazyLock<Mutex<HashMap<(MediaIcon, u32), Arc<Image>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn themed_lyrune_svg(theme: ColorTheme) -> Vec<u8> {
     let colors = theme.logo_palette();
@@ -51,7 +55,7 @@ pub fn lyrune_icon(theme: ColorTheme, size: Pixels) -> AnyElement {
         .into_any_element()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MediaIcon {
     Back,
     Forward,
@@ -147,25 +151,39 @@ impl MediaIcon {
 }
 
 pub fn media_icon(icon: MediaIcon, color: &str, size: Pixels) -> AnyElement {
+    let color = color
+        .strip_prefix('#')
+        .and_then(|color| match color.len() {
+            6 => u32::from_str_radix(color, 16)
+                .ok()
+                .map(|color| color << 8 | 0xff),
+            8 => u32::from_str_radix(color, 16).ok(),
+            _ => None,
+        })
+        .expect("media icon colors are hexadecimal RGBA values");
     render_media_icon(icon, color, size)
 }
 
 pub fn media_icon_hsla(icon: MediaIcon, color: Hsla, size: Pixels) -> AnyElement {
     let rgba: u32 = color.to_rgb().into();
-    render_media_icon(icon, &format!("#{rgba:08x}"), size)
+    render_media_icon(icon, rgba, size)
 }
 
-fn render_media_icon(icon: MediaIcon, color: &str, size: Pixels) -> AnyElement {
-    let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" color="{color}" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{}</svg>"#,
-        icon.body()
-    );
-    img(Arc::new(Image::from_bytes(
-        ImageFormat::Svg,
-        svg.into_bytes(),
-    )))
-    .size(size)
-    .into_any_element()
+fn render_media_icon(icon: MediaIcon, color: u32, size: Pixels) -> AnyElement {
+    let image = {
+        let mut icons = MEDIA_ICONS.lock().expect("media icon cache lock poisoned");
+        icons
+            .entry((icon, color))
+            .or_insert_with(|| {
+                let svg = format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" color="#{color:08x}" stroke="#{color:08x}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{}</svg>"##,
+                    icon.body()
+                );
+                Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()))
+            })
+            .clone()
+    };
+    img(image).size(size).into_any_element()
 }
 
 #[cfg(test)]

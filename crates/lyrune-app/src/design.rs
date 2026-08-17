@@ -23,7 +23,7 @@ fn fontconfig_font_family(alias: &str) -> Option<String> {
     (!family.trim().is_empty()).then(|| family.trim().to_owned())
 }
 
-fn system_ui_font_family() -> &'static str {
+pub(crate) fn system_ui_font_family() -> &'static str {
     SYSTEM_UI_FONT_FAMILY
         .get_or_init(|| {
             #[cfg(target_os = "linux")]

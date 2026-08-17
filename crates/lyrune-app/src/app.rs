@@ -31,6 +31,7 @@ use gpui_component::{
 use quick_xml::{Reader, escape::unescape, events::Event};
 use tokio::runtime::{Builder, Runtime};
 use tokio::task::JoinHandle;
+use wana_kana::{ConvertJapanese as _, IsJapaneseStr as _};
 
 use crate::cache::AudioCache;
 use crate::credentials::CredentialStore;
@@ -91,6 +92,7 @@ struct LyricWord {
     range: Range<usize>,
     start: Duration,
     end: Duration,
+    ruby: Option<SharedString>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,17 +103,564 @@ struct LyricLine {
     translation: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum LyricLayoutStyle {
+    Normal,
+    Active,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedLyricFragment {
+    layout: Arc<LineLayout>,
+    ruby_layout: Option<Arc<LineLayout>>,
+    width: Pixels,
+    text_offset: Pixels,
+    ruby_offset: Pixels,
+    timing: Option<(Duration, Duration)>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedLyricLine {
+    fragments: Vec<PreparedLyricFragment>,
+    line_height: Pixels,
+    ruby_line_height: Pixels,
+    has_word_timing: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedLyricTranslation {
+    layout: Arc<LineLayout>,
+    line_height: Pixels,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LyricLayoutCacheSource {
+    lyrics: usize,
+    mid: String,
+    narrow: bool,
+    font_family: SharedString,
+}
+
+struct CachedLyricRow {
+    id: SharedString,
+    normal: Option<Arc<PreparedLyricLine>>,
+    active: Option<Arc<PreparedLyricLine>>,
+    translation: Option<Arc<PreparedLyricTranslation>>,
+    translation_prepared: bool,
+}
+
+#[derive(Default)]
+struct LyricLayoutCache {
+    source: Option<LyricLayoutCacheSource>,
+    scroll_id: SharedString,
+    rows: Vec<CachedLyricRow>,
+}
+
+struct PreparedLyricRow {
+    normal: Arc<PreparedLyricLine>,
+    active: Arc<PreparedLyricLine>,
+    translation: Option<Arc<PreparedLyricTranslation>>,
+    emphasis: f32,
+    opacity: f32,
+}
+
+struct PreparedLyricsElement {
+    rows: Vec<PreparedLyricRow>,
+    foreground: Hsla,
+    position: Duration,
+    translation_line_height: Pixels,
+}
+
+#[cfg(test)]
 impl LyricWord {
     fn highlight_progress(&self, position: Duration) -> f32 {
-        if position <= self.start {
-            return 0.;
-        }
-        if position >= self.end || self.end <= self.start {
-            return 1.;
+        lyric_highlight_progress(self.start, self.end, position)
+    }
+}
+
+fn lyric_highlight_progress(start: Duration, end: Duration, position: Duration) -> f32 {
+    if position <= start {
+        return 0.;
+    }
+    if position >= end || end <= start {
+        return 1.;
+    }
+
+    position.saturating_sub(start).as_secs_f32() / end.saturating_sub(start).as_secs_f32()
+}
+
+impl PreparedLyricLine {
+    fn new(
+        line: &LyricLine,
+        style: LyricLayoutStyle,
+        narrow: bool,
+        font_family: &SharedString,
+        window: &Window,
+    ) -> Self {
+        let active = style == LyricLayoutStyle::Active;
+        let font_size = match (active, narrow) {
+            (true, true) => px(24.),
+            (true, false) => px(28.),
+            (false, true) => px(17.),
+            (false, false) => px(19.),
+        };
+        let ruby_font_size = if narrow { px(11.) } else { px(12.) };
+        let ruby_line_height = if narrow { px(13.) } else { px(15.) };
+        let mut font = font(font_family.clone());
+        font.weight = if active {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::NORMAL
+        };
+        let has_word_timing = !line.words.is_empty();
+        let has_ruby = line.words.iter().any(|word| word.ruby.is_some());
+        let split_fragments = (active && has_word_timing) || has_ruby;
+        let mut fragments = Vec::with_capacity(if split_fragments {
+            line.words.len() * 2 + 1
+        } else {
+            1
+        });
+
+        let mut push_fragment =
+            |text: &str, ruby: Option<&SharedString>, timing: Option<(Duration, Duration)>| {
+                if text.is_empty() {
+                    return;
+                }
+                let run = TextRun {
+                    len: text.len(),
+                    font: font.clone(),
+                    color: black(),
+                    ..Default::default()
+                };
+                let layout = window
+                    .text_system()
+                    .layout_line(text, font_size, &[run], None);
+                let ruby_layout = ruby.map(|ruby| {
+                    let run = TextRun {
+                        len: ruby.len(),
+                        font: font.clone(),
+                        color: black(),
+                        ..Default::default()
+                    };
+                    window
+                        .text_system()
+                        .layout_line(ruby, ruby_font_size, &[run], None)
+                });
+                let width = ruby_layout
+                    .as_ref()
+                    .map_or(layout.width, |ruby| layout.width.max(ruby.width));
+                fragments.push(PreparedLyricFragment {
+                    text_offset: (width - layout.width) / 2.,
+                    ruby_offset: ruby_layout
+                        .as_ref()
+                        .map_or(px(0.), |ruby| (width - ruby.width) / 2.),
+                    layout,
+                    ruby_layout,
+                    width,
+                    timing,
+                });
+            };
+
+        if split_fragments {
+            let mut cursor = 0;
+            for word in &line.words {
+                if cursor < word.range.start {
+                    push_fragment(&line.text[cursor..word.range.start], None, None);
+                }
+                push_fragment(
+                    &line.text[word.range.clone()],
+                    word.ruby.as_ref(),
+                    active.then_some((word.start, word.end)),
+                );
+                cursor = word.range.end;
+            }
+            if cursor < line.text.len() {
+                push_fragment(&line.text[cursor..], None, None);
+            }
+        } else {
+            push_fragment(&line.text, None, None);
         }
 
-        position.saturating_sub(self.start).as_secs_f32()
-            / self.end.saturating_sub(self.start).as_secs_f32()
+        Self {
+            fragments,
+            line_height: font_size * 1.3,
+            ruby_line_height,
+            has_word_timing,
+        }
+    }
+
+    fn height(&self) -> Pixels {
+        self.ruby_line_height + self.line_height
+    }
+}
+
+impl PreparedLyricTranslation {
+    fn new(text: &str, narrow: bool, font_family: &SharedString, window: &Window) -> Self {
+        let font_size = if narrow { px(13.) } else { px(14.) };
+        let line_height = if narrow { px(18.) } else { px(20.) };
+        let run = TextRun {
+            len: text.len(),
+            font: font(font_family.clone()),
+            color: black(),
+            ..Default::default()
+        };
+        Self {
+            layout: window
+                .text_system()
+                .layout_line(text, font_size, &[run], None),
+            line_height,
+        }
+    }
+}
+
+impl LyricLayoutCache {
+    fn reset_if_needed(
+        &mut self,
+        lyrics: &Arc<ParsedLyrics>,
+        mid: &str,
+        narrow: bool,
+        font_family: &SharedString,
+    ) {
+        let lyrics_identity = Arc::as_ptr(lyrics) as usize;
+        let matches = self.source.as_ref().is_some_and(|source| {
+            source.lyrics == lyrics_identity
+                && source.mid == mid
+                && source.narrow == narrow
+                && source.font_family == *font_family
+        });
+        if matches {
+            return;
+        }
+
+        self.source = Some(LyricLayoutCacheSource {
+            lyrics: lyrics_identity,
+            mid: mid.to_owned(),
+            narrow,
+            font_family: font_family.clone(),
+        });
+        self.scroll_id = format!("lyrics-{mid}").into();
+        self.rows = (0..lyrics.lines.len())
+            .map(|index| CachedLyricRow {
+                id: format!("lyrics-{mid}-{index}").into(),
+                normal: None,
+                active: None,
+                translation: None,
+                translation_prepared: false,
+            })
+            .collect();
+    }
+
+    fn scroll_id(&self) -> SharedString {
+        self.scroll_id.clone()
+    }
+
+    fn row_id(&self, index: usize) -> SharedString {
+        self.rows[index].id.clone()
+    }
+
+    fn line(
+        &mut self,
+        index: usize,
+        lyric: &LyricLine,
+        style: LyricLayoutStyle,
+        narrow: bool,
+        font_family: &SharedString,
+        window: &Window,
+    ) -> Arc<PreparedLyricLine> {
+        let cached = match style {
+            LyricLayoutStyle::Normal => &mut self.rows[index].normal,
+            LyricLayoutStyle::Active => &mut self.rows[index].active,
+        };
+        cached
+            .get_or_insert_with(|| {
+                Arc::new(PreparedLyricLine::new(
+                    lyric,
+                    style,
+                    narrow,
+                    font_family,
+                    window,
+                ))
+            })
+            .clone()
+    }
+
+    fn translation(
+        &mut self,
+        index: usize,
+        lyric: &LyricLine,
+        narrow: bool,
+        font_family: &SharedString,
+        window: &Window,
+    ) -> Option<Arc<PreparedLyricTranslation>> {
+        let row = &mut self.rows[index];
+        if !row.translation_prepared {
+            row.translation = lyric.translation.as_deref().map(|translation| {
+                Arc::new(PreparedLyricTranslation::new(
+                    translation,
+                    narrow,
+                    font_family,
+                    window,
+                ))
+            });
+            row.translation_prepared = true;
+        }
+        row.translation.clone()
+    }
+}
+
+impl PreparedLyricsElement {
+    fn paint_layout(
+        layout: &LineLayout,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        color: Hsla,
+        window: &mut Window,
+    ) -> anyhow::Result<()> {
+        let baseline = (line_height - layout.ascent - layout.descent) / 2. + layout.ascent;
+        window.paint_layer(
+            Bounds::new(origin, size(layout.width, line_height)),
+            |window| {
+                for run in &layout.runs {
+                    for glyph in &run.glyphs {
+                        let origin = point(
+                            origin.x + glyph.position.x,
+                            origin.y + baseline + glyph.position.y,
+                        );
+                        if glyph.is_emoji {
+                            window.paint_emoji(origin, run.font_id, glyph.id, layout.font_size)?;
+                        } else {
+                            window.paint_glyph(
+                                origin,
+                                run.font_id,
+                                glyph.id,
+                                layout.font_size,
+                                color,
+                            )?;
+                        }
+                    }
+                }
+                Ok(())
+            },
+        )
+    }
+
+    fn paint_line(
+        line: &PreparedLyricLine,
+        origin: Point<Pixels>,
+        bounds: Bounds<Pixels>,
+        style: LyricLayoutStyle,
+        opacity: f32,
+        foreground: Hsla,
+        position: Duration,
+        window: &mut Window,
+    ) -> anyhow::Result<()> {
+        if opacity <= 0.001 {
+            return Ok(());
+        }
+
+        let origin = point(
+            origin.x,
+            origin.y + (bounds.size.height - line.height()) / 2.,
+        );
+        let base_origin_y = origin.y + line.ruby_line_height;
+        let base_color = foreground.opacity(
+            opacity
+                * if style == LyricLayoutStyle::Active && line.has_word_timing {
+                    0.42
+                } else {
+                    1.
+                },
+        );
+        let highlight_color = foreground.opacity(opacity);
+        let ruby_color = foreground.opacity(opacity * 0.78);
+        let mut x = origin.x;
+
+        for fragment in &line.fragments {
+            let text_origin = point(x + fragment.text_offset, base_origin_y);
+            if style == LyricLayoutStyle::Active && line.has_word_timing {
+                if let Some((start, end)) = fragment.timing {
+                    let progress = lyric_highlight_progress(start, end, position);
+                    if progress <= 0. {
+                        Self::paint_layout(
+                            &fragment.layout,
+                            text_origin,
+                            line.line_height,
+                            base_color,
+                            window,
+                        )?;
+                    } else if progress >= 1. {
+                        Self::paint_layout(
+                            &fragment.layout,
+                            text_origin,
+                            line.line_height,
+                            highlight_color,
+                            window,
+                        )?;
+                    } else {
+                        Self::paint_layout(
+                            &fragment.layout,
+                            text_origin,
+                            line.line_height,
+                            base_color,
+                            window,
+                        )?;
+                        let highlight_bounds = Bounds::new(
+                            point(text_origin.x, bounds.top()),
+                            size(fragment.layout.width * progress, bounds.size.height),
+                        );
+                        window.with_content_mask(
+                            Some(ContentMask {
+                                bounds: highlight_bounds,
+                            }),
+                            |window| {
+                                Self::paint_layout(
+                                    &fragment.layout,
+                                    text_origin,
+                                    line.line_height,
+                                    highlight_color,
+                                    window,
+                                )
+                            },
+                        )?;
+                    }
+                } else {
+                    Self::paint_layout(
+                        &fragment.layout,
+                        text_origin,
+                        line.line_height,
+                        base_color,
+                        window,
+                    )?;
+                }
+            } else {
+                Self::paint_layout(
+                    &fragment.layout,
+                    text_origin,
+                    line.line_height,
+                    highlight_color,
+                    window,
+                )?;
+            }
+
+            if let Some(ruby) = &fragment.ruby_layout {
+                Self::paint_layout(
+                    ruby,
+                    point(x + fragment.ruby_offset, origin.y),
+                    line.ruby_line_height,
+                    ruby_color,
+                    window,
+                )?;
+            }
+            x += fragment.width;
+        }
+        Ok(())
+    }
+}
+
+impl IntoElement for PreparedLyricsElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for PreparedLyricsElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = px(self.rows.len() as f32 * LYRIC_ROW_HEIGHT).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for (index, row) in self.rows.iter().enumerate() {
+                let emphasis = row.emphasis.clamp(0., 1.);
+                let row_bounds = Bounds::new(
+                    point(
+                        bounds.origin.x,
+                        bounds.origin.y + px(index as f32 * LYRIC_ROW_HEIGHT),
+                    ),
+                    size(bounds.size.width, px(LYRIC_ROW_HEIGHT)),
+                );
+                let lyric_height = row.normal.height().max(row.active.height());
+                let content_height = lyric_height + px(4.) + self.translation_line_height;
+                let lyric_bounds = Bounds::new(
+                    point(
+                        row_bounds.origin.x,
+                        row_bounds.origin.y + (row_bounds.size.height - content_height) / 2.,
+                    ),
+                    size(row_bounds.size.width, lyric_height),
+                );
+                let _ = Self::paint_line(
+                    &row.normal,
+                    lyric_bounds.origin,
+                    lyric_bounds,
+                    LyricLayoutStyle::Normal,
+                    row.opacity * (1. - emphasis),
+                    self.foreground,
+                    self.position,
+                    window,
+                );
+                let _ = Self::paint_line(
+                    &row.active,
+                    lyric_bounds.origin,
+                    lyric_bounds,
+                    LyricLayoutStyle::Active,
+                    row.opacity * emphasis,
+                    self.foreground,
+                    self.position,
+                    window,
+                );
+                if let Some(translation) = &row.translation {
+                    let _ = Self::paint_layout(
+                        &translation.layout,
+                        point(row_bounds.origin.x, lyric_bounds.bottom() + px(4.)),
+                        translation.line_height,
+                        self.foreground.opacity(row.opacity * 0.72),
+                        window,
+                    );
+                }
+            }
+        });
     }
 }
 
@@ -128,7 +677,7 @@ impl ParsedLyrics {
     }
 }
 
-fn parse_lyrics(original: &str, translated: Option<&str>) -> ParsedLyrics {
+fn parse_lyrics(original: &str, translated: Option<&str>, romanized: Option<&str>) -> ParsedLyrics {
     let mut original = parse_timed_lyrics(original);
     let translated = translated.map(parse_timed_lyrics).unwrap_or_default();
     if original.is_empty() {
@@ -136,32 +685,81 @@ fn parse_lyrics(original: &str, translated: Option<&str>) -> ParsedLyrics {
         return ParsedLyrics { lines: original };
     }
 
-    if original.len() == translated.len() {
-        for (line, translation) in original.iter_mut().zip(translated) {
-            line.translation = provider_translation(&translation.text);
-        }
-    } else {
-        let mut search_from = 0;
-        for line in &mut original {
-            let Some((offset, translation)) = translated[search_from..]
-                .iter()
-                .enumerate()
-                .take_while(|(_, translation)| {
-                    translation.start <= line.start.saturating_add(TRANSLATION_ALIGNMENT_TOLERANCE)
-                })
-                .filter(|(_, translation)| {
-                    line.start.abs_diff(translation.start) <= TRANSLATION_ALIGNMENT_TOLERANCE
-                })
-                .min_by_key(|(_, translation)| line.start.abs_diff(translation.start))
-            else {
-                continue;
-            };
-            line.translation = provider_translation(&translation.text);
-            search_from += offset + 1;
-        }
+    align_lyric_lines(&mut original, &translated, |line, translation| {
+        line.translation = provider_translation(&translation.text);
+    });
+
+    if original.iter().any(|line| {
+        line.text
+            .chars()
+            .any(|character| matches!(character, '\u{3040}'..='\u{30ff}'))
+    }) {
+        let romanized = romanized.map(parse_timed_lyrics).unwrap_or_default();
+        align_lyric_lines(&mut original, &romanized, attach_ruby);
     }
 
     ParsedLyrics { lines: original }
+}
+
+fn align_lyric_lines(
+    original: &mut [LyricLine],
+    auxiliary: &[LyricLine],
+    mut merge: impl FnMut(&mut LyricLine, &LyricLine),
+) {
+    if original.len() == auxiliary.len() {
+        for (line, auxiliary) in original.iter_mut().zip(auxiliary) {
+            merge(line, auxiliary);
+        }
+        return;
+    }
+
+    let mut search_from = 0;
+    for line in original {
+        let Some((offset, auxiliary)) = auxiliary[search_from..]
+            .iter()
+            .enumerate()
+            .take_while(|(_, auxiliary)| {
+                auxiliary.start <= line.start.saturating_add(TRANSLATION_ALIGNMENT_TOLERANCE)
+            })
+            .filter(|(_, auxiliary)| {
+                line.start.abs_diff(auxiliary.start) <= TRANSLATION_ALIGNMENT_TOLERANCE
+            })
+            .min_by_key(|(_, auxiliary)| line.start.abs_diff(auxiliary.start))
+        else {
+            continue;
+        };
+        merge(line, auxiliary);
+        search_from += offset + 1;
+    }
+}
+
+fn attach_ruby(line: &mut LyricLine, romanized: &LyricLine) {
+    for word in &mut line.words {
+        let text = &line.text[word.range.clone()];
+        if !text.contains_kanji() {
+            continue;
+        }
+
+        let reading = romanized
+            .words
+            .iter()
+            .filter(|romanized_word| {
+                romanized_word.start < word.end && romanized_word.end > word.start
+            })
+            .map(|romanized_word| &romanized.text[romanized_word.range.clone()])
+            .collect::<String>()
+            .chars()
+            .filter(|character| !character.is_whitespace() && *character != '\'')
+            .collect::<String>()
+            .to_hiragana();
+        if !reading.is_empty()
+            && reading
+                .chars()
+                .all(|character| matches!(character, '\u{3040}'..='\u{309f}' | 'ー'))
+        {
+            word.ruby = Some(reading.into());
+        }
+    }
 }
 
 fn provider_translation(text: &str) -> Option<String> {
@@ -242,6 +840,7 @@ fn parse_qrc_words(input: &str) -> (String, Vec<LyricWord>) {
                     range: range_start..range_end,
                     start,
                     end: start.saturating_add(duration),
+                    ruby: None,
                 });
             }
             cursor = close + 1;
@@ -283,6 +882,7 @@ fn trim_lyric_text(text: String, words: Vec<LyricWord>) -> (String, Vec<LyricWor
                 range: range_start - start..range_end - start,
                 start: word.start,
                 end: word.end,
+                ruby: word.ruby,
             })
         })
         .collect();
@@ -828,6 +1428,7 @@ pub struct LyruneView {
     backdrop_previous_url: Option<String>,
     backdrop_crossfade_phase: bool,
     lyrics_cache: HashMap<String, Arc<ParsedLyrics>>,
+    lyric_layout_cache: LyricLayoutCache,
     lyrics_loading: HashSet<String>,
     lyrics_errors: HashMap<String, String>,
     settings: AppSettings,
@@ -1075,6 +1676,7 @@ impl LyruneView {
             backdrop_previous_url: None,
             backdrop_crossfade_phase: false,
             lyrics_cache: HashMap::new(),
+            lyric_layout_cache: LyricLayoutCache::default(),
             lyrics_loading: HashSet::new(),
             lyrics_errors: HashMap::new(),
             settings,
@@ -2816,10 +3418,13 @@ impl LyruneView {
 
         let (sender, receiver) = async_channel::bounded(1);
         drop(RUNTIME.spawn(async move {
-            let result = client
-                .lyrics(&credential, &track)
-                .await
-                .map(|result| Arc::new(parse_lyrics(&result.lyric, result.trans_lyric.as_deref())));
+            let result = client.lyrics(&credential, &track).await.map(|result| {
+                Arc::new(parse_lyrics(
+                    &result.lyric,
+                    result.trans_lyric.as_deref(),
+                    result.roma_lyric.as_deref(),
+                ))
+            });
             let _ = sender.send(result).await;
         }));
 
@@ -5815,7 +6420,7 @@ impl LyruneView {
     }
 
     fn render_lyrics_panel(
-        &self,
+        &mut self,
         mid: &str,
         foreground: Hsla,
         narrow: bool,
@@ -5848,7 +6453,7 @@ impl LyruneView {
                 .into_any_element()
         };
 
-        let Some(lyrics) = self.lyrics_cache.get(mid) else {
+        let Some(lyrics) = self.lyrics_cache.get(mid).cloned() else {
             if self.lyrics_loading.contains(mid) {
                 return message("正在加载歌词…", None);
             }
@@ -5861,6 +6466,10 @@ impl LyruneView {
             return message("暂无歌词", None);
         }
 
+        let font_family: SharedString = design::system_ui_font_family().into();
+        self.lyric_layout_cache
+            .reset_if_needed(&lyrics, mid, narrow, &font_family);
+
         let active = lyrics.active_index(self.position);
         let anchor = active.unwrap_or(0);
         let motion_duration = if self.cover_backdrop_expanded {
@@ -5869,7 +6478,7 @@ impl LyruneView {
             Duration::ZERO
         };
         let scroll_offset = transition(
-            (format!("lyrics-{mid}"), "scroll-offset"),
+            (self.lyric_layout_cache.scroll_id(), "scroll-offset"),
             px(anchor as f32 * LYRIC_ROW_HEIGHT),
             Transition::new(motion_duration),
             window,
@@ -5896,7 +6505,7 @@ impl LyruneView {
                     3 => 0.3,
                     _ => 0.16,
                 };
-                let line_id = format!("lyrics-{mid}-{index}");
+                let line_id = self.lyric_layout_cache.row_id(index);
                 let opacity = transition(
                     (line_id.clone(), "opacity"),
                     target_opacity,
@@ -5904,135 +6513,54 @@ impl LyruneView {
                     window,
                     cx,
                 );
-                let text_size = transition(
-                    (line_id, "text-size"),
-                    if current {
-                        if narrow { px(24.) } else { px(28.) }
-                    } else if narrow {
-                        px(17.)
-                    } else {
-                        px(19.)
-                    },
+                let emphasis = transition(
+                    (line_id, "emphasis"),
+                    if current { 1. } else { 0. },
                     Transition::new(motion_duration.min(Duration::from_millis(240))),
                     window,
                     cx,
                 );
-                let has_word_timing = !line.words.is_empty();
-                let base_text_color = if current && has_word_timing {
-                    foreground.opacity(opacity * 0.42)
-                } else {
-                    foreground.opacity(opacity)
-                };
-                let text = if current && has_word_timing {
-                    let mut cursor = 0;
-                    let mut fragments = Vec::with_capacity(line.words.len() * 2 + 1);
-                    for word in &line.words {
-                        if cursor < word.range.start {
-                            fragments.push(
-                                div()
-                                    .flex_shrink_0()
-                                    .whitespace_nowrap()
-                                    .child(line.text[cursor..word.range.start].to_owned())
-                                    .into_any_element(),
-                            );
-                        }
-
-                        let text = SharedString::from(line.text[word.range.clone()].to_owned());
-                        let progress = word.highlight_progress(self.position);
-                        let fragment = div().flex_shrink_0().whitespace_nowrap();
-                        fragments.push(if progress <= 0. {
-                            fragment.child(text).into_any_element()
-                        } else if progress >= 1. {
-                            fragment
-                                .text_color(foreground.opacity(opacity))
-                                .child(text)
-                                .into_any_element()
-                        } else {
-                            fragment
-                                .relative()
-                                .child(text.clone())
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .top_0()
-                                        .bottom_0()
-                                        .left_0()
-                                        .w(relative(progress))
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_color(foreground.opacity(opacity))
-                                        .child(text),
-                                )
-                                .into_any_element()
-                        });
-                        cursor = word.range.end;
-                    }
-                    if cursor < line.text.len() {
-                        fragments.push(
-                            div()
-                                .flex_shrink_0()
-                                .whitespace_nowrap()
-                                .child(line.text[cursor..].to_owned())
-                                .into_any_element(),
-                        );
-                    }
-
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_baseline()
-                        .max_h(text_size * 2.6)
-                        .overflow_hidden()
-                        .children(fragments)
-                        .into_any_element()
-                } else {
-                    div()
-                        .line_clamp(2)
-                        .child(line.text.clone())
-                        .into_any_element()
-                };
-                v_flex()
-                    .h(px(LYRIC_ROW_HEIGHT))
-                    .flex_shrink_0()
-                    .justify_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(text_size)
-                            .line_height(text_size * 1.3)
-                            .text_color(base_text_color)
-                            .when(current, |line| line.font_semibold())
-                            .child(text),
-                    )
-                    .when_some(line.translation.clone(), |line, translation| {
-                        line.child(
-                            div()
-                                .line_clamp(1)
-                                .text_size(if narrow { px(13.) } else { px(14.) })
-                                .line_height(if narrow { px(18.) } else { px(20.) })
-                                .text_color(foreground.opacity(opacity * 0.72))
-                                .child(translation),
-                        )
-                    })
-                    .into_any_element()
+                let normal = self.lyric_layout_cache.line(
+                    index,
+                    line,
+                    LyricLayoutStyle::Normal,
+                    narrow,
+                    &font_family,
+                    window,
+                );
+                let active_layout = self.lyric_layout_cache.line(
+                    index,
+                    line,
+                    LyricLayoutStyle::Active,
+                    narrow,
+                    &font_family,
+                    window,
+                );
+                let translation =
+                    self.lyric_layout_cache
+                        .translation(index, line, narrow, &font_family, window);
+                PreparedLyricRow {
+                    normal,
+                    active: active_layout,
+                    translation,
+                    emphasis,
+                    opacity,
+                }
             })
             .collect::<Vec<_>>();
 
-        v_flex()
+        div()
             .absolute()
             .top(relative(0.44))
             .left_0()
             .right_0()
-            .mt(-(scroll_offset + px(38.)))
-            .when(render_start > 0, |lyrics| {
-                lyrics.child(
-                    div()
-                        .h(px(render_start as f32 * LYRIC_ROW_HEIGHT))
-                        .flex_shrink_0(),
-                )
+            .mt(px(render_start as f32 * LYRIC_ROW_HEIGHT) - scroll_offset - px(38.))
+            .child(PreparedLyricsElement {
+                rows,
+                foreground,
+                position: self.position,
+                translation_line_height: if narrow { px(18.) } else { px(20.) },
             })
-            .children(rows)
             .into_any_element()
     }
 
@@ -7036,6 +7564,7 @@ mod tests {
         let lyrics = parse_lyrics(
             "[ti:title]\n[00:01.20]first\n[00:10.000][00:20.000]repeat",
             Some("[00:01.200]第一句\n[00:10.000]重复"),
+            None,
         );
 
         assert_eq!(lyrics.lines.len(), 3);
@@ -7053,6 +7582,7 @@ mod tests {
             r#"<?xml version="1.0" encoding="utf-8"?>
 <QrcInfos><LyricInfo LyricCount="1"><Lyric_1 LyricType="1" LyricContent="[1000,700]青(1000,300)い(1300,150)空（そら）(1450,250)&#10;[2000,500]次(2000,500)"/></LyricInfo></QrcInfos>"#,
             Some("[00:01.000]蓝色天空\n[00:02.000]下一句"),
+            None,
         );
 
         assert_eq!(lyrics.lines.len(), 2);
@@ -7082,6 +7612,7 @@ mod tests {
         let lyrics = parse_lyrics(
             r#"<QrcInfos><LyricInfo><Lyric_1 LyricContent="[16013,500]原(16013,500)&#10;[22564,500]文(22564,500)"/></LyricInfo></QrcInfos>"#,
             Some("[00:16.010]第一行\n[00:22.560]第二行"),
+            None,
         );
 
         assert_eq!(lyrics.lines.len(), 2);
@@ -7090,9 +7621,39 @@ mod tests {
     }
 
     #[test]
+    fn aligns_qrc_romanization_as_kanji_ruby() {
+        let lyrics = parse_lyrics(
+            "[17499,5352]あ(17499,127)と(17626,211)一(17838,646)匙(18485,739)の(19224,234)憂(19459,297)鬱(19756,389)で(20146,285)",
+            None,
+            Some(
+                "[17499,5352]a (17499,127)to (17626,211)hi (17838,323)to (18161,323)sa (18485,369)ji (18854,370)no (19224,234)yu (19459,148)u (19607,149)u (19756,194)tsu (19950,195)de (20146,285)",
+            ),
+        );
+
+        let words = &lyrics.lines[0].words;
+        assert_eq!(words[0].ruby, None);
+        assert_eq!(words[2].ruby.as_deref(), Some("ひと"));
+        assert_eq!(words[3].ruby.as_deref(), Some("さじ"));
+        assert_eq!(words[5].ruby.as_deref(), Some("ゆう"));
+        assert_eq!(words[6].ruby.as_deref(), Some("うつ"));
+    }
+
+    #[test]
+    fn does_not_treat_chinese_romanization_as_japanese_ruby() {
+        let lyrics = parse_lyrics(
+            "[1000,500]中文(1000,500)",
+            None,
+            Some("[1000,500]zhong (1000,250)wen (1250,250)"),
+        );
+
+        assert_eq!(lyrics.lines[0].words[0].ruby, None);
+    }
+
+    #[test]
     fn preserves_literal_line_breaks_in_qrc_attributes() {
         let lyrics = parse_lyrics(
             "<QrcInfos><LyricInfo><Lyric_1 LyricContent=\"[ti:title]\r\n[0,500]中(0,250)文(250,250)\r\n[500,500]歌词(500,500)\"/></LyricInfo></QrcInfos>",
+            None,
             None,
         );
 
@@ -7106,6 +7667,7 @@ mod tests {
         let lyrics = parse_lyrics(
             "[00:01.000]词：作者\n[00:02.000]//",
             Some("[00:01.000]//\n[00:02.000]实际翻译"),
+            None,
         );
 
         assert_eq!(lyrics.lines[0].translation, None);

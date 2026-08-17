@@ -17,6 +17,7 @@ use crate::app::RUNTIME;
 use crate::cache::cache_key;
 
 const IMAGE_CACHE_DIR: &str = "images-v1";
+const MAX_SATURATION_COMPRESSION: f32 = 0.35;
 
 #[derive(Clone)]
 enum CachedImageFile {}
@@ -116,9 +117,11 @@ fn generate_blurred_cover(path: &Path) -> anyhow::Result<Arc<BlurredCover>> {
         .context("无法识别封面格式")?
         .decode()
         .context("无法解码待模糊的封面")?;
-    let blurred = image
-        .resize_to_fill(128, 128, FilterType::Triangle)
-        .blur(10.);
+    let blurred = compress_high_saturation(
+        image
+            .resize_to_fill(128, 128, FilterType::Triangle)
+            .blur(10.),
+    );
     let sampled_rgb = sample_lyrics_region(&blurred);
     let mut bytes = Cursor::new(Vec::new());
     blurred
@@ -128,6 +131,33 @@ fn generate_blurred_cover(path: &Path) -> anyhow::Result<Arc<BlurredCover>> {
         image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes.into_inner())),
         sampled_rgb,
     }))
+}
+
+fn compress_high_saturation(image: image::DynamicImage) -> image::DynamicImage {
+    let mut image = image.to_rgba8();
+    for pixel in image.pixels_mut() {
+        let rgb = [
+            f32::from(pixel[0]) / 255.,
+            f32::from(pixel[1]) / 255.,
+            f32::from(pixel[2]) / 255.,
+        ];
+        let maximum = rgb.into_iter().fold(0_f32, f32::max);
+        let minimum = rgb.into_iter().fold(1_f32, f32::min);
+        let lightness = (maximum + minimum) / 2.;
+        let denominator = 1. - (2. * lightness - 1.).abs();
+        if denominator <= f32::EPSILON {
+            continue;
+        }
+
+        let saturation = (maximum - minimum) / denominator;
+        let scale = 1. - MAX_SATURATION_COMPRESSION * saturation;
+        for channel in 0..3 {
+            pixel[channel] = ((lightness + (rgb[channel] - lightness) * scale) * 255.)
+                .round()
+                .clamp(0., 255.) as u8;
+        }
+    }
+    image::DynamicImage::ImageRgba8(image)
 }
 
 fn sample_lyrics_region(image: &image::DynamicImage) -> [f32; 3] {
@@ -314,9 +344,11 @@ mod tests {
 
         assert_eq!(blurred.image.format, ImageFormat::Png);
         assert_eq!((decoded.width(), decoded.height()), (128, 128));
-        assert!((blurred.sampled_rgb[0] - 120. / 255.).abs() < 0.01);
-        assert!((blurred.sampled_rgb[1] - 80. / 255.).abs() < 0.01);
-        assert!((blurred.sampled_rgb[2] - 200. / 255.).abs() < 0.01);
+        assert!(blurred.sampled_rgb[0] > 120. / 255.);
+        assert!(blurred.sampled_rgb[1] > 80. / 255.);
+        assert!(blurred.sampled_rgb[2] < 200. / 255.);
+        let compressed_lightness = (blurred.sampled_rgb[1] + blurred.sampled_rgb[2]) / 2.;
+        assert!((compressed_lightness - 140. / 255.).abs() < 0.01);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

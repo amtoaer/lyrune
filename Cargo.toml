@@ -74,4 +74,5 @@ tokio = { version = "1.47", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 tray-icon = { version = "0.24.2", default-features = false }
 uuid = { version = "1.18", features = ["v4"] }
+wana_kana = { version = "5.0", default-features = false }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

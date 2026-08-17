@@ -85,6 +85,14 @@ mod tests {
 
         if let Some(track) = tracks.first() {
             assert!(
+                ProtocolClient::new()
+                    .expect("create protocol client")
+                    .track_liked(&credential, &track.mid)
+                    .await
+                    .expect("read liked state"),
+                "the first track returned by the liked playlist is not marked as liked"
+            );
+            assert!(
                 track.artists.trim().is_empty() || !track.artist_details.is_empty(),
                 "first liked track has artists but no artist navigation metadata"
             );

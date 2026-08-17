@@ -194,6 +194,70 @@ pub struct PlaylistSnapshot {
 }
 
 impl LibraryCache {
+    pub fn track_liked(
+        &self,
+        account_id: u64,
+        mid: &str,
+        now_secs: u64,
+        ttl: Duration,
+    ) -> Option<bool> {
+        let snapshot = self.playlists.iter().find(|snapshot| {
+            snapshot.account_id == account_id
+                && snapshot.playlist.id == UserPlaylistId::Liked
+                && is_fresh(snapshot.fetched_at_secs, now_secs, ttl)
+        })?;
+        if snapshot.tracks.iter().any(|track| track.mid == mid) {
+            Some(true)
+        } else if snapshot.has_more {
+            None
+        } else {
+            Some(false)
+        }
+    }
+
+    pub fn set_track_liked(&mut self, account_id: u64, mut track: Track, liked: bool, now: u64) {
+        let update_count = |playlist: &mut UserPlaylist| {
+            playlist.track_count = if liked {
+                playlist.track_count.saturating_add(1)
+            } else {
+                playlist.track_count.saturating_sub(1)
+            };
+        };
+        if let Some(directory) = self
+            .directories
+            .iter_mut()
+            .find(|directory| directory.account_id == account_id)
+            && let Some(playlist) = directory
+                .playlists
+                .iter_mut()
+                .find(|playlist| playlist.id == UserPlaylistId::Liked)
+        {
+            update_count(playlist);
+        }
+        let Some(snapshot) = self.playlists.iter_mut().find(|snapshot| {
+            snapshot.account_id == account_id && snapshot.playlist.id == UserPlaylistId::Liked
+        }) else {
+            return;
+        };
+        update_count(&mut snapshot.playlist);
+        let index = snapshot
+            .tracks
+            .iter()
+            .position(|item| item.mid == track.mid);
+        match (liked, index) {
+            (true, None) => {
+                track.added_at = Some(now as i64);
+                snapshot.tracks.insert(0, track);
+                snapshot.next_offset = snapshot.next_offset.saturating_add(1);
+            }
+            (false, Some(index)) => {
+                snapshot.tracks.remove(index);
+                snapshot.next_offset = snapshot.next_offset.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
     pub fn fresh_directory(
         &self,
         account_id: u64,
@@ -398,6 +462,7 @@ mod tests {
     fn track(mid: &str) -> Track {
         Track {
             song_id: None,
+            song_type: 0,
             mid: mid.to_owned(),
             media_mid: None,
             standard_size_bytes: None,
@@ -660,6 +725,51 @@ mod tests {
                 .tracks[0]
                 .mid,
             "refreshed"
+        );
+    }
+
+    #[test]
+    fn liked_state_uses_fresh_complete_data_and_updates_the_cached_prefix() {
+        let mut cache = LibraryCache::default();
+        let profile = UserProfile {
+            id: "10001".to_owned(),
+            nickname: "tester".to_owned(),
+            avatar_url: None,
+        };
+        let mut liked = UserPlaylist::liked();
+        liked.track_count = 2;
+        cache.replace_directory(10001, profile, vec![liked.clone()], 100);
+        assert!(cache.replace_playlist(10001, liked, vec![track("first")], true, 1, 100, 1,));
+
+        let ttl = Duration::from_secs(300);
+        assert_eq!(cache.track_liked(10001, "first", 399, ttl), Some(true));
+        assert_eq!(cache.track_liked(10001, "missing", 399, ttl), None);
+        assert_eq!(cache.track_liked(10001, "first", 400, ttl), None);
+
+        cache.set_track_liked(10001, track("second"), true, 200);
+        let snapshot = cache
+            .cached_playlist(10001, &UserPlaylistId::Liked)
+            .expect("liked playlist snapshot");
+        assert_eq!(
+            snapshot
+                .tracks
+                .iter()
+                .map(|track| track.mid.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "first"]
+        );
+        assert_eq!(snapshot.next_offset, 2);
+
+        cache.set_track_liked(10001, track("first"), false, 201);
+        let snapshot = cache
+            .cached_playlist(10001, &UserPlaylistId::Liked)
+            .expect("updated liked playlist snapshot");
+        assert_eq!(snapshot.tracks.len(), 1);
+        assert_eq!(snapshot.tracks[0].mid, "second");
+        assert_eq!(snapshot.next_offset, 1);
+        assert_eq!(
+            cache.directories[0].playlists[0].track_count,
+            snapshot.playlist.track_count
         );
     }
 

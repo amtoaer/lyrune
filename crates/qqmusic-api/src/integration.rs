@@ -203,6 +203,8 @@ pub struct SearchResults {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Track {
     pub song_id: Option<u64>,
+    #[serde(default)]
+    pub song_type: u64,
     pub mid: String,
     pub media_mid: Option<String>,
     pub standard_size_bytes: Option<u64>,

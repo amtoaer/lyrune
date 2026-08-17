@@ -46,6 +46,20 @@ impl PlaylistListDelegate {
         }
     }
 
+    pub fn update_liked_track_count(&mut self, liked: bool) {
+        if let Some(playlist) = self
+            .playlists
+            .iter_mut()
+            .find(|playlist| playlist.id == UserPlaylistId::Liked)
+        {
+            playlist.track_count = if liked {
+                playlist.track_count.saturating_add(1)
+            } else {
+                playlist.track_count.saturating_sub(1)
+            };
+        }
+    }
+
     pub fn set_selected(&mut self, index: usize) {
         self.selected_index = Some(IndexPath::new(index));
     }
@@ -303,6 +317,23 @@ impl TrackTableDelegate {
         self.has_more = has_more;
         self.show_added_at = self.tracks.iter().any(|track| track.added_at.is_some());
         self.columns = track_columns(self.show_added_at, self.compact);
+    }
+
+    pub fn set_track_liked(&mut self, mut track: Track, liked: bool, added_at: i64) -> bool {
+        let index = self.tracks.iter().position(|item| item.mid == track.mid);
+        match (liked, index) {
+            (true, None) => {
+                track.added_at = Some(added_at);
+                self.tracks.insert(0, track);
+            }
+            (false, Some(index)) => {
+                self.tracks.remove(index);
+            }
+            _ => return false,
+        }
+        self.show_added_at = self.tracks.iter().any(|track| track.added_at.is_some());
+        self.columns = track_columns(self.show_added_at, self.compact);
+        true
     }
 
     pub fn set_loading(&mut self, loading: bool) {

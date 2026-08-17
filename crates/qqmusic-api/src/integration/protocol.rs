@@ -662,6 +662,61 @@ impl ProtocolClient {
             .tracks)
     }
 
+    pub async fn track_liked(&self, credential: &QqCredential, mid: &str) -> Result<bool> {
+        let data = self
+            .call(
+                "music.musicasset.SongFavRead",
+                "IsSongFanByMid",
+                json!({ "v_songMid": [mid] }),
+                credential,
+                None,
+            )
+            .await
+            .with_context(|| format!("无法读取歌曲 {mid} 的喜欢状态"))?;
+        parse_track_liked(&data, mid).context("QQ 音乐喜欢状态响应格式发生了变化")
+    }
+
+    pub async fn set_track_liked(
+        &self,
+        credential: &QqCredential,
+        track: &Track,
+        liked: bool,
+    ) -> Result<()> {
+        let song_id = track
+            .song_id
+            .with_context(|| format!("歌曲“{}”缺少数字 ID，无法修改喜欢状态", track.title))?;
+        let method = if liked { "AddSonglist" } else { "DelSonglist" };
+        let data = self
+            .call(
+                "music.musicasset.PlaylistDetailWrite",
+                method,
+                json!({
+                    "dirId": 201,
+                    "tid": 0,
+                    "bFmtUtf8": true,
+                    "v_songInfo": [{
+                        "songId": song_id,
+                        "songType": track.song_type,
+                    }],
+                }),
+                credential,
+                None,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "无法{}歌曲“{}”",
+                    if liked { "喜欢" } else { "取消喜欢" },
+                    track.title
+                )
+            })?;
+        let ret_code = integer_field(&data, &["retCode", "ret_code"]).unwrap_or_default();
+        if ret_code != 0 {
+            bail!("QQ 音乐歌单写入接口返回错误码 {ret_code}");
+        }
+        Ok(())
+    }
+
     pub async fn playback_url(
         &self,
         credential: &QqCredential,
@@ -1153,6 +1208,7 @@ fn parse_track(value: &Value) -> Result<Track> {
 
     Ok(Track {
         song_id: integer_field(value, &["id", "songid", "songId"]),
+        song_type: integer_field(value, &["type", "songtype", "songType"]).unwrap_or_default(),
         mid,
         media_mid,
         standard_size_bytes,
@@ -1705,6 +1761,27 @@ fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
         })
 }
 
+fn parse_track_liked(value: &Value, mid: &str) -> Option<bool> {
+    value
+        .get("m_fan")
+        .and_then(Value::as_object)
+        .and_then(|liked| liked.get(mid))
+        .and_then(bool_value)
+}
+
+fn bool_value(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::Number(value) => value.as_u64().map(|value| value != 0),
+        Value::String(value) => match value.as_str() {
+            "1" | "true" | "TRUE" => Some(true),
+            "0" | "false" | "FALSE" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn value_to_string(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
@@ -1846,6 +1923,7 @@ mod tests {
     #[test]
     fn parses_liked_track_and_preserves_media_mid() {
         let track = parse_track(&json!({
+            "type": 13,
             "mid": "song-mid",
             "title": "A Song",
             "interval": 245,
@@ -1859,6 +1937,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(track.mid, "song-mid");
+        assert_eq!(track.song_type, 13);
         assert_eq!(track.media_mid.as_deref(), Some("different-media-mid"));
         assert_eq!(track.artists, "Artist A / Artist B");
         assert_eq!(
@@ -1890,6 +1969,18 @@ mod tests {
         assert_eq!(
             playback_filename(&track_without_media_mid, Quality::High),
             "M800song-midsong-mid.mp3"
+        );
+    }
+
+    #[test]
+    fn parses_track_liked_response() {
+        assert_eq!(
+            parse_track_liked(&json!({ "m_fan": { "song-mid": true } }), "song-mid"),
+            Some(true)
+        );
+        assert_eq!(
+            parse_track_liked(&json!({ "m_fan": { "song-mid": 0 } }), "song-mid"),
+            Some(false)
         );
     }
 

@@ -943,6 +943,7 @@ mod tests {
     fn track(mid: &str, media_mid: &str, title: &str) -> Track {
         Track {
             song_id: None,
+            song_type: 0,
             mid: mid.to_owned(),
             media_mid: Some(media_mid.to_owned()),
             standard_size_bytes: None,

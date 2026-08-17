@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -519,6 +520,9 @@ pub struct LyruneView {
     progress_hover_fraction: Option<f32>,
     settings: AppSettings,
     library_cache: LibraryCache,
+    liked_tracks: HashMap<String, bool>,
+    liked_state_loading: HashSet<String>,
+    liked_toggle_loading: HashSet<String>,
     shuffle: bool,
     repeat_mode: RepeatMode,
     pending_playback_restore: Option<PersistedPlayback>,
@@ -750,6 +754,9 @@ impl LyruneView {
             progress_hover_fraction: None,
             settings,
             library_cache,
+            liked_tracks: HashMap::new(),
+            liked_state_loading: HashSet::new(),
+            liked_toggle_loading: HashSet::new(),
             shuffle: false,
             repeat_mode: RepeatMode::Off,
             pending_playback_restore,
@@ -2458,6 +2465,7 @@ impl LyruneView {
         let generation = self.play_generation;
         self.current_track = Some(index);
         self.loading_track = Some(index);
+        self.ensure_track_like_state(track.mid.clone(), cx);
         self.loading_autoplay = autoplay;
         self.resolving_qualities = reused_urls.is_none() && known_qualities.is_empty();
         self.playback_started = false;
@@ -3179,6 +3187,203 @@ impl LyruneView {
         })
     }
 
+    fn ensure_track_like_state(&mut self, mid: String, cx: &mut Context<Self>) {
+        if self.liked_tracks.contains_key(&mid) || self.liked_state_loading.contains(&mid) {
+            return;
+        }
+        let Some(credential) = self.credential.clone() else {
+            return;
+        };
+        if let Some(liked) = self.library_cache.track_liked(
+            credential.music_id,
+            &mid,
+            unix_timestamp_secs(),
+            LIBRARY_CACHE_TTL,
+        ) {
+            self.liked_tracks.insert(mid, liked);
+            cx.notify();
+            return;
+        }
+        let Some(client) = self.protocol_client.clone() else {
+            return;
+        };
+        self.liked_state_loading.insert(mid.clone());
+        let account_id = credential.music_id;
+        let request_mid = mid.clone();
+        let (sender, receiver) = async_channel::bounded(1);
+        drop(RUNTIME.spawn(async move {
+            let result = client.track_liked(&credential, &request_mid).await;
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.liked_state_loading.remove(&mid);
+                if this
+                    .credential
+                    .as_ref()
+                    .is_none_or(|credential| credential.music_id != account_id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(liked) => {
+                        this.liked_tracks.insert(mid.clone(), liked);
+                    }
+                    Err(error) => {
+                        if this
+                            .current_track_data()
+                            .is_some_and(|track| track.mid == mid)
+                        {
+                            this.status = StatusMessage::error(format!(
+                                "读取当前歌曲的喜欢状态失败：{error:#}"
+                            ));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn toggle_current_track_liked(&mut self, cx: &mut Context<Self>) {
+        let Some(track) = self.current_track_data().cloned() else {
+            return;
+        };
+        let mid = track.mid.clone();
+        if self.liked_toggle_loading.contains(&mid) {
+            return;
+        }
+        let Some(previous) = self.liked_tracks.get(&mid).copied() else {
+            self.ensure_track_like_state(mid, cx);
+            return;
+        };
+        let Some(credential) = self.credential.clone() else {
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            self.status = StatusMessage::error("QQ 音乐客户端不可用");
+            cx.notify();
+            return;
+        };
+        if track.song_id.is_none() {
+            self.status = StatusMessage::error(format!(
+                "歌曲“{}”缺少数字 ID，暂时无法修改喜欢状态",
+                track.title
+            ));
+            cx.notify();
+            return;
+        }
+        let liked = !previous;
+        let account_id = credential.music_id;
+        self.liked_tracks.insert(mid.clone(), liked);
+        self.liked_toggle_loading.insert(mid.clone());
+        cx.notify();
+
+        let request_track = track.clone();
+        let (sender, receiver) = async_channel::bounded(1);
+        drop(RUNTIME.spawn(async move {
+            let result = client
+                .set_track_liked(&credential, &request_track, liked)
+                .await;
+            let _ = sender.send(result).await;
+        }));
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.recv().await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.liked_toggle_loading.remove(&mid);
+                if this
+                    .credential
+                    .as_ref()
+                    .is_none_or(|credential| credential.music_id != account_id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        this.apply_track_liked(account_id, track.clone(), liked, cx);
+                        this.status = StatusMessage::info(if liked {
+                            format!("已喜欢“{}”", track.title)
+                        } else {
+                            format!("已取消喜欢“{}”", track.title)
+                        });
+                    }
+                    Err(error) => {
+                        if this.liked_tracks.get(&mid) == Some(&liked) {
+                            this.liked_tracks.insert(mid.clone(), previous);
+                        }
+                        this.status = StatusMessage::error(format!(
+                            "{}失败：{error:#}",
+                            if liked {
+                                "喜欢歌曲"
+                            } else {
+                                "取消喜欢"
+                            }
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_track_liked(
+        &mut self,
+        account_id: u64,
+        track: Track,
+        liked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let now = unix_timestamp_secs();
+        self.library_cache
+            .set_track_liked(account_id, track.clone(), liked, now);
+        self.playlist_list.update(cx, |list, cx| {
+            list.delegate_mut().update_liked_track_count(liked);
+            cx.notify();
+        });
+        if self
+            .selected_playlist
+            .as_ref()
+            .is_none_or(|playlist| playlist.id != UserPlaylistId::Liked)
+        {
+            return;
+        }
+        if let Some(playlist) = &mut self.selected_playlist {
+            playlist.track_count = if liked {
+                playlist.track_count.saturating_add(1)
+            } else {
+                playlist.track_count.saturating_sub(1)
+            };
+        }
+        let page_changed = self.track_table.update(cx, |table, cx| {
+            let changed = table
+                .delegate_mut()
+                .set_track_liked(track, liked, now as i64);
+            if changed {
+                table.clear_selection(cx);
+                table.refresh(cx);
+            }
+            cx.notify();
+            changed
+        });
+        if page_changed {
+            self.page_offset = if liked {
+                self.page_offset.saturating_add(1)
+            } else {
+                self.page_offset.saturating_sub(1)
+            };
+        }
+        self.sync_table_playback_state(cx);
+    }
+
     fn current_duration(&self) -> Option<Duration> {
         self.current_track_data()
             .map(|track| Duration::from_secs(track.duration_seconds))
@@ -3196,6 +3401,9 @@ impl LyruneView {
         }
         self.account_state = AccountState::SignedOut;
         self.credential = None;
+        self.liked_tracks.clear();
+        self.liked_state_loading.clear();
+        self.liked_toggle_loading.clear();
         self.profile = None;
         self.qr_image = None;
         self.library_loading = false;
@@ -5203,9 +5411,17 @@ impl LyruneView {
                 }
             })
         });
+        let metadata_max_width = if narrow {
+            px(100.)
+        } else if compact {
+            px(138.)
+        } else {
+            px(202.)
+        };
         let title = div()
             .id("player-track-title")
-            .w_full()
+            .self_start()
+            .max_w(metadata_max_width)
             .truncate()
             .font_medium()
             .when_some(album_link, |this, album| {
@@ -5217,6 +5433,10 @@ impl LyruneView {
                     }))
             })
             .child(title_text);
+        let liked = track
+            .as_ref()
+            .and_then(|track| self.liked_tracks.get(&track.mid))
+            .copied();
         let artists = match track.as_ref() {
             Some(track) if !track.artist_details.is_empty() => {
                 let mut links = Vec::with_capacity(track.artist_details.len() * 2 - 1);
@@ -5247,7 +5467,8 @@ impl LyruneView {
                     );
                 }
                 h_flex()
-                    .w_full()
+                    .self_start()
+                    .max_w(metadata_max_width)
                     .min_w_0()
                     .overflow_hidden()
                     .text_sm()
@@ -5255,14 +5476,16 @@ impl LyruneView {
                     .into_any_element()
             }
             Some(track) => div()
-                .w_full()
+                .self_start()
+                .max_w(metadata_max_width)
                 .truncate()
                 .text_sm()
                 .text_color(theme.secondary_foreground)
                 .child(track.artists.clone())
                 .into_any_element(),
             None => div()
-                .w_full()
+                .self_start()
+                .max_w(metadata_max_width)
                 .truncate()
                 .text_sm()
                 .text_color(theme.secondary_foreground)
@@ -5287,12 +5510,47 @@ impl LyruneView {
                     .gap_3()
                     .child(cover)
                     .child(
-                        v_flex()
+                        h_flex()
                             .min_w_0()
-                            .flex_1()
-                            .gap_1()
-                            .child(title)
-                            .child(artists),
+                            .gap(px(18.))
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .max_w(metadata_max_width)
+                                    .gap_1()
+                                    .child(title)
+                                    .child(artists),
+                            )
+                            .when(has_track, |info| {
+                                info.child(
+                                    Button::new("like-current-track")
+                                        .ghost()
+                                        .rounded(px(999.))
+                                        .size(px(30.))
+                                        .p_0()
+                                        .tooltip(if liked == Some(true) {
+                                            "取消喜欢"
+                                        } else {
+                                            "喜欢"
+                                        })
+                                        .child(media_icon_hsla(
+                                            if liked == Some(true) {
+                                                MediaIcon::HeartFilled
+                                            } else {
+                                                MediaIcon::Heart
+                                            },
+                                            if liked == Some(true) {
+                                                theme.danger
+                                            } else {
+                                                theme.secondary_foreground
+                                            },
+                                            px(18.),
+                                        ))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_current_track_liked(cx)
+                                        })),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -5746,6 +6004,7 @@ mod tests {
     fn track(mid: &str) -> Track {
         Track {
             song_id: None,
+            song_type: 0,
             mid: mid.to_owned(),
             media_mid: None,
             standard_size_bytes: None,

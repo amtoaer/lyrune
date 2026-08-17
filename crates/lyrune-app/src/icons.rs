@@ -36,6 +36,8 @@ pub enum MediaIcon {
     SkipForward,
     Repeat,
     RepeatOne,
+    Heart,
+    HeartFilled,
     Volume,
     VolumeMuted,
 }
@@ -85,6 +87,12 @@ impl MediaIcon {
             }
             Self::RepeatOne => {
                 r#"<path d="m17 2 4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="m7 22-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/><path d="M11 10h1v4"/>"#
+            }
+            Self::Heart => {
+                r#"<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.8-7.5 1.1-1.1a5.5 5.5 0 0 0-.1-7.8Z"/>"#
+            }
+            Self::HeartFilled => {
+                r#"<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.8-7.5 1.1-1.1a5.5 5.5 0 0 0-.1-7.8Z" fill="currentColor"/>"#
             }
             Self::Volume => {
                 r#"<path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/>"#

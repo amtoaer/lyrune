@@ -7509,6 +7509,7 @@ impl LyruneView {
                 .child(
                     img(cached_image_source(url))
                         .size_full()
+                        .rounded(px(10.))
                         .object_fit(ObjectFit::Cover),
                 )
                 .child(

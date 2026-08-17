@@ -2432,7 +2432,6 @@ impl LyruneView {
         self.loading_autoplay = autoplay;
         self.resolving_qualities = reused_urls.is_none() && known_qualities.is_empty();
         self.playback_started = false;
-        self.active_quality = desired_quality;
         self.position = resume_at;
         let progress = progress_fraction(resume_at, Duration::from_secs(track.duration_seconds));
         self.progress_slider.update(cx, |slider, cx| {
@@ -2551,11 +2550,9 @@ impl LyruneView {
                         }
                         PlaybackLoadEvent::Options(available_qualities) => {
                             this.resolving_qualities = false;
-                            let loading_quality =
-                                Quality::best_available(&available_qualities, desired_quality);
+                            let has_available_quality = !available_qualities.is_empty();
                             this.available_qualities = available_qualities;
-                            if let Some(quality) = loading_quality {
-                                this.active_quality = quality;
+                            if has_available_quality {
                                 this.status = StatusMessage::info(format!("正在缓冲“{title}”…"));
                             } else {
                                 this.status =
@@ -4145,24 +4142,8 @@ impl LyruneView {
             })
             .collect::<Vec<_>>();
         let recommendation_loading = self.home_recommendation_loading.is_some();
-        let radar_loading = self.home_recommendation_loading == Some(RecommendationKind::Radar);
-        let guess_loading = self.home_recommendation_loading == Some(RecommendationKind::Guess);
-        let radar_icon = if radar_loading {
-            Spinner::new()
-                .with_size(px(24.))
-                .color(theme.primary)
-                .into_any_element()
-        } else {
-            media_icon_hsla(MediaIcon::Radar, theme.primary, px(25.))
-        };
-        let guess_icon = if guess_loading {
-            Spinner::new()
-                .with_size(px(24.))
-                .color(theme.primary)
-                .into_any_element()
-        } else {
-            media_icon_hsla(MediaIcon::Headphones, theme.primary, px(25.))
-        };
+        let radar_icon = media_icon_hsla(MediaIcon::Radar, theme.primary, px(25.));
+        let guess_icon = media_icon_hsla(MediaIcon::Headphones, theme.primary, px(25.));
         let recommendation_cards = [
             Button::new("home-radar")
                 .ghost()
@@ -4172,6 +4153,11 @@ impl LyruneView {
                 .rounded(px(12.))
                 .bg(theme.muted.opacity(0.7))
                 .tooltip("播放专属雷达")
+                .when(recommendation_loading, |button| {
+                    button
+                        .bg(theme.muted.opacity(0.7))
+                        .text_color(theme.secondary_foreground)
+                })
                 .disabled(recommendation_loading)
                 .child(
                     h_flex()
@@ -4214,6 +4200,11 @@ impl LyruneView {
                 .rounded(px(12.))
                 .bg(theme.muted.opacity(0.7))
                 .tooltip("播放猜你喜欢")
+                .when(recommendation_loading, |button| {
+                    button
+                        .bg(theme.muted.opacity(0.7))
+                        .text_color(theme.secondary_foreground)
+                })
                 .disabled(recommendation_loading)
                 .child(
                     h_flex()
@@ -4889,7 +4880,17 @@ impl LyruneView {
                     .text_size(px(11.))
                     .rounded(px(7.))
                     .tooltip("切换音质")
-                    .disabled(!has_track || self.available_qualities.is_empty())
+                    .when(self.loading_track.is_some(), |button| {
+                        button
+                            .bg(theme.input_background())
+                            .border_color(theme.input)
+                            .text_color(theme.button_foreground)
+                    })
+                    .disabled(
+                        !has_track
+                            || self.loading_track.is_some()
+                            || self.available_qualities.is_empty(),
+                    )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.quality_menu_open = !this.quality_menu_open;
                         this.account_menu_open = false;
@@ -4940,6 +4941,12 @@ impl LyruneView {
         let quality_selector = self.render_quality_selector(has_track, cx);
         let theme = cx.theme();
         let is_playing = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
+        let loading = self.loading_track.is_some();
+        let show_pause = if loading {
+            self.loading_autoplay
+        } else {
+            is_playing
+        };
         let display_position = self.seek_preview.unwrap_or(self.position);
         let duration = self.current_duration().unwrap_or_default();
         let icon_foreground = self.settings.color_theme.icon_foreground();
@@ -5161,15 +5168,10 @@ impl LyruneView {
                                     .rounded(px(999.))
                                     .size(px(48.))
                                     .p_0()
-                                    .tooltip(if self.loading_track.is_some() {
-                                        "正在加载"
-                                    } else if is_playing {
-                                        "暂停"
-                                    } else {
-                                        "播放"
-                                    })
+                                    .tooltip(if show_pause { "暂停" } else { "播放" })
+                                    .when(loading, |button| button.bg(theme.button_primary))
                                     .disabled(
-                                        self.loading_track.is_some()
+                                        loading
                                             || (self.current_track.is_none()
                                                 && self
                                                     .track_table
@@ -5179,9 +5181,7 @@ impl LyruneView {
                                                     .is_empty()),
                                     )
                                     .child(media_icon(
-                                        if self.loading_track.is_some() {
-                                            MediaIcon::Loading
-                                        } else if is_playing {
+                                        if show_pause {
                                             MediaIcon::Pause
                                         } else {
                                             MediaIcon::Play

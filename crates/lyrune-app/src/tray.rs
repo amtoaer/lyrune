@@ -148,7 +148,7 @@ mod platform {
             let show_id = show.id().clone();
             let quit_id = quit.id().clone();
             let menu_commands = commands.clone();
-            MenuEvent::set_event_handler(Some(move |event| {
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 let command = if event.id == show_id {
                     Some(TrayCommand::Show)
                 } else if event.id == quit_id {

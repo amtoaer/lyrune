@@ -3642,9 +3642,10 @@ impl LyruneView {
             .child(
                 h_flex()
                     .h(px(64.))
+                    .mb_2()
                     .px_5()
                     .gap_3()
-                    .child(lyrune_icon(px(34.)))
+                    .child(lyrune_icon(px(42.)))
                     .child(
                         v_flex()
                             .gap_0p5()

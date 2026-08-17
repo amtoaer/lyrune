@@ -96,8 +96,12 @@ fn format_playback_time(duration: Duration) -> String {
     }
 }
 
-fn single_line_summary(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+fn playlist_title_is_long(title: &str) -> bool {
+    title
+        .chars()
+        .map(|character| if character.is_ascii() { 1 } else { 2 })
+        .sum::<usize>()
+        > 24
 }
 
 #[cfg(target_os = "linux")]
@@ -3562,10 +3566,40 @@ impl LyruneView {
         });
         let owner_identity = owner.zip(owner_avatar_url);
         let has_owner = owner_identity.is_some();
-        let description = single_line_summary(&playlist.description);
         let has_tracks = !self.track_table.read(cx).delegate().tracks().is_empty();
+        let long_title = playlist_title_is_long(&playlist.title);
+        let title_size = if long_title {
+            if narrow {
+                px(22.)
+            } else if compact {
+                px(28.)
+            } else {
+                px(36.)
+            }
+        } else if narrow {
+            px(28.)
+        } else if compact {
+            px(34.)
+        } else {
+            px(44.)
+        };
+        let title_line_height = if long_title {
+            if narrow {
+                px(29.)
+            } else if compact {
+                px(36.)
+            } else {
+                px(46.)
+            }
+        } else if narrow {
+            px(36.)
+        } else if compact {
+            px(44.)
+        } else {
+            px(56.)
+        };
         div()
-            .h(if narrow {
+            .min_h(if narrow {
                 px(190.)
             } else if compact {
                 px(214.)
@@ -3573,12 +3607,13 @@ impl LyruneView {
                 px(246.)
             })
             .w_full()
+            .flex_shrink_0()
             .px_6()
             .pt_4()
             .pb_5()
             .child(
                 h_flex()
-                    .size_full()
+                    .w_full()
                     .items_end()
                     .gap(if narrow {
                         px(16.)
@@ -3614,37 +3649,15 @@ impl LyruneView {
                                 div()
                                     .min_w_0()
                                     .w_full()
-                                    .truncate()
-                                    .text_size(if narrow {
-                                        px(34.)
-                                    } else if compact {
-                                        px(40.)
-                                    } else {
-                                        px(52.)
-                                    })
-                                    .line_height(if narrow {
-                                        px(45.)
-                                    } else if compact {
-                                        px(52.)
-                                    } else {
-                                        px(68.)
-                                    })
+                                    .when_else(
+                                        long_title,
+                                        |title| title.line_clamp(3),
+                                        |title| title.truncate(),
+                                    )
+                                    .text_size(title_size)
+                                    .line_height(title_line_height)
                                     .font_semibold()
                                     .child(playlist.title),
-                            )
-                            .when(
-                                playlist.id != UserPlaylistId::Liked && !description.is_empty(),
-                                |this| {
-                                    this.child(
-                                        div()
-                                            .w_full()
-                                            .max_w(px(720.))
-                                            .truncate()
-                                            .text_sm()
-                                            .text_color(theme.secondary_foreground)
-                                            .child(description),
-                                    )
-                                },
                             )
                             .child(
                                 h_flex()
@@ -3699,6 +3712,7 @@ impl LyruneView {
                                                 ))
                                                 .child("播放全部"),
                                         )
+                                        .when(!has_tracks, |button| button.bg(theme.button_primary))
                                         .disabled(!has_tracks)
                                         .on_click(
                                             cx.listener(|this, _, _, cx| this.select_track(0, cx)),
@@ -3866,6 +3880,7 @@ impl LyruneView {
                                                 ))
                                                 .child("播放全部"),
                                         )
+                                        .when(!has_tracks, |button| button.bg(theme.button_primary))
                                         .disabled(!has_tracks)
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.select_artist_track(0, cx)
@@ -4408,7 +4423,13 @@ impl LyruneView {
                 .px_3()
                 .rounded(px(10.))
                 .selected(is_current)
-                .tooltip(format!("播放 {title}"))
+                .tooltip(format!(
+                    "{} {title}",
+                    match source {
+                        SongRowSource::Search => "双击播放",
+                        SongRowSource::Artist => "播放",
+                    }
+                ))
                 .child(
                     h_flex()
                         .size_full()
@@ -4491,10 +4512,15 @@ impl LyruneView {
                                 .child(duration),
                         ),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| match source {
-                    SongRowSource::Search => this.select_search_track(index, cx),
-                    SongRowSource::Artist => this.select_artist_track(index, cx),
-                }))
+                .on_click(
+                    cx.listener(move |this, event: &ClickEvent, _, cx| match source {
+                        SongRowSource::Search if event.click_count() == 2 => {
+                            this.select_search_track(index, cx);
+                        }
+                        SongRowSource::Search => {}
+                        SongRowSource::Artist => this.select_artist_track(index, cx),
+                    }),
+                )
             })
             .collect::<Vec<_>>();
         v_flex().w_full().gap_1().children(rows).into_any_element()
@@ -5708,7 +5734,8 @@ impl Render for LyruneView {
 mod tests {
     use super::{
         NavigationHistory, NavigationPage, PlaylistScrollPosition, SearchCategory,
-        format_playback_time, insert_track_after_current, resolved_playlist_scroll_row,
+        format_playback_time, insert_track_after_current, playlist_title_is_long,
+        resolved_playlist_scroll_row,
     };
     use gpui::{Pixels, px};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
@@ -5823,17 +5850,17 @@ mod tests {
     }
 
     #[test]
-    fn playlist_description_is_collapsed_to_one_line() {
-        assert_eq!(
-            super::single_line_summary("first line\n second\tline\r\nthird"),
-            "first line second line third"
-        );
-    }
-
-    #[test]
     fn playback_time_uses_compact_player_formatting() {
         assert_eq!(format_playback_time(Duration::from_secs(137)), "2:17");
         assert_eq!(format_playback_time(Duration::from_secs(3_661)), "1:01:01");
+    }
+
+    #[test]
+    fn playlist_title_length_accounts_for_wide_characters() {
+        assert!(!playlist_title_is_long("123456789012345678901234"));
+        assert!(playlist_title_is_long("1234567890123456789012345"));
+        assert!(!playlist_title_is_long("一二三四五六七八九十一二"));
+        assert!(playlist_title_is_long("一二三四五六七八九十一二三"));
     }
 
     #[test]

@@ -1390,9 +1390,7 @@ fn playlist_from_detail(data: &Value, fallback: UserPlaylist) -> UserPlaylist {
     let mut playlist =
         parse_playlist_summary(&value, fallback.id.clone()).unwrap_or_else(|| fallback.clone());
     playlist.title = fallback.title;
-    if playlist.cover_url.is_none() {
-        playlist.cover_url = fallback.cover_url;
-    }
+    playlist.cover_url = fallback.cover_url.or(playlist.cover_url);
     if playlist.description.is_empty() {
         playlist.description = fallback.description;
     }
@@ -2142,6 +2140,38 @@ mod tests {
         assert_eq!(playlist.title, "amtoaer的每日30首");
         assert_eq!(playlist.description, "每日更新");
         assert_eq!(playlist.track_count, 30);
+    }
+
+    #[test]
+    fn playlist_detail_only_fills_a_missing_summary_cover() {
+        let detail = json!({
+            "dirinfo": {
+                "dirName": "今日歌单",
+                "bigpicUrl": "http://example.test/detail.jpg"
+            }
+        });
+        let mut summary = UserPlaylist {
+            id: UserPlaylistId::Recommended { diss_id: 30 },
+            title: "今日歌单".to_owned(),
+            cover_url: Some("https://example.test/summary.jpg".to_owned()),
+            description: String::new(),
+            owner: String::new(),
+            owner_avatar_url: None,
+            track_count: 30,
+        };
+
+        let playlist = playlist_from_detail(&detail, summary.clone());
+        assert_eq!(
+            playlist.cover_url.as_deref(),
+            Some("https://example.test/summary.jpg")
+        );
+
+        summary.cover_url = None;
+        let playlist = playlist_from_detail(&detail, summary);
+        assert_eq!(
+            playlist.cover_url.as_deref(),
+            Some("https://example.test/detail.jpg")
+        );
     }
 
     #[test]

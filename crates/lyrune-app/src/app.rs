@@ -3,6 +3,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use gpui::{prelude::*, *};
+use gpui_base::{
+    Slider as BaseSlider, SliderIndicator, SliderThumb, SliderTrack,
+    motion::{Transition, transition},
+};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IndexPath, ResizableState, Selectable as _, Sizable as _,
     StyledExt as _,
@@ -16,7 +20,6 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     spinner::Spinner,
     table::{DataTable, TableEvent, TableState},
-    tooltip::Tooltip,
     v_flex,
 };
 use tokio::runtime::{Builder, Runtime};
@@ -76,6 +79,20 @@ fn progress_fraction(position: Duration, duration: Duration) -> f32 {
         0.
     } else {
         (position.as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.)
+    }
+}
+
+fn format_playback_time(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds >= 60 * 60 {
+        format!(
+            "{}:{:02}:{:02}",
+            seconds / (60 * 60),
+            seconds / 60 % 60,
+            seconds % 60
+        )
+    } else {
+        format!("{}:{:02}", seconds / 60, seconds % 60)
     }
 }
 
@@ -494,6 +511,8 @@ pub struct LyruneView {
     quality_menu_open: bool,
     position: Duration,
     seek_preview: Option<Duration>,
+    progress_hovered: bool,
+    progress_hover_fraction: Option<f32>,
     settings: AppSettings,
     library_cache: LibraryCache,
     shuffle: bool,
@@ -723,6 +742,8 @@ impl LyruneView {
             quality_menu_open: false,
             position: Duration::ZERO,
             seek_preview: None,
+            progress_hovered: false,
+            progress_hover_fraction: None,
             settings,
             library_cache,
             shuffle: false,
@@ -2433,6 +2454,8 @@ impl LyruneView {
         self.resolving_qualities = reused_urls.is_none() && known_qualities.is_empty();
         self.playback_started = false;
         self.position = resume_at;
+        self.progress_hovered = false;
+        self.progress_hover_fraction = None;
         let progress = progress_fraction(resume_at, Duration::from_secs(track.duration_seconds));
         self.progress_slider.update(cx, |slider, cx| {
             *slider = progress_slider_state(progress);
@@ -4930,15 +4953,181 @@ impl LyruneView {
             .into_any_element()
     }
 
+    fn render_player_progress(
+        &mut self,
+        has_track: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let percentage = self.progress_slider.read(cx).percentage().end;
+        let duration = self.current_duration().unwrap_or_default();
+        let interactive = has_track && self.playback_started && self.loading_track.is_none();
+        let bar_color = theme.slider_bar;
+        let thumb_color = theme.slider_thumb;
+        let hover_fraction = interactive
+            .then_some(self.progress_hover_fraction)
+            .flatten();
+        let hover_visible = self.progress_hovered && hover_fraction.is_some();
+        let hover_opacity = transition(
+            ("player-progress", "hover-opacity"),
+            if hover_visible { 1. } else { 0. },
+            Transition::new(Duration::from_millis(if hover_visible { 120 } else { 170 })),
+            window,
+            cx,
+        );
+
+        let track = SliderTrack::new(&self.progress_slider)
+            .disabled(!interactive)
+            .h(px(20.))
+            .w_full()
+            .child(
+                SliderIndicator::new(&self.progress_slider)
+                    .relative()
+                    .h(px(4.))
+                    .w_full()
+                    .bg(theme.border)
+                    .active(|this| this.bg(bar_color.opacity(0.35)))
+                    .child(
+                        div()
+                            .absolute()
+                            .h_full()
+                            .left_0()
+                            .right(relative(1. - percentage))
+                            .bg(bar_color),
+                    )
+                    .when(has_track, |indicator| {
+                        indicator.child(
+                            SliderThumb::new(&self.progress_slider)
+                                .disabled(!interactive)
+                                .absolute()
+                                .top(px(-6.))
+                                .left(relative(percentage))
+                                .ml(-px(8.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(bar_color.opacity(0.5))
+                                .size_4()
+                                .p(px(1.))
+                                .child(div().size_full().rounded_full().bg(thumb_color)),
+                        )
+                    }),
+            );
+        let control = BaseSlider::new(&self.progress_slider)
+            .disabled(!interactive)
+            .h(px(20.))
+            .w_full()
+            .child(track);
+
+        let current_time = format_playback_time(self.position.min(duration));
+        let total_time = format_playback_time(duration);
+        div()
+            .id("player-progress")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(20.))
+            .when(interactive, |layer| {
+                layer
+                    .cursor_pointer()
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                        let bounds = this.progress_slider.read(cx).bounds();
+                        if bounds.size.width <= px(0.) {
+                            return;
+                        }
+                        let inner =
+                            (event.position.x - bounds.left()).clamp(px(0.), bounds.size.width);
+                        this.progress_hover_fraction = Some(inner / bounds.size.width);
+                        this.progress_hovered = true;
+                        cx.notify();
+                    }))
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        if !hovered && this.progress_hovered {
+                            this.progress_hovered = false;
+                            cx.notify();
+                        }
+                    }))
+            })
+            .child(control)
+            .when_some(hover_fraction, |layer, fraction| {
+                let tooltip = div()
+                    .absolute()
+                    .top(px(-36.))
+                    .w(px(64.))
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.popover)
+                    .shadow_md()
+                    .when(hover_visible, |tooltip| tooltip.occlude())
+                    .font_family(design::system_monospace_font_family())
+                    .text_xs()
+                    .font_medium()
+                    .text_color(theme.primary)
+                    .child(format_playback_time(duration.mul_f32(fraction)));
+                let tooltip = if fraction <= 0.03 {
+                    tooltip.left_0()
+                } else if fraction >= 0.97 {
+                    tooltip.right_0()
+                } else {
+                    tooltip.left(relative(fraction)).ml(-px(32.))
+                };
+                layer.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(20.))
+                        .opacity(hover_opacity)
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(-27.))
+                                .left_0()
+                                .w(px(64.))
+                                .text_center()
+                                .font_family(design::system_monospace_font_family())
+                                .text_xs()
+                                .text_color(theme.secondary_foreground)
+                                .child(current_time),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(-27.))
+                                .right_0()
+                                .w(px(64.))
+                                .text_center()
+                                .font_family(design::system_monospace_font_family())
+                                .text_xs()
+                                .text_color(theme.secondary_foreground)
+                                .child(total_time),
+                        )
+                        .child(tooltip),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_player_bar(
         &mut self,
         compact: bool,
         narrow: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let track = self.current_track_data().cloned();
         let has_track = track.is_some();
         let quality_selector = self.render_quality_selector(has_track, cx);
+        let progress = self.render_player_progress(has_track, window, cx);
         let theme = cx.theme();
         let is_playing = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
         let loading = self.loading_track.is_some();
@@ -4947,8 +5136,6 @@ impl LyruneView {
         } else {
             is_playing
         };
-        let display_position = self.seek_preview.unwrap_or(self.position);
-        let duration = self.current_duration().unwrap_or_default();
         let icon_foreground = self.settings.color_theme.icon_foreground();
         let icon_accent = self.settings.color_theme.icon_accent();
         let cover_size = if narrow { px(44.) } else { px(52.) };
@@ -4994,11 +5181,9 @@ impl LyruneView {
             .truncate()
             .font_medium()
             .when_some(album_link, |this, album| {
-                let tooltip = format!("查看专辑：{}", album.title);
                 let hover_color = theme.primary;
                 this.cursor_pointer()
                     .hover(move |style| style.text_color(hover_color))
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_home_playlist(album.clone().into_playlist(), window, cx);
                     }))
@@ -5018,7 +5203,6 @@ impl LyruneView {
                         );
                     }
                     let name = artist.name.clone();
-                    let tooltip = format!("查看歌手：{name}");
                     let hover_color = theme.primary;
                     links.push(
                         div()
@@ -5027,9 +5211,6 @@ impl LyruneView {
                             .cursor_pointer()
                             .text_color(theme.secondary_foreground)
                             .hover(move |style| style.text_color(hover_color))
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(tooltip.clone()).build(window, cx)
-                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_search_artist(artist.clone(), window, cx);
                             }))
@@ -5061,13 +5242,8 @@ impl LyruneView {
                 .into_any_element(),
         };
 
-        h_flex()
-            .h(px(112.))
-            .w_full()
-            .flex_shrink_0()
-            .border_t_1()
-            .border_color(theme.border)
-            .bg(theme.group_box)
+        let content = h_flex()
+            .size_full()
             .px_5()
             .gap_4()
             .child(
@@ -5097,7 +5273,6 @@ impl LyruneView {
                     .min_w(px(280.))
                     .items_center()
                     .justify_center()
-                    .gap_1()
                     .child(
                         h_flex()
                             .h(px(50.))
@@ -5261,34 +5436,6 @@ impl LyruneView {
                                         )
                                     }),
                             ),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .max_w(px(620.))
-                            .gap_2()
-                            .child(
-                                div()
-                                    .w(px(44.))
-                                    .text_right()
-                                    .font_family(design::system_monospace_font_family())
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format_duration(display_position.as_secs())),
-                            )
-                            .child(
-                                Slider::new(&self.progress_slider)
-                                    .flex_1()
-                                    .disabled(!has_track || self.loading_track.is_some()),
-                            )
-                            .child(
-                                div()
-                                    .w(px(44.))
-                                    .font_family(design::system_monospace_font_family())
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format_duration(duration.as_secs())),
-                            ),
                     ),
             )
             .when(!narrow, |bar| {
@@ -5328,7 +5475,16 @@ impl LyruneView {
                             px(118.)
                         })),
                 )
-            })
+            });
+
+        div()
+            .relative()
+            .h(px(112.))
+            .w_full()
+            .flex_shrink_0()
+            .bg(theme.group_box)
+            .child(progress)
+            .child(content)
             .into_any_element()
     }
 
@@ -5508,7 +5664,7 @@ impl LyruneView {
                         ),
                 ),
             )
-            .child(self.render_player_bar(compact, narrow, cx))
+            .child(self.render_player_bar(compact, narrow, window, cx))
             .when(popover_open, |this| {
                 this.child(
                     deferred(
@@ -5552,10 +5708,11 @@ impl Render for LyruneView {
 mod tests {
     use super::{
         NavigationHistory, NavigationPage, PlaylistScrollPosition, SearchCategory,
-        insert_track_after_current, resolved_playlist_scroll_row,
+        format_playback_time, insert_track_after_current, resolved_playlist_scroll_row,
     };
     use gpui::{Pixels, px};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
+    use std::time::Duration;
 
     fn track(mid: &str) -> Track {
         Track {
@@ -5671,6 +5828,12 @@ mod tests {
             super::single_line_summary("first line\n second\tline\r\nthird"),
             "first line second line third"
         );
+    }
+
+    #[test]
+    fn playback_time_uses_compact_player_formatting() {
+        assert_eq!(format_playback_time(Duration::from_secs(137)), "2:17");
+        assert_eq!(format_playback_time(Duration::from_secs(3_661)), "1:01:01");
     }
 
     #[test]

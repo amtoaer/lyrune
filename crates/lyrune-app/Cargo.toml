@@ -12,6 +12,7 @@ bytes.workspace = true
 directories.workspace = true
 futures-util.workspace = true
 gpui.workspace = true
+gpui-base.workspace = true
 gpui-component.workspace = true
 gpui-platform.workspace = true
 keyring.workspace = true

@@ -12,7 +12,6 @@ use gpui_component::{
     ActiveTheme as _, IndexPath, StyledExt as _, h_flex,
     list::{ListDelegate, ListItem, ListState},
     table::{Column, TableDelegate, TableState},
-    tooltip::Tooltip,
     v_flex,
 };
 use qqmusic_api::integration::{SearchAlbum, SearchArtist, Track, UserPlaylist, UserPlaylistId};
@@ -260,7 +259,6 @@ impl TrackTableDelegate {
             }
             let sender = self.navigation_sender.clone();
             let name = artist.name.clone();
-            let tooltip = format!("查看歌手：{name}");
             let hover_color = cx.theme().primary;
             links.push(
                 div()
@@ -269,7 +267,6 @@ impl TrackTableDelegate {
                     .cursor_pointer()
                     .text_color(cx.theme().secondary_foreground)
                     .hover(move |style| style.text_color(hover_color))
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
@@ -535,17 +532,12 @@ impl TableDelegate for TrackTableDelegate {
                     cover_url: track.cover_url.clone(),
                     artist: track.artists.clone(),
                 });
-                let tooltip = album_link.as_ref().map_or_else(
-                    || album.clone(),
-                    |album| format!("查看专辑：{}", album.title),
-                );
                 h_flex()
                     .id(("track-album", row_ix))
                     .w_full()
                     .h_full()
                     .truncate()
                     .text_color(cx.theme().secondary_foreground)
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .when_some(album_link, |this, album| {
                         let sender = self.navigation_sender.clone();
                         let hover_color = cx.theme().primary;

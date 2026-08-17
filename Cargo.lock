@@ -3987,6 +3987,7 @@ dependencies = [
  "directories",
  "futures-util",
  "gpui",
+ "gpui-base",
  "gpui-component",
  "gpui_platform",
  "keyring",

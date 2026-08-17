@@ -27,6 +27,7 @@ futures-util = "0.3"
 # Keep the Zed source URL unqualified so Cargo unifies it with gpui-component's
 # transitive dependencies. Cargo.lock pins every Zed crate to 24e25552.
 gpui = { git = "https://github.com/zed-industries/zed" }
+gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "56f3d903eaef3b2504cf31518ed1ad69d80166ff" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "56f3d903eaef3b2504cf31518ed1ad69d80166ff" }
 gpui-platform = { package = "gpui_platform", git = "https://github.com/zed-industries/zed", features = [
     "font-kit",

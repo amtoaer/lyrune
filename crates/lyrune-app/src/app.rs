@@ -4,6 +4,10 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
+use futures_util::{
+    future::{Either, select},
+    pin_mut,
+};
 use gpui::{prelude::*, *};
 use gpui_base::{
     Slider as BaseSlider, SliderIndicator, SliderThumb, SliderTrack,
@@ -62,7 +66,6 @@ const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
 const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
 const LYRIC_ROW_HEIGHT: f32 = 104.;
-const LYRIC_PROGRESS_TICK: Duration = Duration::from_millis(16);
 const TRANSLATION_ALIGNMENT_TOLERANCE: Duration = Duration::from_millis(500);
 
 fn readable_lyric_color(sampled_rgb: [f32; 3], overlay: Hsla) -> Hsla {
@@ -843,6 +846,8 @@ pub struct LyruneView {
     account_menu_open: bool,
     _subscriptions: Vec<Subscription>,
     _window_subscription: Option<Subscription>,
+    window_tick_wake: Option<async_channel::Sender<()>>,
+    background_tick_wake: Option<async_channel::Sender<()>>,
     #[cfg(target_os = "linux")]
     mpris: Option<MprisHandle>,
     #[cfg(target_os = "linux")]
@@ -1091,6 +1096,8 @@ impl LyruneView {
             account_menu_open: false,
             _subscriptions: subscriptions,
             _window_subscription: None,
+            window_tick_wake: None,
+            background_tick_wake: None,
             #[cfg(target_os = "linux")]
             mpris: None,
             #[cfg(target_os = "linux")]
@@ -1116,14 +1123,40 @@ impl LyruneView {
     }
 
     fn start_window_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (wake_sender, wake_receiver) = async_channel::bounded(1);
+        self.window_tick_wake = Some(wake_sender);
         cx.spawn_in(window, async move |this, cx| {
             loop {
-                cx.background_executor().timer(PROGRESS_TICK).await;
-                if this
-                    .update_in(cx, |this, window, cx| this.sync_progress_slider(window, cx))
-                    .is_err()
-                {
-                    break;
+                let playback_advancing =
+                    match this.read_with(cx, |this, _| this.playback_is_advancing()) {
+                        Ok(playback_advancing) => playback_advancing,
+                        Err(_) => break,
+                    };
+                if !playback_advancing {
+                    if this
+                        .update_in(cx, |this, window, cx| this.sync_progress_slider(window, cx))
+                        .is_err()
+                        || wake_receiver.recv().await.is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                let timer = cx.background_executor().timer(PROGRESS_TICK);
+                let wake = wake_receiver.recv();
+                pin_mut!(timer, wake);
+                match select(timer, wake).await {
+                    Either::Left(_) => {
+                        if this
+                            .update_in(cx, |this, window, cx| this.sync_progress_slider(window, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Either::Right((Ok(()), _)) => {}
+                    Either::Right((Err(_), _)) => break,
                 }
             }
         })
@@ -1131,28 +1164,57 @@ impl LyruneView {
     }
 
     pub(crate) fn start_background_tick(&mut self, cx: &mut Context<Self>) {
+        let (wake_sender, wake_receiver) = async_channel::bounded(1);
+        self.background_tick_wake = Some(wake_sender);
         cx.spawn(async move |this, cx| {
             loop {
                 let interval = match this.read_with(cx, |this, _| {
-                    if this.cover_backdrop_expanded
-                        && this.playback_started
-                        && this.loading_track.is_none()
-                    {
-                        LYRIC_PROGRESS_TICK
+                    if !this.playback_is_advancing() {
+                        None
                     } else {
-                        PROGRESS_TICK
+                        Some(PROGRESS_TICK)
                     }
                 }) {
                     Ok(interval) => interval,
                     Err(_) => break,
                 };
-                cx.background_executor().timer(interval).await;
-                if this.update(cx, |this, cx| this.tick(cx)).is_err() {
-                    break;
+                let Some(interval) = interval else {
+                    if wake_receiver.recv().await.is_err() {
+                        break;
+                    }
+                    continue;
+                };
+
+                let timer = cx.background_executor().timer(interval);
+                let wake = wake_receiver.recv();
+                pin_mut!(timer, wake);
+                match select(timer, wake).await {
+                    Either::Left(_) => {
+                        if this.update(cx, |this, cx| this.tick(cx)).is_err() {
+                            break;
+                        }
+                    }
+                    Either::Right((Ok(()), _)) => {}
+                    Either::Right((Err(_), _)) => break,
                 }
             }
         })
         .detach();
+    }
+
+    fn playback_is_advancing(&self) -> bool {
+        self.playback_started
+            && self.loading_track.is_none()
+            && self.audio.as_ref().is_some_and(AudioPlayer::is_playing)
+    }
+
+    fn wake_playback_ticks(&self) {
+        if let Some(wake) = &self.window_tick_wake {
+            let _ = wake.try_send(());
+        }
+        if let Some(wake) = &self.background_tick_wake {
+            let _ = wake.try_send(());
+        }
     }
 
     pub(crate) fn window_size(&self) -> Option<PersistedWindowSize> {
@@ -2849,6 +2911,7 @@ impl LyruneView {
         self.loading_autoplay = autoplay;
         self.resolving_qualities = reused_urls.is_none() && known_qualities.is_empty();
         self.playback_started = false;
+        self.wake_playback_ticks();
         self.position = resume_at;
         self.progress_hovered = false;
         self.progress_hover_fraction = None;
@@ -2999,6 +3062,7 @@ impl LyruneView {
                                                 audio.set_volume(this.settings.volume);
                                             }
                                             this.playback_started = true;
+                                            this.wake_playback_ticks();
                                             this.status = StatusMessage::info(if autoplay {
                                                 format!("正在播放“{title}”")
                                             } else {
@@ -3051,6 +3115,7 @@ impl LyruneView {
             return;
         }
         let playing = audio.toggle();
+        self.wake_playback_ticks();
         self.status = StatusMessage::info(if playing {
             "继续播放".to_owned()
         } else {
@@ -3105,6 +3170,7 @@ impl LyruneView {
         self.loading_autoplay = false;
         self.resolving_qualities = false;
         self.playback_started = false;
+        self.wake_playback_ticks();
         self.position = Duration::ZERO;
         self.seek_preview = None;
         self.progress_slider.update(cx, |slider, cx| {
@@ -3229,6 +3295,7 @@ impl LyruneView {
             self.start_playback(next, Duration::ZERO, None, true, cx);
         } else if can_extend {
             self.playback_started = false;
+            self.wake_playback_ticks();
             self.queue_waiting_for_recommendation = true;
             self.status = StatusMessage::info("正在获取下一首推荐…");
             self.maybe_load_queue_recommendations(true, cx);
@@ -3238,6 +3305,7 @@ impl LyruneView {
             cx.notify();
         } else {
             self.playback_started = false;
+            self.wake_playback_ticks();
             self.position = self.current_duration().unwrap_or_default();
             self.status = StatusMessage::info("当前播放队列已结束");
             self.persist_current_playback();
@@ -3529,12 +3597,15 @@ impl LyruneView {
                 .current_duration()
                 .map_or(0., |duration| progress_fraction(self.position, duration));
             self.progress_slider.update(cx, |slider, cx| {
-                slider.set_value(progress, window, cx);
+                if slider.value().end() != progress {
+                    slider.set_value(progress, window, cx);
+                }
             });
         }
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
+        let previous_position = self.position;
         if self.seek_preview.is_none() && self.loading_track.is_none() && self.playback_started {
             self.position = self
                 .audio
@@ -3561,7 +3632,10 @@ impl LyruneView {
             self.sync_mpris_position();
             self.last_mpris_position_sync = Instant::now();
         }
-        cx.notify();
+
+        if self.position != previous_position && self.progress_hovered {
+            cx.notify();
+        }
     }
 
     fn current_track_data(&self) -> Option<&Track> {
@@ -3821,6 +3895,7 @@ impl LyruneView {
         self.loading_autoplay = false;
         self.resolving_qualities = false;
         self.playback_started = false;
+        self.wake_playback_ticks();
         self.playback_location = None;
         self.active_quality = self.settings.playback_quality;
         self.available_qualities.clear();
@@ -6180,6 +6255,7 @@ impl LyruneView {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.cover_backdrop_expanded = false;
                                         this.cover_backdrop_fully_expanded = false;
+                                        this.wake_playback_ticks();
                                         cx.notify();
                                     })),
                             ),
@@ -6251,6 +6327,7 @@ impl LyruneView {
                             if !this.cover_backdrop_expanded {
                                 this.cover_backdrop_fully_expanded = false;
                             }
+                            this.wake_playback_ticks();
                             cx.notify();
                         })),
                 )
@@ -6653,6 +6730,17 @@ impl LyruneView {
     }
 
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.cover_backdrop_expanded && self.playback_is_advancing() {
+            if self.seek_preview.is_none() {
+                self.position = self
+                    .audio
+                    .as_ref()
+                    .map(AudioPlayer::position)
+                    .unwrap_or_default();
+            }
+            window.request_animation_frame();
+        }
+
         let theme = cx.theme().clone();
         let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);

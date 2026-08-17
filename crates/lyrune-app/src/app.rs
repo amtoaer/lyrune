@@ -4462,7 +4462,7 @@ impl LyruneView {
                                 .w(px(52.))
                                 .flex_shrink_0()
                                 .text_right()
-                                .font_family("monospace")
+                                .font_family(design::system_monospace_font_family())
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
                                 .child(duration),
@@ -5271,7 +5271,7 @@ impl LyruneView {
                                 div()
                                     .w(px(44.))
                                     .text_right()
-                                    .font_family("monospace")
+                                    .font_family(design::system_monospace_font_family())
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(format_duration(display_position.as_secs())),
@@ -5284,7 +5284,7 @@ impl LyruneView {
                             .child(
                                 div()
                                     .w(px(44.))
-                                    .font_family("monospace")
+                                    .font_family(design::system_monospace_font_family())
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(format_duration(duration.as_secs())),

@@ -8,22 +8,49 @@ use gpui_component::{Theme, ThemeConfig, ThemeConfigColors, ThemeMode};
 use serde::{Deserialize, Serialize};
 
 static SYSTEM_UI_FONT_FAMILY: OnceLock<String> = OnceLock::new();
+static SYSTEM_MONOSPACE_FONT_FAMILY: OnceLock<String> = OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn fontconfig_font_family(alias: &str) -> Option<String> {
+    let output = Command::new("fc-match")
+        .args(["--format=%{family[0]}", alias])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let family = String::from_utf8(output.stdout).ok()?;
+    (!family.trim().is_empty()).then(|| family.trim().to_owned())
+}
 
 fn system_ui_font_family() -> &'static str {
     SYSTEM_UI_FONT_FAMILY
         .get_or_init(|| {
             #[cfg(target_os = "linux")]
-            if let Ok(output) = Command::new("fc-match")
-                .args(["--format=%{family[0]}", "system-ui"])
-                .output()
-                && output.status.success()
-                && let Ok(family) = String::from_utf8(output.stdout)
-                && !family.trim().is_empty()
-            {
-                return family.trim().to_owned();
+            if let Some(family) = fontconfig_font_family("system-ui") {
+                return family;
             }
 
             ".SystemUIFont".to_owned()
+        })
+        .as_str()
+}
+
+pub(crate) fn system_monospace_font_family() -> &'static str {
+    SYSTEM_MONOSPACE_FONT_FAMILY
+        .get_or_init(|| {
+            #[cfg(target_os = "linux")]
+            if let Some(family) = fontconfig_font_family("monospace") {
+                return family;
+            }
+
+            #[cfg(target_os = "macos")]
+            let fallback = "Menlo";
+            #[cfg(target_os = "windows")]
+            let fallback = "Consolas";
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            let fallback = "monospace";
+            fallback.to_owned()
         })
         .as_str()
 }

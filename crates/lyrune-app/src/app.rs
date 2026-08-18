@@ -71,7 +71,6 @@ const PLAYER_BAR_HEIGHT: f32 = 112.;
 const LYRIC_ROW_HEIGHT: f32 = 104.;
 const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
-const LYRIC_FONT_SIZE_STEP: f32 = 0.5;
 const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
 const LYRIC_HORIZONTAL_STEP: f32 = 0.5;
 const TRANSLATION_ALIGNMENT_TOLERANCE: Duration = Duration::from_millis(500);
@@ -556,31 +555,37 @@ impl PreparedLyricsElement {
         scale: f32,
         window: &mut Window,
     ) -> anyhow::Result<()> {
-        let ascent = layout.ascent * scale;
-        let descent = layout.descent * scale;
-        let baseline = (line_height - ascent - descent) / 2. + ascent;
+        let baseline = (line_height / scale - layout.ascent - layout.descent) / 2. + layout.ascent;
+        let scale_factor = window.scale_factor();
+        let transformation = TransformationMatrix::unit()
+            .translate(origin.scale(scale_factor))
+            .scale(size(scale, scale))
+            .translate(origin.scale(-scale_factor));
         window.paint_layer(
             Bounds::new(origin, size(layout.width * scale, line_height)),
             |window| {
                 for run in &layout.runs {
                     for glyph in &run.glyphs {
-                        let origin = point(
-                            origin.x + glyph.position.x * scale,
-                            origin.y + baseline + glyph.position.y * scale,
-                        );
                         if glyph.is_emoji {
                             window.paint_emoji(
-                                origin,
+                                point(
+                                    origin.x + glyph.position.x * scale,
+                                    origin.y + (baseline + glyph.position.y) * scale,
+                                ),
                                 run.font_id,
                                 glyph.id,
                                 layout.font_size * scale,
                             )?;
                         } else {
-                            window.paint_glyph(
-                                origin,
+                            window.paint_glyph_with_transformation(
+                                point(
+                                    origin.x + glyph.position.x,
+                                    origin.y + baseline + glyph.position.y,
+                                ),
                                 run.font_id,
                                 glyph.id,
-                                layout.font_size * scale,
+                                layout.font_size,
+                                transformation,
                                 color,
                             )?;
                         }
@@ -780,9 +785,6 @@ impl Element for PreparedLyricsElement {
                 let emphasis = row.emphasis.clamp(0., 1.);
                 let target_font_size =
                     row.normal.font_size + (row.active.font_size - row.normal.font_size) * emphasis;
-                let target_font_size = px((f32::from(target_font_size) / LYRIC_FONT_SIZE_STEP)
-                    .round()
-                    * LYRIC_FONT_SIZE_STEP);
                 let horizontal_offset = if row.current {
                     let scale = f32::from(target_font_size) / f32::from(row.active.font_size);
                     let line_width = row.active.width(scale);

@@ -49,14 +49,18 @@ fn resolve_font_chain(families: &[String], default: &str, available: &[String]) 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ColorTheme {
-    #[default]
     #[serde(alias = "lyrune-neutral")]
     CatppuccinLatte,
     CatppuccinMocha,
     AyuLight,
     AyuDark,
+    #[default]
     EverforestLight,
     EverforestDark,
+    RosePineDawn,
+    RosePineMoon,
+    KanagawaLotus,
+    KanagawaWave,
 }
 
 #[derive(Clone, Copy)]
@@ -70,13 +74,17 @@ pub(crate) struct LogoPalette {
 }
 
 impl ColorTheme {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 10] = [
+        Self::EverforestLight,
+        Self::EverforestDark,
         Self::CatppuccinLatte,
         Self::CatppuccinMocha,
         Self::AyuLight,
         Self::AyuDark,
-        Self::EverforestLight,
-        Self::EverforestDark,
+        Self::RosePineDawn,
+        Self::RosePineMoon,
+        Self::KanagawaLotus,
+        Self::KanagawaWave,
     ];
 
     pub const fn id(self) -> &'static str {
@@ -87,6 +95,10 @@ impl ColorTheme {
             Self::AyuDark => "ayu-dark",
             Self::EverforestLight => "everforest-light",
             Self::EverforestDark => "everforest-dark",
+            Self::RosePineDawn => "rose-pine-dawn",
+            Self::RosePineMoon => "rose-pine-moon",
+            Self::KanagawaLotus => "kanagawa-lotus",
+            Self::KanagawaWave => "kanagawa-wave",
         }
     }
 
@@ -98,6 +110,10 @@ impl ColorTheme {
             Self::AyuDark => "Ayu Dark",
             Self::EverforestLight => "Everforest Light",
             Self::EverforestDark => "Everforest Dark",
+            Self::RosePineDawn => "Rosé Pine Dawn",
+            Self::RosePineMoon => "Rosé Pine Moon",
+            Self::KanagawaLotus => "Kanagawa Lotus",
+            Self::KanagawaWave => "Kanagawa Wave",
         }
     }
 
@@ -109,6 +125,10 @@ impl ColorTheme {
             Self::AyuDark => "#b3b1ad",
             Self::EverforestLight => "#5c6a72",
             Self::EverforestDark => "#d3c6aa",
+            Self::RosePineDawn => "#575279",
+            Self::RosePineMoon => "#e0def4",
+            Self::KanagawaLotus => "#545464",
+            Self::KanagawaWave => "#dcd7ba",
         }
     }
 
@@ -120,6 +140,10 @@ impl ColorTheme {
             Self::AyuDark => "#5ac1fe",
             Self::EverforestLight => "#f57d26",
             Self::EverforestDark => "#e69875",
+            Self::RosePineDawn => "#907aa9",
+            Self::RosePineMoon => "#c4a7e7",
+            Self::KanagawaLotus => "#4d699b",
+            Self::KanagawaWave => "#7e9cd8",
         }
     }
 
@@ -131,6 +155,10 @@ impl ColorTheme {
             Self::AyuDark => "#1f2430",
             Self::EverforestLight => "#fdf6e3",
             Self::EverforestDark => "#262e34",
+            Self::RosePineDawn => "#faf4ed",
+            Self::RosePineMoon => "#232136",
+            Self::KanagawaLotus => "#f2ecbc",
+            Self::KanagawaWave => "#1f1f28",
         }
     }
 
@@ -183,6 +211,38 @@ impl ColorTheme {
                 trail_secondary: "#83c092",
                 trail_tertiary: "#e69875",
                 detail: "#e67e80",
+            },
+            Self::RosePineDawn => LogoPalette {
+                background: "#f2e9e1",
+                foreground: "#575279",
+                trail_primary: "#907aa9",
+                trail_secondary: "#56949f",
+                trail_tertiary: "#ea9d34",
+                detail: "#b4637a",
+            },
+            Self::RosePineMoon => LogoPalette {
+                background: "#393552",
+                foreground: "#e0def4",
+                trail_primary: "#c4a7e7",
+                trail_secondary: "#9ccfd8",
+                trail_tertiary: "#f6c177",
+                detail: "#eb6f92",
+            },
+            Self::KanagawaLotus => LogoPalette {
+                background: "#e7dba0",
+                foreground: "#545464",
+                trail_primary: "#4d699b",
+                trail_secondary: "#597b75",
+                trail_tertiary: "#cc6d00",
+                detail: "#b35b79",
+            },
+            Self::KanagawaWave => LogoPalette {
+                background: "#2a2a37",
+                foreground: "#dcd7ba",
+                trail_primary: "#7e9cd8",
+                trail_secondary: "#7aa89f",
+                trail_tertiary: "#e6c384",
+                detail: "#d27e99",
             },
         }
     }
@@ -338,6 +398,106 @@ impl ColorTheme {
                 emotion: "#e67e80",
                 emotion_foreground: "#262e34",
                 scrollbar_thumb: "#485156",
+            },
+            Self::RosePineDawn => Palette {
+                mode: ThemeMode::Light,
+                background: "#faf4ed",
+                surface: "#fffaf3",
+                surface_alt: "#f2e9e1",
+                sidebar: "#fffaf3",
+                outer: "#f2e9e1",
+                foreground: "#575279",
+                subtext_foreground: "#797593",
+                muted: "#dfdad9",
+                muted_foreground: "#9893a5",
+                border: "#dfdad9",
+                primary: "#907aa9",
+                primary_foreground: "#faf4ed",
+                primary_hover: "#56949f",
+                primary_active: "#907aa9",
+                accent: "#f4ede8",
+                accent_foreground: "#575279",
+                active: "#907aa91f",
+                hover: "#dfdad999",
+                ring: "#56949f",
+                emotion: "#b4637a",
+                emotion_foreground: "#faf4ed",
+                scrollbar_thumb: "#cecacd",
+            },
+            Self::RosePineMoon => Palette {
+                mode: ThemeMode::Dark,
+                background: "#232136",
+                surface: "#2a273f",
+                surface_alt: "#393552",
+                sidebar: "#2a273f",
+                outer: "#191724",
+                foreground: "#e0def4",
+                subtext_foreground: "#908caa",
+                muted: "#393552",
+                muted_foreground: "#6e6a86",
+                border: "#393552",
+                primary: "#c4a7e7",
+                primary_foreground: "#232136",
+                primary_hover: "#9ccfd8",
+                primary_active: "#c4a7e7",
+                accent: "#2a283e",
+                accent_foreground: "#e0def4",
+                active: "#c4a7e71f",
+                hover: "#39355299",
+                ring: "#9ccfd8",
+                emotion: "#eb6f92",
+                emotion_foreground: "#232136",
+                scrollbar_thumb: "#56526e",
+            },
+            Self::KanagawaLotus => Palette {
+                mode: ThemeMode::Light,
+                background: "#f2ecbc",
+                surface: "#e5ddb0",
+                surface_alt: "#e7dba0",
+                sidebar: "#e5ddb0",
+                outer: "#dcd5ac",
+                foreground: "#545464",
+                subtext_foreground: "#716e61",
+                muted: "#e7dba0",
+                muted_foreground: "#8a8980",
+                border: "#d5cea3",
+                primary: "#4d699b",
+                primary_foreground: "#f2ecbc",
+                primary_hover: "#6693bf",
+                primary_active: "#4d699b",
+                accent: "#dcd5ac",
+                accent_foreground: "#545464",
+                active: "#4d699b22",
+                hover: "#dcd5ac99",
+                ring: "#766b90",
+                emotion: "#b35b79",
+                emotion_foreground: "#f2ecbc",
+                scrollbar_thumb: "#a09cac",
+            },
+            Self::KanagawaWave => Palette {
+                mode: ThemeMode::Dark,
+                background: "#1f1f28",
+                surface: "#181820",
+                surface_alt: "#2a2a37",
+                sidebar: "#181820",
+                outer: "#16161d",
+                foreground: "#dcd7ba",
+                subtext_foreground: "#c8c093",
+                muted: "#2a2a37",
+                muted_foreground: "#727169",
+                border: "#363646",
+                primary: "#7e9cd8",
+                primary_foreground: "#1f1f28",
+                primary_hover: "#7fb4ca",
+                primary_active: "#7e9cd8",
+                accent: "#223249",
+                accent_foreground: "#dcd7ba",
+                active: "#7e9cd822",
+                hover: "#2d4f6799",
+                ring: "#957fb8",
+                emotion: "#d27e99",
+                emotion_foreground: "#1f1f28",
+                scrollbar_thumb: "#54546d",
             },
         }
     }

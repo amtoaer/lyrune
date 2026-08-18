@@ -612,7 +612,7 @@ mod tests {
         let settings: AppSettings = serde_json::from_str("{}").expect("deserialize defaults");
         assert_eq!(settings.volume, 1.);
         assert_eq!(settings.last_nonzero_volume, 1.);
-        assert_eq!(settings.color_theme, ColorTheme::CatppuccinLatte);
+        assert_eq!(settings.color_theme, ColorTheme::EverforestLight);
         assert_eq!(settings.ui_font_families, [".SystemUIFont"]);
         assert_eq!(
             settings.monospace_font_families,

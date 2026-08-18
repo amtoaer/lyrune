@@ -72,6 +72,8 @@ const LYRIC_ROW_HEIGHT: f32 = 104.;
 const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
 const LYRIC_FONT_SIZE_STEP: f32 = 0.5;
+const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
+const LYRIC_HORIZONTAL_STEP: f32 = 0.5;
 const TRANSLATION_ALIGNMENT_TOLERANCE: Duration = Duration::from_millis(500);
 
 fn readable_lyric_color(sampled_rgb: [f32; 3], overlay: Hsla) -> Hsla {
@@ -164,6 +166,8 @@ struct PreparedLyricRow {
     translation: Option<Arc<PreparedLyricTranslation>>,
     emphasis: f32,
     opacity: f32,
+    current: bool,
+    estimated_line_progress: Option<f32>,
 }
 
 struct PreparedLyricsElement {
@@ -218,6 +222,18 @@ fn lyric_highlight_progress(start: Duration, end: Duration, position: Duration) 
     }
 
     position.saturating_sub(start).as_secs_f32() / end.saturating_sub(start).as_secs_f32()
+}
+
+fn lyric_horizontal_scroll_offset(
+    line_width: Pixels,
+    viewport_width: Pixels,
+    playhead_x: Pixels,
+) -> Pixels {
+    let overflow = (line_width - viewport_width).max(px(0.));
+    let offset = (playhead_x - viewport_width * LYRIC_HORIZONTAL_ANCHOR)
+        .max(px(0.))
+        .min(overflow);
+    px((f32::from(offset) / LYRIC_HORIZONTAL_STEP).round() * LYRIC_HORIZONTAL_STEP)
 }
 
 fn lyric_line_opacity(anchor: usize, index: usize) -> f32 {
@@ -334,6 +350,46 @@ impl PreparedLyricLine {
 
     fn height(&self) -> Pixels {
         self.ruby_line_height + self.line_height
+    }
+
+    fn fragment_width(fragment: &PreparedLyricFragment, scale: f32) -> Pixels {
+        let text_width = fragment.layout.width * scale;
+        fragment
+            .ruby_layout
+            .as_ref()
+            .map_or(text_width, |ruby| text_width.max(ruby.width))
+    }
+
+    fn width(&self, scale: f32) -> Pixels {
+        self.fragments.iter().fold(px(0.), |width, fragment| {
+            width + Self::fragment_width(fragment, scale)
+        })
+    }
+
+    fn timed_playhead_x(&self, position: Duration, scale: f32) -> Option<Pixels> {
+        let mut x = px(0.);
+        let mut last_timed_end = None;
+
+        for fragment in &self.fragments {
+            let text_width = fragment.layout.width * scale;
+            let fragment_width = Self::fragment_width(fragment, scale);
+            if let Some((start, end)) = fragment.timing {
+                let text_start = x + (fragment_width - text_width) / 2.;
+                let text_end = text_start + text_width;
+                if position < start {
+                    return last_timed_end.or(Some(text_start));
+                }
+                if position < end {
+                    return Some(
+                        text_start + text_width * lyric_highlight_progress(start, end, position),
+                    );
+                }
+                last_timed_end = Some(text_end);
+            }
+            x += fragment_width;
+        }
+
+        last_timed_end
     }
 }
 
@@ -682,6 +738,22 @@ impl Element for PreparedLyricsElement {
                 let target_font_size = px((f32::from(target_font_size) / LYRIC_FONT_SIZE_STEP)
                     .round()
                     * LYRIC_FONT_SIZE_STEP);
+                let horizontal_offset = if row.current {
+                    let scale = f32::from(target_font_size) / f32::from(row.active.font_size);
+                    let line_width = row.active.width(scale);
+                    let playhead_x =
+                        row.active
+                            .timed_playhead_x(self.position, scale)
+                            .or_else(|| {
+                                row.estimated_line_progress
+                                    .map(|progress| line_width * progress)
+                            });
+                    playhead_x.map_or(px(0.), |playhead_x| {
+                        lyric_horizontal_scroll_offset(line_width, bounds.size.width, playhead_x)
+                    })
+                } else {
+                    px(0.)
+                };
                 let row_bounds = Bounds::new(
                     point(
                         bounds.origin.x,
@@ -703,7 +775,10 @@ impl Element for PreparedLyricsElement {
                 );
                 let _ = Self::paint_line(
                     &row.normal,
-                    lyric_bounds.origin,
+                    point(
+                        lyric_bounds.origin.x - horizontal_offset,
+                        lyric_bounds.origin.y,
+                    ),
                     lyric_bounds,
                     LyricLayoutStyle::Normal,
                     row.opacity * (1. - emphasis),
@@ -714,7 +789,10 @@ impl Element for PreparedLyricsElement {
                 );
                 let _ = Self::paint_line(
                     &row.active,
-                    lyric_bounds.origin,
+                    point(
+                        lyric_bounds.origin.x - horizontal_offset,
+                        lyric_bounds.origin.y,
+                    ),
                     lyric_bounds,
                     LyricLayoutStyle::Active,
                     row.opacity * emphasis,
@@ -7087,6 +7165,8 @@ impl LyruneView {
             + 2;
         let render_start = anchor.saturating_sub(render_radius);
         let render_end = (anchor + render_radius + 1).min(lyrics.lines.len());
+        let position = self.position;
+        let track_duration = self.current_duration();
         let rows = lyrics
             .lines
             .iter()
@@ -7094,10 +7174,22 @@ impl LyruneView {
             .skip(render_start)
             .take(render_end - render_start)
             .map(|(index, line)| {
+                let current = active == Some(index);
                 let opacity = interpolated_lyric_line_opacity(style_anchor, index);
                 let emphasis = active.map_or(0., |_| {
                     (1. - (index as f32 - style_anchor).abs()).clamp(0., 1.)
                 });
+                let estimated_line_progress = (current && line.words.is_empty())
+                    .then(|| {
+                        lyrics
+                            .lines
+                            .get(index + 1)
+                            .map(|next| next.start)
+                            .or(track_duration)
+                            .filter(|end| *end > line.start)
+                            .map(|end| lyric_highlight_progress(line.start, end, position))
+                    })
+                    .flatten();
                 let normal = self.lyric_layout_cache.line(
                     index,
                     line,
@@ -7125,6 +7217,8 @@ impl LyruneView {
                     translation,
                     emphasis,
                     opacity,
+                    current,
+                    estimated_line_progress,
                 }
             })
             .collect::<Vec<_>>();
@@ -8115,8 +8209,9 @@ mod tests {
     use super::{
         NavigationHistory, NavigationPage, PlaybackQueue, PlaylistScrollPosition, SearchCategory,
         canonical_queue_track_index, extract_qrc_content, format_playback_time,
-        insert_external_track_after_current, insert_track_after_current, parse_lyrics,
-        playlist_title_is_long, readable_lyric_color, resolved_playlist_scroll_row,
+        insert_external_track_after_current, insert_track_after_current,
+        lyric_horizontal_scroll_offset, parse_lyrics, playlist_title_is_long, readable_lyric_color,
+        resolved_playlist_scroll_row,
     };
     use gpui::{Pixels, black, px, white};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
@@ -8158,6 +8253,26 @@ mod tests {
         assert_eq!(
             readable_lyric_color([0.95, 0.95, 0.95], white().opacity(0.28)),
             black()
+        );
+    }
+
+    #[test]
+    fn horizontal_lyric_scroll_starts_at_the_anchor_and_stops_at_the_end() {
+        assert_eq!(
+            lyric_horizontal_scroll_offset(px(500.), px(600.), px(500.)),
+            px(0.)
+        );
+        assert_eq!(
+            lyric_horizontal_scroll_offset(px(1000.), px(600.), px(250.)),
+            px(0.)
+        );
+        assert_eq!(
+            lyric_horizontal_scroll_offset(px(1000.), px(600.), px(300.)),
+            px(48.)
+        );
+        assert_eq!(
+            lyric_horizontal_scroll_offset(px(1000.), px(600.), px(1000.)),
+            px(400.)
         );
     }
 

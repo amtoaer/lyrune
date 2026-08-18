@@ -16,6 +16,7 @@ mod tray;
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use app::LyruneView;
 use gpui::*;
@@ -27,6 +28,7 @@ const DEFAULT_WINDOW_WIDTH: f32 = 1080.;
 const DEFAULT_WINDOW_HEIGHT: f32 = 760.;
 const MIN_WINDOW_WIDTH: f32 = 800.;
 const MIN_WINDOW_HEIGHT: f32 = 600.;
+const INACTIVE_WINDOW_FRAME_INTERVAL: Duration = Duration::from_millis(40);
 
 fn initial_window_size(window_size: Option<PersistedWindowSize>, cx: &App) -> Size<Pixels> {
     let (mut width, mut height) = window_size
@@ -52,6 +54,7 @@ fn main_window_options(window_size: Option<PersistedWindowSize>, cx: &App) -> Wi
         }),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
+        inactive_frame_interval: Some(INACTIVE_WINDOW_FRAME_INTERVAL),
         app_id: Some("lyrune".to_owned()),
         ..Default::default()
     }

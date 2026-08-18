@@ -955,20 +955,47 @@ fn align_lyric_lines(
 }
 
 fn attach_ruby(line: &mut LyricLine, romanized: &LyricLine) {
-    for word in &mut line.words {
+    let mut readings = vec![String::new(); line.words.len()];
+    let mut word_index = 0;
+    let mut romanized_index = 0;
+    let mut best_match = None;
+    while word_index < line.words.len() && romanized_index < romanized.words.len() {
+        let word = &line.words[word_index];
+        let romanized_word = &romanized.words[romanized_index];
+        let start = word.start.max(romanized_word.start);
+        let end = word.end.min(romanized_word.end);
+        if start < end {
+            let overlap = end - start;
+            match best_match {
+                Some((_, best_overlap)) if best_overlap > overlap => {}
+                _ => best_match = Some((word_index, overlap)),
+            }
+        }
+
+        if romanized_word.end <= word.end {
+            if let Some((matched_word_index, _)) = best_match.take() {
+                readings[matched_word_index]
+                    .push_str(&romanized.text[romanized_word.range.clone()]);
+            }
+            romanized_index += 1;
+        }
+        if word.end <= romanized_word.end {
+            word_index += 1;
+        }
+    }
+    if let (Some((matched_word_index, _)), Some(romanized_word)) =
+        (best_match, romanized.words.get(romanized_index))
+    {
+        readings[matched_word_index].push_str(&romanized.text[romanized_word.range.clone()]);
+    }
+
+    for (word, reading) in line.words.iter_mut().zip(readings) {
         let text = &line.text[word.range.clone()];
         if !text.contains_kanji() {
             continue;
         }
 
-        let reading = romanized
-            .words
-            .iter()
-            .filter(|romanized_word| {
-                romanized_word.start < word.end && romanized_word.end > word.start
-            })
-            .map(|romanized_word| &romanized.text[romanized_word.range.clone()])
-            .collect::<String>()
+        let reading = reading
             .chars()
             .filter(|character| !character.is_whitespace() && *character != '\'')
             .collect::<String>()
@@ -8791,6 +8818,27 @@ mod tests {
         assert_eq!(words[3].ruby.as_deref(), Some("さじ"));
         assert_eq!(words[5].ruby.as_deref(), Some("ゆう"));
         assert_eq!(words[6].ruby.as_deref(), Some("うつ"));
+    }
+
+    #[test]
+    fn assigns_qrc_romanization_to_the_word_with_the_largest_overlap() {
+        let lyrics = parse_lyrics(
+            "[4244,4592]夜(4244,349)の(4593,406)赤(4999,373)と(5372,1039)歩(6411,433)き(6844,756)解(7600,448)く(8048,788)",
+            None,
+            Some(
+                "[4243,4593]yo(4243,182)ru(4426,166)no(4592,406)a(4999,164)ka(5163,208)to(5371,1038)a(6410,236)ru(6646,197)ki(6843,756)ho(7600,236)do(7836,211)ku(8047,788)",
+            ),
+        );
+
+        let words = &lyrics.lines[0].words;
+        assert_eq!(words[0].ruby.as_deref(), Some("よる"));
+        assert_eq!(words[1].ruby, None);
+        assert_eq!(words[2].ruby.as_deref(), Some("あか"));
+        assert_eq!(words[3].ruby, None);
+        assert_eq!(words[4].ruby.as_deref(), Some("ある"));
+        assert_eq!(words[5].ruby, None);
+        assert_eq!(words[6].ruby.as_deref(), Some("ほど"));
+        assert_eq!(words[7].ruby, None);
     }
 
     #[test]

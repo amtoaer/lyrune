@@ -48,8 +48,8 @@ use crate::mpris::{
 };
 use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::settings::{
-    AppSettings, CdnCacheStore, LibraryCache, PersistedLibraryView, PersistedPlayback,
-    PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
+    AppSettings, CdnCacheStore, LibraryCache, LyricFrameRate, PersistedLibraryView,
+    PersistedPlayback, PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
 };
 use crate::singleflight::SingleFlight;
 use qqmusic_api::integration::{
@@ -234,6 +234,51 @@ fn lyric_horizontal_scroll_offset(
         .max(px(0.))
         .min(overflow);
     px((f32::from(offset) / LYRIC_HORIZONTAL_STEP).round() * LYRIC_HORIZONTAL_STEP)
+}
+
+fn combined_lyric_frame_interval(
+    highlight: LyricFrameRate,
+    scroll: LyricFrameRate,
+) -> Option<Duration> {
+    match (highlight.frame_interval(), scroll.frame_interval()) {
+        (Some(highlight), Some(scroll)) => Some(highlight.min(scroll)),
+        _ => None,
+    }
+}
+
+fn lyric_position_for_frame_rate(position: Duration, frame_rate: LyricFrameRate) -> Duration {
+    let Some(interval) = frame_rate.frame_interval() else {
+        return position;
+    };
+    let interval_nanos = interval.as_nanos();
+    let quantized_nanos = position.as_nanos() / interval_nanos * interval_nanos;
+    Duration::from_nanos(quantized_nanos.min(u64::MAX as u128) as u64)
+}
+
+fn lyric_frame_is_due(
+    now: Instant,
+    frame_rate: LyricFrameRate,
+    next_frame: &mut Option<Instant>,
+) -> bool {
+    let Some(interval) = frame_rate.frame_interval() else {
+        *next_frame = None;
+        return true;
+    };
+    let Some(deadline) = *next_frame else {
+        *next_frame = Some(now + interval);
+        return false;
+    };
+    if now < deadline {
+        return false;
+    }
+
+    let delay = now.saturating_duration_since(deadline);
+    *next_frame = Some(if delay < interval {
+        deadline + interval
+    } else {
+        now + interval
+    });
+    true
 }
 
 fn lyric_line_opacity(anchor: usize, index: usize) -> f32 {
@@ -1814,6 +1859,8 @@ pub struct LyruneView {
     window_tick_wake: Option<async_channel::Sender<()>>,
     background_tick_wake: Option<async_channel::Sender<()>>,
     lyric_animation_frame_pending: bool,
+    next_lyric_highlight_frame: Option<Instant>,
+    next_lyric_scroll_frame: Option<Instant>,
     #[cfg(target_os = "linux")]
     mpris: Option<MprisHandle>,
     #[cfg(target_os = "linux")]
@@ -2070,6 +2117,8 @@ impl LyruneView {
             window_tick_wake: None,
             background_tick_wake: None,
             lyric_animation_frame_pending: false,
+            next_lyric_highlight_frame: None,
+            next_lyric_scroll_frame: None,
             #[cfg(target_os = "linux")]
             mpris: None,
             #[cfg(target_os = "linux")]
@@ -2083,9 +2132,9 @@ impl LyruneView {
 
     pub(crate) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.lyric_animation_frame_pending = false;
-        window.set_inactive_frame_interval(
-            (!self.cover_backdrop_expanded).then_some(crate::INACTIVE_WINDOW_FRAME_INTERVAL),
-        );
+        self.next_lyric_highlight_frame = None;
+        self.next_lyric_scroll_frame = None;
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
         self._window_subscription = Some(cx.observe_window_bounds(window, |this, window, _| {
             let size = window.window_bounds().get_bounds().size;
             let width = f32::from(size.width).round() as u32;
@@ -2193,17 +2242,67 @@ impl LyruneView {
         }
     }
 
+    fn inactive_window_frame_interval(&self) -> Option<Duration> {
+        if self.cover_backdrop_expanded {
+            combined_lyric_frame_interval(
+                self.settings.lyric_highlight_frame_rate,
+                self.settings.lyric_scroll_frame_rate,
+            )
+        } else {
+            Some(crate::INACTIVE_WINDOW_FRAME_INTERVAL)
+        }
+    }
+
+    fn reset_lyric_animation_frames(&mut self) {
+        self.next_lyric_highlight_frame = None;
+        self.next_lyric_scroll_frame = None;
+    }
+
+    fn lyric_motion_is_active(&self, now: Instant, reduce_motion: bool) -> bool {
+        if reduce_motion {
+            return false;
+        }
+        let Some(state) = &self.lyric_motion_state else {
+            return false;
+        };
+        let elapsed = now.saturating_duration_since(state.started_at);
+        (state.scroll_from != state.target && elapsed < LYRIC_SCROLL_DURATION)
+            || (state.style_from != state.target && elapsed < LYRIC_STYLE_DURATION)
+    }
+
     fn request_lyric_animation_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.lyric_animation_frame_pending {
             return;
         }
 
         self.lyric_animation_frame_pending = true;
-        cx.on_next_frame(window, |this, _, cx| {
+        cx.on_next_frame(window, |this, window, cx| {
             this.lyric_animation_frame_pending = false;
-            if this.cover_backdrop_expanded && this.playback_is_advancing() {
+            if !this.cover_backdrop_expanded || !this.playback_is_advancing() {
+                this.reset_lyric_animation_frames();
+                return;
+            }
+
+            let now = cx.background_executor().now();
+            let highlight_frame_due = lyric_frame_is_due(
+                now,
+                this.settings.lyric_highlight_frame_rate,
+                &mut this.next_lyric_highlight_frame,
+            );
+            let scroll_frame_due = if this.lyric_motion_is_active(now, cx.reduce_motion()) {
+                lyric_frame_is_due(
+                    now,
+                    this.settings.lyric_scroll_frame_rate,
+                    &mut this.next_lyric_scroll_frame,
+                )
+            } else {
+                this.next_lyric_scroll_frame = None;
+                false
+            };
+            if highlight_frame_due || scroll_frame_due {
                 cx.notify();
             }
+            this.request_lyric_animation_frame(window, cx);
         });
     }
 
@@ -2257,9 +2356,8 @@ impl LyruneView {
         if !expanded {
             self.cover_backdrop_fully_expanded = false;
         }
-        window.set_inactive_frame_interval(
-            (!expanded).then_some(crate::INACTIVE_WINDOW_FRAME_INTERVAL),
-        );
+        self.reset_lyric_animation_frames();
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
         self.wake_playback_ticks();
         cx.notify();
     }
@@ -4585,6 +4683,38 @@ impl LyruneView {
         cx.notify();
     }
 
+    fn set_lyric_highlight_frame_rate(
+        &mut self,
+        frame_rate: LyricFrameRate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.lyric_highlight_frame_rate == frame_rate {
+            return;
+        }
+        self.settings.lyric_highlight_frame_rate = frame_rate;
+        self.reset_lyric_animation_frames();
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
+        self.persist_settings();
+        cx.notify();
+    }
+
+    fn set_lyric_scroll_frame_rate(
+        &mut self,
+        frame_rate: LyricFrameRate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.lyric_scroll_frame_rate == frame_rate {
+            return;
+        }
+        self.settings.lyric_scroll_frame_rate = frame_rate;
+        self.reset_lyric_animation_frames();
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
+        self.persist_settings();
+        cx.notify();
+    }
+
     fn dismiss_popovers(&mut self, cx: &mut Context<Self>) {
         if self.account_menu_open || self.quality_menu_open {
             self.account_menu_open = false;
@@ -5315,6 +5445,36 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
+        let selected_highlight_frame_rate = self.settings.lyric_highlight_frame_rate;
+        let highlight_frame_rate_buttons = LyricFrameRate::ALL
+            .into_iter()
+            .map(|frame_rate| {
+                Button::new(format!("lyrics-highlight-{}", frame_rate.id()))
+                    .label(frame_rate.label())
+                    .ghost()
+                    .flex_1()
+                    .h(px(36.))
+                    .selected(selected_highlight_frame_rate == frame_rate)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_lyric_highlight_frame_rate(frame_rate, window, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let selected_scroll_frame_rate = self.settings.lyric_scroll_frame_rate;
+        let scroll_frame_rate_buttons = LyricFrameRate::ALL
+            .into_iter()
+            .map(|frame_rate| {
+                Button::new(format!("lyrics-scroll-{}", frame_rate.id()))
+                    .label(frame_rate.label())
+                    .ghost()
+                    .flex_1()
+                    .h(px(36.))
+                    .selected(selected_scroll_frame_rate == frame_rate)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_lyric_scroll_frame_rate(frame_rate, window, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
         div()
             .flex_1()
             .min_h_0()
@@ -5357,6 +5517,45 @@ impl LyruneView {
                                                 .child("应用于后续加载的歌曲"),
                                         )
                                         .children(quality_rows),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(div().font_medium().child("歌词动画帧率"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("默认表示跟随显示器刷新率；越高越流畅，也会增加资源消耗"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.secondary_foreground)
+                                                .child("逐字高亮与横向跟随"),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .gap_1()
+                                                .children(highlight_frame_rate_buttons),
+                                        )
+                                        .child(
+                                            div()
+                                                .pt_1()
+                                                .text_xs()
+                                                .text_color(theme.secondary_foreground)
+                                                .child("平滑滚动"),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .gap_1()
+                                                .children(scroll_frame_rate_buttons),
+                                        ),
                                 ),
                         ),
                 ),
@@ -7165,7 +7364,8 @@ impl LyruneView {
             + 2;
         let render_start = anchor.saturating_sub(render_radius);
         let render_end = (anchor + render_radius + 1).min(lyrics.lines.len());
-        let position = self.position;
+        let highlight_position =
+            lyric_position_for_frame_rate(self.position, self.settings.lyric_highlight_frame_rate);
         let track_duration = self.current_duration();
         let rows = lyrics
             .lines
@@ -7187,7 +7387,9 @@ impl LyruneView {
                             .map(|next| next.start)
                             .or(track_duration)
                             .filter(|end| *end > line.start)
-                            .map(|end| lyric_highlight_progress(line.start, end, position))
+                            .map(|end| {
+                                lyric_highlight_progress(line.start, end, highlight_position)
+                            })
                     })
                     .flatten();
                 let normal = self.lyric_layout_cache.line(
@@ -7232,7 +7434,7 @@ impl LyruneView {
             .child(PreparedLyricsElement {
                 rows,
                 foreground,
-                position: self.position,
+                position: highlight_position,
                 translation_line_height: if narrow { px(18.) } else { px(20.) },
             })
             .into_any_element()
@@ -8207,15 +8409,16 @@ impl Render for LyruneView {
 #[cfg(test)]
 mod tests {
     use super::{
-        NavigationHistory, NavigationPage, PlaybackQueue, PlaylistScrollPosition, SearchCategory,
-        canonical_queue_track_index, extract_qrc_content, format_playback_time,
-        insert_external_track_after_current, insert_track_after_current,
-        lyric_horizontal_scroll_offset, parse_lyrics, playlist_title_is_long, readable_lyric_color,
+        LyricFrameRate, NavigationHistory, NavigationPage, PlaybackQueue, PlaylistScrollPosition,
+        SearchCategory, canonical_queue_track_index, combined_lyric_frame_interval,
+        extract_qrc_content, format_playback_time, insert_external_track_after_current,
+        insert_track_after_current, lyric_frame_is_due, lyric_horizontal_scroll_offset,
+        lyric_position_for_frame_rate, parse_lyrics, playlist_title_is_long, readable_lyric_color,
         resolved_playlist_scroll_row,
     };
     use gpui::{Pixels, black, px, white};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn track(mid: &str) -> Track {
         Track {
@@ -8274,6 +8477,65 @@ mod tests {
             lyric_horizontal_scroll_offset(px(1000.), px(600.), px(1000.)),
             px(400.)
         );
+    }
+
+    #[test]
+    fn lyric_frame_intervals_preserve_the_fastest_animation_requirement() {
+        assert_eq!(
+            combined_lyric_frame_interval(LyricFrameRate::Fps30, LyricFrameRate::Fps60),
+            LyricFrameRate::Fps60.frame_interval()
+        );
+        assert_eq!(
+            combined_lyric_frame_interval(LyricFrameRate::Display, LyricFrameRate::Fps60),
+            None
+        );
+        assert_eq!(
+            combined_lyric_frame_interval(LyricFrameRate::Fps30, LyricFrameRate::Display),
+            None
+        );
+    }
+
+    #[test]
+    fn lyric_position_is_quantized_only_for_limited_highlight_rates() {
+        let position = Duration::from_millis(50);
+        assert_eq!(
+            lyric_position_for_frame_rate(position, LyricFrameRate::Fps30),
+            Duration::from_nanos(1_000_000_000 / 30)
+        );
+        assert_eq!(
+            lyric_position_for_frame_rate(position, LyricFrameRate::Display),
+            position
+        );
+    }
+
+    #[test]
+    fn limited_lyric_frames_follow_one_stable_deadline() {
+        let now = Instant::now();
+        let interval = LyricFrameRate::Fps30.frame_interval().unwrap();
+        let mut next_frame = None;
+
+        assert!(!lyric_frame_is_due(
+            now,
+            LyricFrameRate::Fps30,
+            &mut next_frame
+        ));
+        assert_eq!(next_frame, Some(now + interval));
+        assert!(!lyric_frame_is_due(
+            now + Duration::from_millis(10),
+            LyricFrameRate::Fps30,
+            &mut next_frame
+        ));
+        assert!(lyric_frame_is_due(
+            now + interval,
+            LyricFrameRate::Fps30,
+            &mut next_frame
+        ));
+        assert!(lyric_frame_is_due(
+            now + interval,
+            LyricFrameRate::Display,
+            &mut next_frame
+        ));
+        assert_eq!(next_frame, None);
     }
 
     #[test]

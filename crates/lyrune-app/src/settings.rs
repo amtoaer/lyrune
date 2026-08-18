@@ -112,6 +112,9 @@ pub struct AppSettings {
     pub volume: f32,
     pub last_nonzero_volume: f32,
     pub color_theme: ColorTheme,
+    pub ui_font_families: Vec<String>,
+    pub monospace_font_families: Vec<String>,
+    pub lyric_font_families: Vec<String>,
     pub playback_quality: Quality,
     #[serde(alias = "lyric_frame_rate")]
     pub lyric_highlight_frame_rate: LyricFrameRate,
@@ -128,6 +131,9 @@ impl Default for AppSettings {
             volume: 1.,
             last_nonzero_volume: 1.,
             color_theme: ColorTheme::default(),
+            ui_font_families: default_ui_font_families(),
+            monospace_font_families: default_monospace_font_families(),
+            lyric_font_families: default_lyric_font_families(),
             playback_quality: Quality::default(),
             lyric_highlight_frame_rate: LyricFrameRate::Fps30,
             lyric_scroll_frame_rate: LyricFrameRate::Display,
@@ -143,6 +149,14 @@ impl AppSettings {
     fn normalized(mut self) -> Self {
         self.volume = normalized_volume(self.volume, 1.);
         self.last_nonzero_volume = normalized_volume(self.last_nonzero_volume, 1.).max(0.01);
+        self.ui_font_families =
+            normalize_font_families(self.ui_font_families, default_ui_font_families());
+        self.monospace_font_families = normalize_font_families(
+            self.monospace_font_families,
+            default_monospace_font_families(),
+        );
+        self.lyric_font_families =
+            normalize_font_families(self.lyric_font_families, default_lyric_font_families());
         if self.current_playback.as_ref().is_some_and(|playback| {
             playback.track_mid.trim().is_empty()
                 || playback.queue_tracks.is_empty()
@@ -154,6 +168,56 @@ impl AppSettings {
             self.current_playback = None;
         }
         self
+    }
+}
+
+pub(crate) fn default_ui_font_families() -> Vec<String> {
+    vec![".SystemUIFont".to_owned()]
+}
+
+pub(crate) fn default_monospace_font_families() -> Vec<String> {
+    let family = if cfg!(target_os = "macos") {
+        "Menlo"
+    } else if cfg!(target_os = "windows") {
+        "Consolas"
+    } else {
+        "DejaVu Sans Mono"
+    };
+    vec![family.to_owned()]
+}
+
+pub(crate) fn default_lyric_font_families() -> Vec<String> {
+    vec![".SystemUIFont".to_owned()]
+}
+
+pub(crate) fn parse_font_families(value: &str) -> Vec<String> {
+    normalize_font_families(
+        value
+            .split([',', '，'])
+            .map(str::trim)
+            .filter(|family| !family.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Vec::new(),
+    )
+}
+
+fn normalize_font_families(families: Vec<String>, defaults: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::with_capacity(families.len());
+    for family in families {
+        let family = family.trim();
+        if !family.is_empty()
+            && !normalized
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(family))
+        {
+            normalized.push(family.to_owned());
+        }
+    }
+    if normalized.is_empty() {
+        defaults
+    } else {
+        normalized
     }
 }
 
@@ -544,6 +608,12 @@ mod tests {
         assert_eq!(settings.volume, 1.);
         assert_eq!(settings.last_nonzero_volume, 1.);
         assert_eq!(settings.color_theme, ColorTheme::CatppuccinLatte);
+        assert_eq!(settings.ui_font_families, [".SystemUIFont"]);
+        assert_eq!(
+            settings.monospace_font_families,
+            default_monospace_font_families()
+        );
+        assert_eq!(settings.lyric_font_families, [".SystemUIFont"]);
         assert_eq!(settings.playback_quality, Quality::Standard);
         assert_eq!(settings.lyric_highlight_frame_rate, LyricFrameRate::Fps30);
         assert_eq!(settings.lyric_scroll_frame_rate, LyricFrameRate::Display);
@@ -554,11 +624,22 @@ mod tests {
     }
 
     #[test]
+    fn font_family_input_is_trimmed_and_deduplicated_in_order() {
+        assert_eq!(
+            parse_font_families(" Inter, Noto Sans CJK SC，inter, , Noto Color Emoji "),
+            ["Inter", "Noto Sans CJK SC", "Noto Color Emoji"]
+        );
+    }
+
+    #[test]
     fn persisted_volumes_are_clamped() {
         let settings = AppSettings {
             volume: 2.,
             last_nonzero_volume: -1.,
             color_theme: ColorTheme::CatppuccinMocha,
+            ui_font_families: default_ui_font_families(),
+            monospace_font_families: default_monospace_font_families(),
+            lyric_font_families: default_lyric_font_families(),
             playback_quality: Quality::High,
             lyric_highlight_frame_rate: LyricFrameRate::Fps30,
             lyric_scroll_frame_rate: LyricFrameRate::Display,
@@ -584,6 +665,9 @@ mod tests {
             volume: 0.37,
             last_nonzero_volume: 0.64,
             color_theme: ColorTheme::EverforestDark,
+            ui_font_families: vec!["Inter".to_owned(), "Noto Sans CJK SC".to_owned()],
+            monospace_font_families: vec!["JetBrains Mono".to_owned()],
+            lyric_font_families: vec!["LXGW WenKai".to_owned(), "Noto Sans JP".to_owned()],
             playback_quality: Quality::HiRes,
             lyric_highlight_frame_rate: LyricFrameRate::Fps120,
             lyric_scroll_frame_rate: LyricFrameRate::Display,
@@ -618,6 +702,12 @@ mod tests {
         assert_eq!(restored.volume, expected.volume);
         assert_eq!(restored.last_nonzero_volume, expected.last_nonzero_volume);
         assert_eq!(restored.color_theme, expected.color_theme);
+        assert_eq!(restored.ui_font_families, expected.ui_font_families);
+        assert_eq!(
+            restored.monospace_font_families,
+            expected.monospace_font_families
+        );
+        assert_eq!(restored.lyric_font_families, expected.lyric_font_families);
         assert_eq!(restored.playback_quality, expected.playback_quality);
         assert_eq!(
             restored.lyric_highlight_frame_rate,

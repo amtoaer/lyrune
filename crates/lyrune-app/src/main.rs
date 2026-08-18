@@ -132,7 +132,13 @@ fn main() {
         .run(|cx: &mut App| {
             gpui_component::init(cx);
             let settings = SettingsStore::load().unwrap_or_default();
-            design::apply(settings.color_theme, None, cx);
+            let fonts = design::resolve_fonts(
+                &settings.ui_font_families,
+                &settings.monospace_font_families,
+                &settings.lyric_font_families,
+                cx,
+            );
+            design::apply(settings.color_theme, &fonts, None, cx);
             let (tray_commands, tray_events) = async_channel::unbounded();
             let tray_available = match tray::install(tray_commands) {
                 Ok(tray) => {
@@ -151,7 +157,7 @@ fn main() {
                 .open_window(
                     main_window_options(settings.window_size, cx),
                     move |window, cx| {
-                        let view = cx.new(|cx| LyruneView::new(window, settings, cx));
+                        let view = cx.new(|cx| LyruneView::new(window, settings, fonts, cx));
                         *view_slot_for_window.borrow_mut() = Some(view.clone());
                         cx.new(|cx| Root::new(view, window, cx))
                     },

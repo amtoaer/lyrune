@@ -35,7 +35,7 @@ use wana_kana::{ConvertJapanese as _, IsJapaneseStr as _};
 
 use crate::cache::AudioCache;
 use crate::credentials::CredentialStore;
-use crate::design::{self, ColorTheme};
+use crate::design::{self, AppFonts, ColorTheme};
 use crate::http::{blurred_cover, blurred_image_source, cached_image_source};
 use crate::icons::{MediaIcon, lyrune_icon, media_icon, media_icon_hsla};
 use crate::library::{
@@ -50,6 +50,8 @@ use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::settings::{
     AppSettings, CdnCacheStore, LibraryCache, LyricFrameRate, PersistedLibraryView,
     PersistedPlayback, PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
+    default_lyric_font_families, default_monospace_font_families, default_ui_font_families,
+    parse_font_families,
 };
 use crate::singleflight::SingleFlight;
 use qqmusic_api::integration::{
@@ -143,7 +145,7 @@ struct LyricLayoutCacheSource {
     mid: String,
     compact: bool,
     narrow: bool,
-    font_family: SharedString,
+    font: Font,
 }
 
 struct CachedLyricRow {
@@ -304,23 +306,23 @@ impl PreparedLyricLine {
         style: LyricLayoutStyle,
         compact: bool,
         narrow: bool,
-        font_family: &SharedString,
+        configured_font: &Font,
         window: &Window,
     ) -> Self {
         let active = style == LyricLayoutStyle::Active;
         let font_size = match (active, compact) {
-            (true, true) => px(22.),
-            (true, false) => px(24.),
+            (true, true) => px(24.),
+            (true, false) => px(28.),
             (false, true) => px(17.),
             (false, false) => px(19.),
         };
         let ruby_font_size = if narrow { px(11.) } else { px(12.) };
         let ruby_line_height = if narrow { px(13.) } else { px(15.) };
-        let mut font = font(font_family.clone());
+        let mut font = configured_font.clone();
         font.weight = if active {
-            FontWeight::SEMIBOLD
+            FontWeight::BOLD
         } else {
-            FontWeight::NORMAL
+            FontWeight::MEDIUM
         };
         let has_word_timing = !line.words.is_empty();
         let has_ruby = line.words.iter().any(|word| word.ruby.is_some());
@@ -438,12 +440,14 @@ impl PreparedLyricLine {
 }
 
 impl PreparedLyricTranslation {
-    fn new(text: &str, narrow: bool, font_family: &SharedString, window: &Window) -> Self {
+    fn new(text: &str, narrow: bool, configured_font: &Font, window: &Window) -> Self {
         let font_size = if narrow { px(13.) } else { px(14.) };
         let line_height = if narrow { px(18.) } else { px(20.) };
+        let mut font = configured_font.clone();
+        font.weight = FontWeight::MEDIUM;
         let run = TextRun {
             len: text.len(),
-            font: font(font_family.clone()),
+            font,
             color: black(),
             ..Default::default()
         };
@@ -463,7 +467,7 @@ impl LyricLayoutCache {
         mid: &str,
         compact: bool,
         narrow: bool,
-        font_family: &SharedString,
+        font: &Font,
     ) {
         let lyrics_identity = Arc::as_ptr(lyrics) as usize;
         let matches = self.source.as_ref().is_some_and(|source| {
@@ -471,7 +475,7 @@ impl LyricLayoutCache {
                 && source.mid == mid
                 && source.compact == compact
                 && source.narrow == narrow
-                && source.font_family == *font_family
+                && source.font == *font
         });
         if matches {
             return;
@@ -482,7 +486,7 @@ impl LyricLayoutCache {
             mid: mid.to_owned(),
             compact,
             narrow,
-            font_family: font_family.clone(),
+            font: font.clone(),
         });
         self.rows = (0..lyrics.lines.len())
             .map(|_| CachedLyricRow {
@@ -501,7 +505,7 @@ impl LyricLayoutCache {
         style: LyricLayoutStyle,
         compact: bool,
         narrow: bool,
-        font_family: &SharedString,
+        font: &Font,
         window: &Window,
     ) -> Arc<PreparedLyricLine> {
         let cached = match style {
@@ -511,12 +515,7 @@ impl LyricLayoutCache {
         cached
             .get_or_insert_with(|| {
                 Arc::new(PreparedLyricLine::new(
-                    lyric,
-                    style,
-                    compact,
-                    narrow,
-                    font_family,
-                    window,
+                    lyric, style, compact, narrow, font, window,
                 ))
             })
             .clone()
@@ -527,7 +526,7 @@ impl LyricLayoutCache {
         index: usize,
         lyric: &LyricLine,
         narrow: bool,
-        font_family: &SharedString,
+        font: &Font,
         window: &Window,
     ) -> Option<Arc<PreparedLyricTranslation>> {
         let row = &mut self.rows[index];
@@ -536,7 +535,7 @@ impl LyricLayoutCache {
                 Arc::new(PreparedLyricTranslation::new(
                     translation,
                     narrow,
-                    font_family,
+                    font,
                     window,
                 ))
             });
@@ -1806,6 +1805,9 @@ pub struct LyruneView {
     playlist_list: Entity<ListState<PlaylistListDelegate>>,
     track_table: Entity<TableState<TrackTableDelegate>>,
     search_input: Entity<InputState>,
+    ui_font_input: Entity<InputState>,
+    monospace_font_input: Entity<InputState>,
+    lyric_font_input: Entity<InputState>,
     progress_slider: Entity<SliderState>,
     volume_slider: Entity<SliderState>,
 
@@ -1842,6 +1844,7 @@ pub struct LyruneView {
     lyric_motion_state: Option<LyricMotionState>,
     lyrics_loading: HashSet<String>,
     lyrics_errors: HashMap<String, String>,
+    fonts: AppFonts,
     settings: AppSettings,
     library_cache: LibraryCache,
     liked_tracks: HashMap<String, bool>,
@@ -1870,7 +1873,12 @@ pub struct LyruneView {
 }
 
 impl LyruneView {
-    pub fn new(window: &mut Window, settings: AppSettings, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        window: &mut Window,
+        settings: AppSettings,
+        fonts: AppFonts,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (audio, mut initial_status, mut initial_status_is_error) = match AudioPlayer::new() {
             Ok(player) => {
                 player.set_volume(settings.volume);
@@ -1917,6 +1925,21 @@ impl LyruneView {
             InputState::new(window, cx)
                 .placeholder("想播放什么？")
                 .context_menu(false)
+        });
+        let ui_font_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.ui_font_families.join(", "))
+                .placeholder("例如：Inter, Noto Sans CJK SC")
+        });
+        let monospace_font_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.monospace_font_families.join(", "))
+                .placeholder("例如：JetBrains Mono, Noto Sans Mono")
+        });
+        let lyric_font_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.lyric_font_families.join(", "))
+                .placeholder("例如：LXGW WenKai, Noto Sans CJK JP")
         });
         let (load_more_sender, load_more_receiver) = async_channel::bounded(1);
         let (track_event_sender, track_event_receiver) = async_channel::unbounded();
@@ -2062,6 +2085,9 @@ impl LyruneView {
             playlist_list,
             track_table,
             search_input,
+            ui_font_input,
+            monospace_font_input,
+            lyric_font_input,
             progress_slider,
             volume_slider,
             audio,
@@ -2097,6 +2123,7 @@ impl LyruneView {
             lyric_motion_state: None,
             lyrics_loading: HashSet::new(),
             lyrics_errors: HashMap::new(),
+            fonts,
             settings,
             library_cache,
             liked_tracks: HashMap::new(),
@@ -4671,7 +4698,7 @@ impl LyruneView {
             return;
         }
         self.settings.color_theme = color_theme;
-        design::apply(color_theme, Some(window), cx);
+        design::apply(color_theme, &self.fonts, Some(window), cx);
         self.persist_settings();
         cx.notify();
     }
@@ -4681,6 +4708,69 @@ impl LyruneView {
             return;
         }
         self.settings.playback_quality = quality;
+        self.persist_settings();
+        cx.notify();
+    }
+
+    fn apply_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ui = parse_font_families(self.ui_font_input.read(cx).value().as_ref());
+        let monospace = parse_font_families(self.monospace_font_input.read(cx).value().as_ref());
+        let lyrics = parse_font_families(self.lyric_font_input.read(cx).value().as_ref());
+        self.set_font_settings(
+            if ui.is_empty() {
+                default_ui_font_families()
+            } else {
+                ui
+            },
+            if monospace.is_empty() {
+                default_monospace_font_families()
+            } else {
+                monospace
+            },
+            if lyrics.is_empty() {
+                default_lyric_font_families()
+            } else {
+                lyrics
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn reset_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ui = default_ui_font_families();
+        let monospace = default_monospace_font_families();
+        let lyrics = default_lyric_font_families();
+        self.set_font_settings(ui, monospace, lyrics, window, cx);
+    }
+
+    fn set_font_settings(
+        &mut self,
+        ui: Vec<String>,
+        monospace: Vec<String>,
+        lyrics: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ui_font_input
+            .update(cx, |input, cx| input.set_value(ui.join(", "), window, cx));
+        self.monospace_font_input.update(cx, |input, cx| {
+            input.set_value(monospace.join(", "), window, cx)
+        });
+        self.lyric_font_input.update(cx, |input, cx| {
+            input.set_value(lyrics.join(", "), window, cx)
+        });
+        self.settings.ui_font_families = ui;
+        self.settings.monospace_font_families = monospace;
+        self.settings.lyric_font_families = lyrics;
+        self.fonts = design::resolve_fonts(
+            &self.settings.ui_font_families,
+            &self.settings.monospace_font_families,
+            &self.settings.lyric_font_families,
+            cx,
+        );
+        design::apply(self.settings.color_theme, &self.fonts, Some(window), cx);
+        self.lyric_layout_cache = LyricLayoutCache::default();
         self.persist_settings();
         cx.notify();
     }
@@ -5263,6 +5353,7 @@ impl LyruneView {
 
         v_flex()
             .size_full()
+            .font(self.fonts.ui.clone())
             .items_center()
             .justify_center()
             .bg(theme.background)
@@ -5407,6 +5498,23 @@ impl LyruneView {
 
     fn render_settings_page(&mut self, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let font_field = |label: &'static str, detail: &'static str, input: &Entity<InputState>| {
+            v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .items_baseline()
+                        .gap_2()
+                        .child(div().text_sm().font_medium().child(label))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(detail),
+                        ),
+                )
+                .child(Input::new(input).w_full().h(px(40.)).aria_label(label))
+        };
         let selected_theme = self.settings.color_theme;
         let theme_rows = ColorTheme::ALL
             .chunks(2)
@@ -5504,6 +5612,61 @@ impl LyruneView {
                                         .gap_2()
                                         .child(div().font_medium().child("主题配色"))
                                         .children(theme_rows),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_3()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(div().font_medium().child("字体"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("按优先级填写字体名称，以逗号分隔"),
+                                        )
+                                        .child(font_field(
+                                            "UI 字体",
+                                            "应用于整个界面",
+                                            &self.ui_font_input,
+                                        ))
+                                        .child(font_field(
+                                            "等宽字体",
+                                            "应用于时间等定宽文本",
+                                            &self.monospace_font_input,
+                                        ))
+                                        .child(font_field(
+                                            "歌词字体",
+                                            "应用于主歌词、翻译与注音",
+                                            &self.lyric_font_input,
+                                        ))
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .justify_end()
+                                                .gap_2()
+                                                .child(
+                                                    Button::new("reset-font-settings")
+                                                        .label("恢复默认")
+                                                        .outline()
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.reset_font_settings(window, cx)
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
+                                                    Button::new("apply-font-settings")
+                                                        .label("应用字体")
+                                                        .primary()
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.apply_font_settings(window, cx)
+                                                            },
+                                                        )),
+                                                ),
+                                        ),
                                 )
                                 .child(
                                     v_flex()
@@ -6550,6 +6713,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
+        let monospace_font = self.fonts.monospace.clone();
         let current_mid = self.current_track_data().map(|track| track.mid.clone());
         let loading_mid = self
             .loading_track
@@ -6665,7 +6829,7 @@ impl LyruneView {
                                 .w(px(52.))
                                 .flex_shrink_0()
                                 .text_right()
-                                .font_family(design::system_monospace_font_family())
+                                .font(monospace_font.clone())
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
                                 .child(duration),
@@ -7140,6 +7304,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
+        let monospace_font = self.fonts.monospace.clone();
         let percentage = self.progress_slider.read(cx).percentage().end;
         let duration = self.current_duration().unwrap_or_default();
         let interactive = has_track && self.playback_started && self.loading_track.is_none();
@@ -7247,7 +7412,7 @@ impl LyruneView {
                     .bg(theme.popover)
                     .shadow_md()
                     .when(hover_visible, |tooltip| tooltip.occlude())
-                    .font_family(design::system_monospace_font_family())
+                    .font(monospace_font.clone())
                     .text_xs()
                     .font_medium()
                     .text_color(theme.primary)
@@ -7274,7 +7439,7 @@ impl LyruneView {
                                 .left_0()
                                 .w(px(64.))
                                 .text_center()
-                                .font_family(design::system_monospace_font_family())
+                                .font(monospace_font.clone())
                                 .text_xs()
                                 .text_color(theme.secondary_foreground)
                                 .child(current_time),
@@ -7286,7 +7451,7 @@ impl LyruneView {
                                 .right_0()
                                 .w(px(64.))
                                 .text_center()
-                                .font_family(design::system_monospace_font_family())
+                                .font(monospace_font.clone())
                                 .text_xs()
                                 .text_color(theme.secondary_foreground)
                                 .child(total_time),
@@ -7349,9 +7514,9 @@ impl LyruneView {
             return message("暂无歌词", None);
         }
 
-        let font_family: SharedString = design::system_ui_font_family().into();
+        let lyric_font = self.fonts.lyrics.clone();
         self.lyric_layout_cache
-            .reset_if_needed(&lyrics, mid, compact, narrow, &font_family);
+            .reset_if_needed(&lyrics, mid, compact, narrow, &lyric_font);
 
         let active = lyrics.active_index(self.position);
         let anchor = active.unwrap_or(0);
@@ -7400,7 +7565,7 @@ impl LyruneView {
                     LyricLayoutStyle::Normal,
                     compact,
                     narrow,
-                    &font_family,
+                    &lyric_font,
                     window,
                 );
                 let active_layout = self.lyric_layout_cache.line(
@@ -7409,12 +7574,12 @@ impl LyruneView {
                     LyricLayoutStyle::Active,
                     compact,
                     narrow,
-                    &font_family,
+                    &lyric_font,
                     window,
                 );
                 let translation =
                     self.lyric_layout_cache
-                        .translation(index, line, narrow, &font_family, window);
+                        .translation(index, line, narrow, &lyric_font, window);
                 PreparedLyricRow {
                     normal,
                     active: active_layout,
@@ -7715,6 +7880,7 @@ impl LyruneView {
                         .id("toggle-cover-backdrop")
                         .absolute()
                         .inset_0()
+                        .rounded(px(10.))
                         .opacity(0.)
                         .hover(|style| style.opacity(1.))
                         .bg(black().opacity(0.38))
@@ -7788,6 +7954,9 @@ impl LyruneView {
                 this.cursor_pointer()
                     .hover(move |style| style.text_color(hover_color))
                     .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.cover_backdrop_expanded {
+                            this.set_cover_backdrop_expanded(false, window, cx);
+                        }
                         this.open_home_playlist(album.clone().into_playlist(), window, cx);
                     }))
             })
@@ -7819,6 +7988,9 @@ impl LyruneView {
                             .text_color(theme.secondary_foreground)
                             .hover(move |style| style.text_color(hover_color))
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                if this.cover_backdrop_expanded {
+                                    this.set_cover_backdrop_expanded(false, window, cx);
+                                }
                                 this.open_search_artist(artist.clone(), window, cx);
                             }))
                             .child(name)
@@ -8157,6 +8329,7 @@ impl LyruneView {
             return v_flex()
                 .relative()
                 .size_full()
+                .font(self.fonts.ui.clone())
                 .bg(theme.background)
                 .text_color(theme.foreground)
                 .child(div().flex_1().min_h_0())
@@ -8336,6 +8509,7 @@ impl LyruneView {
         v_flex()
             .relative()
             .size_full()
+            .font(self.fonts.ui.clone())
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(

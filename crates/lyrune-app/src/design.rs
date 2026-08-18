@@ -1,58 +1,49 @@
-use std::{rc::Rc, sync::OnceLock};
+use std::rc::Rc;
 
-#[cfg(target_os = "linux")]
-use std::process::Command;
-
-use gpui::{App, Window};
+use gpui::{App, Font, FontFallbacks, Window, font};
 use gpui_component::{Theme, ThemeConfig, ThemeConfigColors, ThemeMode};
 use serde::{Deserialize, Serialize};
 
-static SYSTEM_UI_FONT_FAMILY: OnceLock<String> = OnceLock::new();
-static SYSTEM_MONOSPACE_FONT_FAMILY: OnceLock<String> = OnceLock::new();
+#[derive(Clone)]
+pub(crate) struct AppFonts {
+    pub ui: Font,
+    pub monospace: Font,
+    pub lyrics: Font,
+}
 
-#[cfg(target_os = "linux")]
-fn fontconfig_font_family(alias: &str) -> Option<String> {
-    let output = Command::new("fc-match")
-        .args(["--format=%{family[0]}", alias])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+pub(crate) fn resolve_fonts(
+    ui: &[String],
+    monospace: &[String],
+    lyrics: &[String],
+    cx: &App,
+) -> AppFonts {
+    let available = cx.text_system().all_font_names();
+    AppFonts {
+        ui: resolve_font_chain(ui, ".SystemUIFont", &available),
+        monospace: resolve_font_chain(monospace, ".SystemUIFont", &available),
+        lyrics: resolve_font_chain(lyrics, ".SystemUIFont", &available),
     }
-    let family = String::from_utf8(output.stdout).ok()?;
-    (!family.trim().is_empty()).then(|| family.trim().to_owned())
 }
 
-pub(crate) fn system_ui_font_family() -> &'static str {
-    SYSTEM_UI_FONT_FAMILY
-        .get_or_init(|| {
-            #[cfg(target_os = "linux")]
-            if let Some(family) = fontconfig_font_family("system-ui") {
-                return family;
-            }
-
-            ".SystemUIFont".to_owned()
+fn resolve_font_chain(families: &[String], default: &str, available: &[String]) -> Font {
+    let mut resolved = families
+        .iter()
+        .filter_map(|family| {
+            available
+                .iter()
+                .find(|available| available.eq_ignore_ascii_case(family))
+                .cloned()
         })
-        .as_str()
-}
+        .collect::<Vec<_>>();
+    if resolved.is_empty() {
+        resolved.push(default.to_owned());
+    }
 
-pub(crate) fn system_monospace_font_family() -> &'static str {
-    SYSTEM_MONOSPACE_FONT_FAMILY
-        .get_or_init(|| {
-            #[cfg(target_os = "linux")]
-            if let Some(family) = fontconfig_font_family("monospace") {
-                return family;
-            }
-
-            #[cfg(target_os = "macos")]
-            let fallback = "Menlo";
-            #[cfg(target_os = "windows")]
-            let fallback = "Consolas";
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            let fallback = "monospace";
-            fallback.to_owned()
-        })
-        .as_str()
+    let mut resolved_font = font(resolved.remove(0));
+    if !resolved.is_empty() {
+        resolved_font.fallbacks = Some(FontFallbacks::from_fonts(resolved));
+    }
+    resolved_font
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -378,10 +369,15 @@ struct Palette {
     scrollbar_thumb: &'static str,
 }
 
-pub fn apply(color_theme: ColorTheme, window: Option<&mut Window>, cx: &mut App) {
+pub(crate) fn apply(
+    color_theme: ColorTheme,
+    fonts: &AppFonts,
+    window: Option<&mut Window>,
+    cx: &mut App,
+) {
     let palette = color_theme.palette();
     let mode = palette.mode;
-    let config = Rc::new(theme_config(color_theme.label(), palette));
+    let config = Rc::new(theme_config(color_theme.label(), palette, fonts));
 
     if mode.is_dark() {
         Theme::global_mut(cx).dark_theme = config;
@@ -392,7 +388,7 @@ pub fn apply(color_theme: ColorTheme, window: Option<&mut Window>, cx: &mut App)
     Theme::global_mut(cx).list.active_highlight = false;
 }
 
-fn theme_config(name: &'static str, palette: Palette) -> ThemeConfig {
+fn theme_config(name: &'static str, palette: Palette, fonts: &AppFonts) -> ThemeConfig {
     let mut colors = ThemeConfigColors::default();
     colors.background = Some(palette.background.into());
     colors.foreground = Some(palette.foreground.into());
@@ -474,7 +470,8 @@ fn theme_config(name: &'static str, palette: Palette) -> ThemeConfig {
         name: name.into(),
         mode: palette.mode,
         font_size: Some(14.),
-        font_family: Some(system_ui_font_family().into()),
+        font_family: Some(fonts.ui.family.clone()),
+        mono_font_family: Some(fonts.monospace.family.clone()),
         radius: Some(8),
         radius_lg: Some(12),
         shadow: Some(true),
@@ -503,5 +500,25 @@ mod tests {
         let restored: ColorTheme =
             serde_json::from_str("\"lyrune-neutral\"").expect("deserialize legacy theme");
         assert_eq!(restored, ColorTheme::CatppuccinLatte);
+    }
+
+    #[test]
+    fn font_chain_skips_missing_families_and_preserves_order() {
+        let configured = vec![
+            "Missing Font".to_owned(),
+            "inter".to_owned(),
+            "Noto Sans CJK SC".to_owned(),
+        ];
+        let available = vec!["Inter".to_owned(), "Noto Sans CJK SC".to_owned()];
+        let resolved = resolve_font_chain(&configured, ".SystemUIFont", &available);
+
+        assert_eq!(resolved.family.as_ref(), "Inter");
+        assert_eq!(
+            resolved
+                .fallbacks
+                .expect("configured fallback")
+                .fallback_list(),
+            ["Noto Sans CJK SC"]
+        );
     }
 }

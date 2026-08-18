@@ -71,28 +71,91 @@ const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const LYRIC_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
 const LYRIC_ROW_HEIGHT: f32 = 104.;
+const LYRIC_EDGE_FADE_DISTANCE: f32 = 48.;
 const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
+const LYRIC_TRACK_SWITCH_DURATION: Duration = Duration::from_millis(420);
+const LYRIC_BACKGROUND_OVERLAY_OPACITY: f32 = 0.5;
+const LYRIC_MINIMUM_CONTRAST: f32 = 5.;
 const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
 const LYRIC_HORIZONTAL_STEP: f32 = 0.5;
 const TRANSLATION_ALIGNMENT_TOLERANCE: Duration = Duration::from_millis(500);
 
-fn readable_lyric_color(sampled_rgb: [f32; 3], overlay: Hsla) -> Hsla {
-    let overlay = overlay.to_rgb();
-    let blended = [
-        sampled_rgb[0] * (1. - overlay.a) + overlay.r * overlay.a,
-        sampled_rgb[1] * (1. - overlay.a) + overlay.g * overlay.a,
-        sampled_rgb[2] * (1. - overlay.a) + overlay.b * overlay.a,
-    ];
-    let linear = blended.map(|channel| {
+fn relative_luminance(color: Rgba) -> f32 {
+    let linearize = |channel: f32| {
         if channel <= 0.04045 {
             channel / 12.92
         } else {
             ((channel + 0.055) / 1.055).powf(2.4)
         }
-    });
-    let luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
-    if luminance > 0.179 { black() } else { white() }
+    };
+    0.2126 * linearize(color.r) + 0.7152 * linearize(color.g) + 0.0722 * linearize(color.b)
+}
+
+fn contrast_ratio(first: Rgba, second: Rgba) -> f32 {
+    let first = relative_luminance(first);
+    let second = relative_luminance(second);
+    (first.max(second) + 0.05) / (first.min(second) + 0.05)
+}
+
+fn interpolate_color(from: Hsla, to: Hsla, progress: f32) -> Hsla {
+    let from = from.to_rgb();
+    let to = to.to_rgb();
+    let progress = progress.clamp(0., 1.);
+    Rgba {
+        r: from.r + (to.r - from.r) * progress,
+        g: from.g + (to.g - from.g) * progress,
+        b: from.b + (to.b - from.b) * progress,
+        a: from.a + (to.a - from.a) * progress,
+    }
+    .into()
+}
+
+fn readable_lyric_color(sampled_rgb: [f32; 3], overlay: Hsla, preferred: Hsla) -> Hsla {
+    let overlay = overlay.to_rgb();
+    let background = Rgba {
+        r: sampled_rgb[0] * (1. - overlay.a) + overlay.r * overlay.a,
+        g: sampled_rgb[1] * (1. - overlay.a) + overlay.g * overlay.a,
+        b: sampled_rgb[2] * (1. - overlay.a) + overlay.b * overlay.a,
+        a: 1.,
+    };
+    let mut preferred = preferred.to_rgb();
+    preferred.a = 1.;
+    if contrast_ratio(preferred, background) >= LYRIC_MINIMUM_CONTRAST {
+        return preferred.into();
+    }
+
+    let black = black().to_rgb();
+    let white = white().to_rgb();
+    let neutral = if contrast_ratio(black, background) >= contrast_ratio(white, background) {
+        black
+    } else {
+        white
+    };
+    let mut lower = 0.;
+    let mut upper = 1.;
+    for _ in 0..12 {
+        let amount = (lower + upper) / 2.;
+        let candidate = Rgba {
+            r: preferred.r + (neutral.r - preferred.r) * amount,
+            g: preferred.g + (neutral.g - preferred.g) * amount,
+            b: preferred.b + (neutral.b - preferred.b) * amount,
+            a: 1.,
+        };
+        if contrast_ratio(candidate, background) >= LYRIC_MINIMUM_CONTRAST {
+            upper = amount;
+        } else {
+            lower = amount;
+        }
+    }
+
+    Rgba {
+        r: preferred.r + (neutral.r - preferred.r) * upper,
+        g: preferred.g + (neutral.g - preferred.g) * upper,
+        b: preferred.b + (neutral.b - preferred.b) * upper,
+        a: 1.,
+    }
+    .into()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,23 +250,29 @@ struct LyricMotionState {
 }
 
 impl LyricMotionState {
-    fn sample(&self, from: f32, duration: Duration, now: Instant) -> f32 {
-        if from == self.target || duration.is_zero() {
+    fn progress(&self, duration: Duration, now: Instant) -> f32 {
+        if duration.is_zero() {
+            return 1.;
+        }
+        (now.saturating_duration_since(self.started_at).as_secs_f32() / duration.as_secs_f32())
+            .clamp(0., 1.)
+    }
+
+    fn sample(&self, from: f32, progress: f32) -> f32 {
+        if from == self.target || progress >= 1. {
             return self.target;
         }
-        let progress =
-            now.saturating_duration_since(self.started_at).as_secs_f32() / duration.as_secs_f32();
-        let progress = progress.clamp(0., 1.);
-        let eased = 1. - (1. - progress).powi(3);
-        from + (self.target - from) * eased
+        from + (self.target - from) * progress
     }
 
     fn scroll_anchor(&self, now: Instant) -> f32 {
-        self.sample(self.scroll_from, LYRIC_SCROLL_DURATION, now)
+        let progress = self.progress(LYRIC_SCROLL_DURATION, now);
+        self.sample(self.scroll_from, 1. - (1. - progress).powi(3))
     }
 
     fn style_anchor(&self, now: Instant) -> f32 {
-        self.sample(self.style_from, LYRIC_STYLE_DURATION, now)
+        let progress = self.progress(LYRIC_STYLE_DURATION, now);
+        self.sample(self.style_from, progress * progress * (3. - 2. * progress))
     }
 }
 
@@ -223,6 +292,22 @@ fn lyric_highlight_progress(start: Duration, end: Duration, position: Duration) 
     }
 
     position.saturating_sub(start).as_secs_f32() / end.saturating_sub(start).as_secs_f32()
+}
+
+fn adjacent_lyric_timing(
+    previous: Option<(Duration, Duration)>,
+    next: Option<(Duration, Duration)>,
+    line_start: Duration,
+    line_end: Duration,
+) -> (Duration, Duration) {
+    match (previous, next) {
+        (Some((_, previous_end)), Some((next_start, _))) => {
+            (previous_end, next_start.max(previous_end))
+        }
+        (Some((_, previous_end)), None) => (previous_end, line_end.max(previous_end)),
+        (None, Some((next_start, _))) => (line_start, next_start.max(line_start)),
+        (None, None) => (line_start, line_end.max(line_start)),
+    }
 }
 
 fn lyric_horizontal_scroll_offset(
@@ -300,9 +385,21 @@ fn interpolated_lyric_line_opacity(anchor: f32, index: usize) -> f32 {
     from + (lyric_line_opacity(next, index) - from) * progress
 }
 
+fn lyric_edge_opacity(
+    row_top: Pixels,
+    row_bottom: Pixels,
+    viewport_top: Pixels,
+    viewport_bottom: Pixels,
+) -> f32 {
+    let top = (f32::from(row_top - viewport_top) / LYRIC_EDGE_FADE_DISTANCE).clamp(0., 1.);
+    let bottom = (f32::from(viewport_bottom - row_bottom) / LYRIC_EDGE_FADE_DISTANCE).clamp(0., 1.);
+    top.min(bottom)
+}
+
 impl PreparedLyricLine {
     fn new(
         line: &LyricLine,
+        line_end: Duration,
         style: LyricLayoutStyle,
         compact: bool,
         narrow: bool,
@@ -367,19 +464,40 @@ impl PreparedLyricLine {
 
         if split_fragments {
             let mut cursor = 0;
+            let mut previous_timing = None;
             for word in &line.words {
+                let timing = (word.start, word.end);
                 if cursor < word.range.start {
-                    push_fragment(&line.text[cursor..word.range.start], None, None);
+                    push_fragment(
+                        &line.text[cursor..word.range.start],
+                        None,
+                        active.then_some(adjacent_lyric_timing(
+                            previous_timing,
+                            Some(timing),
+                            line.start,
+                            line_end,
+                        )),
+                    );
                 }
                 push_fragment(
                     &line.text[word.range.clone()],
                     word.ruby.as_ref(),
-                    active.then_some((word.start, word.end)),
+                    active.then_some(timing),
                 );
                 cursor = word.range.end;
+                previous_timing = Some(timing);
             }
             if cursor < line.text.len() {
-                push_fragment(&line.text[cursor..], None, None);
+                push_fragment(
+                    &line.text[cursor..],
+                    None,
+                    active.then_some(adjacent_lyric_timing(
+                        previous_timing,
+                        None,
+                        line.start,
+                        line_end,
+                    )),
+                );
             }
         } else {
             push_fragment(&line.text, None, None);
@@ -502,6 +620,7 @@ impl LyricLayoutCache {
         &mut self,
         index: usize,
         lyric: &LyricLine,
+        line_end: Duration,
         style: LyricLayoutStyle,
         compact: bool,
         narrow: bool,
@@ -515,7 +634,7 @@ impl LyricLayoutCache {
         cached
             .get_or_insert_with(|| {
                 Arc::new(PreparedLyricLine::new(
-                    lyric, style, compact, narrow, font, window,
+                    lyric, line_end, style, compact, narrow, font, window,
                 ))
             })
             .clone()
@@ -775,7 +894,8 @@ impl Element for PreparedLyricsElement {
         window: &mut Window,
         _cx: &mut App,
     ) {
-        let visible_bounds = bounds.intersect(&window.content_mask().bounds);
+        let viewport_bounds = window.content_mask().bounds;
+        let visible_bounds = bounds.intersect(&viewport_bounds);
         if visible_bounds.is_empty() {
             return;
         }
@@ -810,6 +930,16 @@ impl Element for PreparedLyricsElement {
                 if !row_bounds.intersects(&visible_bounds) {
                     continue;
                 }
+                let edge_opacity = lyric_edge_opacity(
+                    row_bounds.top(),
+                    row_bounds.bottom(),
+                    viewport_bounds.top(),
+                    viewport_bounds.bottom(),
+                );
+                if edge_opacity <= 0.001 {
+                    continue;
+                }
+                let opacity = row.opacity * edge_opacity;
                 let lyric_height = row.normal.height().max(row.active.height());
                 let content_height = lyric_height + px(4.) + self.translation_line_height;
                 let lyric_bounds = Bounds::new(
@@ -827,7 +957,7 @@ impl Element for PreparedLyricsElement {
                     ),
                     lyric_bounds,
                     LyricLayoutStyle::Normal,
-                    row.opacity * (1. - emphasis),
+                    opacity * (1. - emphasis),
                     target_font_size,
                     self.foreground,
                     self.position,
@@ -841,7 +971,7 @@ impl Element for PreparedLyricsElement {
                     ),
                     lyric_bounds,
                     LyricLayoutStyle::Active,
-                    row.opacity * emphasis,
+                    opacity * emphasis,
                     target_font_size,
                     self.foreground,
                     self.position,
@@ -852,7 +982,7 @@ impl Element for PreparedLyricsElement {
                         &translation.layout,
                         point(row_bounds.origin.x, lyric_bounds.bottom() + px(4.)),
                         translation.line_height,
-                        self.foreground.opacity(row.opacity * 0.72),
+                        self.foreground.opacity(opacity * 0.72),
                         1.,
                         window,
                     );
@@ -1869,6 +1999,8 @@ pub struct LyruneView {
     pending_lyrics_cache: HashMap<String, MemoryLyrics>,
     lyric_layout_cache: LyricLayoutCache,
     lyric_motion_state: Option<LyricMotionState>,
+    pending_lyric_reveal_mid: Option<String>,
+    lyric_reveal_frame_pending: bool,
     lyrics_loading: HashSet<String>,
     lyrics_errors: HashMap<String, String>,
     fonts: AppFonts,
@@ -2148,6 +2280,8 @@ impl LyruneView {
             pending_lyrics_cache: HashMap::new(),
             lyric_layout_cache: LyricLayoutCache::default(),
             lyric_motion_state: None,
+            pending_lyric_reveal_mid: None,
+            lyric_reveal_frame_pending: false,
             lyrics_loading: HashSet::new(),
             lyrics_errors: HashMap::new(),
             fonts,
@@ -2400,6 +2534,29 @@ impl LyruneView {
             state.started_at = now;
         }
         (state.scroll_anchor(now), state.style_anchor(now))
+    }
+
+    fn defer_new_lyrics_until_next_frame(
+        &mut self,
+        mid: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.pending_lyric_reveal_mid.as_deref() != Some(mid) {
+            return false;
+        }
+        if !self.lyric_reveal_frame_pending {
+            self.lyric_reveal_frame_pending = true;
+            let mid = mid.to_owned();
+            cx.on_next_frame(window, move |this, _, cx| {
+                this.lyric_reveal_frame_pending = false;
+                if this.pending_lyric_reveal_mid.as_deref() == Some(mid.as_str()) {
+                    this.pending_lyric_reveal_mid = None;
+                }
+                cx.notify();
+            });
+        }
+        true
     }
 
     fn set_cover_backdrop_expanded(
@@ -4229,6 +4386,10 @@ impl LyruneView {
             .map(|location| location.urls.clone());
 
         audio.stop();
+        if !same_track {
+            self.lyric_motion_state = None;
+            self.pending_lyric_reveal_mid = self.cover_backdrop_expanded.then(|| track.mid.clone());
+        }
         self.ensure_track_lyrics(client.clone(), credential.clone(), track.clone(), cx);
         self.play_generation = self.play_generation.wrapping_add(1);
         let generation = self.play_generation;
@@ -5473,12 +5634,6 @@ impl LyruneView {
                             .shadow_lg()
                             .occlude()
                             .child(div().truncate().font_medium().child(name))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("QQ 音乐账号"),
-                            )
                             .child(
                                 Button::new("open-settings")
                                     .ghost()
@@ -7324,9 +7479,48 @@ impl LyruneView {
             .into_any_element()
     }
 
+    fn lyric_foreground_for_url(
+        &self,
+        url: &str,
+        narrow: bool,
+        overlay: Hsla,
+        preferred: Hsla,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Hsla> {
+        blurred_cover(url, window, cx)
+            .and_then(Result::ok)
+            .map(|cover| readable_lyric_color(cover.sampled_rgb(narrow), overlay, preferred))
+    }
+
+    fn lyric_foreground_target(
+        &self,
+        narrow: bool,
+        overlay: Hsla,
+        preferred: Hsla,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Hsla> {
+        for url in [
+            self.backdrop_current_url.as_deref(),
+            self.backdrop_previous_url.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(color) =
+                self.lyric_foreground_for_url(url, narrow, overlay, preferred, window, cx)
+            {
+                return Some(color);
+            }
+        }
+        None
+    }
+
     fn render_player_progress(
         &mut self,
         has_track: bool,
+        narrow: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -7348,6 +7542,18 @@ impl LyruneView {
             window,
             cx,
         );
+        let edge_time_color = if self.cover_backdrop_expanded && hover_fraction.is_some() {
+            self.lyric_foreground_target(
+                narrow,
+                theme.background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY),
+                theme.foreground,
+                window,
+                cx,
+            )
+            .unwrap_or(theme.foreground)
+        } else {
+            theme.secondary_foreground
+        };
 
         let track = SliderTrack::new(&self.progress_slider)
             .disabled(!interactive)
@@ -7468,7 +7674,7 @@ impl LyruneView {
                                 .text_center()
                                 .font(monospace_font.clone())
                                 .text_xs()
-                                .text_color(theme.secondary_foreground)
+                                .text_color(edge_time_color)
                                 .child(current_time),
                         )
                         .child(
@@ -7480,7 +7686,7 @@ impl LyruneView {
                                 .text_center()
                                 .font(monospace_font.clone())
                                 .text_xs()
-                                .text_color(theme.secondary_foreground)
+                                .text_color(edge_time_color)
                                 .child(total_time),
                         )
                         .child(tooltip),
@@ -7545,11 +7751,11 @@ impl LyruneView {
         self.lyric_layout_cache
             .reset_if_needed(&lyrics, mid, compact, narrow, &lyric_font);
 
-        let active = lyrics.active_index(self.position);
-        let anchor = active.unwrap_or(0);
+        let anchor = lyrics.active_index(self.position).unwrap_or(0);
+        let active = Some(anchor);
+        let now = cx.background_executor().now();
         let motion_enabled =
             self.cover_backdrop_expanded && self.playback_is_advancing() && !cx.reduce_motion();
-        let now = cx.background_executor().now();
         let (scroll_anchor, style_anchor) =
             self.lyric_motion_anchors(mid, anchor, motion_enabled, now);
         let scroll_offset = px(scroll_anchor * LYRIC_ROW_HEIGHT);
@@ -7573,22 +7779,20 @@ impl LyruneView {
                 let emphasis = active.map_or(0., |_| {
                     (1. - (index as f32 - style_anchor).abs()).clamp(0., 1.)
                 });
-                let estimated_line_progress = (current && line.words.is_empty())
-                    .then(|| {
-                        lyrics
-                            .lines
-                            .get(index + 1)
-                            .map(|next| next.start)
-                            .or(track_duration)
-                            .filter(|end| *end > line.start)
-                            .map(|end| {
-                                lyric_highlight_progress(line.start, end, highlight_position)
-                            })
-                    })
-                    .flatten();
+                let line_end = lyrics
+                    .lines
+                    .get(index + 1)
+                    .map(|next| next.start)
+                    .or(track_duration)
+                    .unwrap_or_else(|| line.words.last().map_or(line.start, |word| word.end));
+                let estimated_line_progress = (current
+                    && line.words.is_empty()
+                    && line_end > line.start)
+                    .then(|| lyric_highlight_progress(line.start, line_end, highlight_position));
                 let normal = self.lyric_layout_cache.line(
                     index,
                     line,
+                    line_end,
                     LyricLayoutStyle::Normal,
                     compact,
                     narrow,
@@ -7598,6 +7802,7 @@ impl LyruneView {
                 let active_layout = self.lyric_layout_cache.line(
                     index,
                     line,
+                    line_end,
                     LyricLayoutStyle::Active,
                     compact,
                     narrow,
@@ -7640,6 +7845,7 @@ impl LyruneView {
             .current_track_data()
             .map(|track| track.mid.clone())
             .unwrap_or_default();
+        let defer_new_lyrics = self.defer_new_lyrics_until_next_frame(&track_mid, window, cx);
         let viewport_width = f32::from(window.viewport_size().width);
         let compact = viewport_width < 1120.;
         let narrow = viewport_width < 900.;
@@ -7674,7 +7880,7 @@ impl LyruneView {
                     .unwrap_or_else(|| url.clone());
                 let previous_backdrop_url = self.backdrop_previous_url.clone();
                 let track_transition_duration = if self.cover_backdrop_expanded {
-                    Duration::from_millis(420)
+                    LYRIC_TRACK_SWITCH_DURATION
                 } else {
                     Duration::ZERO
                 };
@@ -7696,38 +7902,45 @@ impl LyruneView {
                 };
                 let previous_backdrop_opacity = 1. - current_backdrop_opacity;
                 let cover_url = url.clone();
-                let mut lyric_foreground_target = blurred_cover(&current_backdrop_url, window, cx)
-                    .and_then(Result::ok)
-                    .map(|cover| {
-                        readable_lyric_color(cover.sampled_rgb(), theme.background.opacity(0.28))
-                    });
-                if lyric_foreground_target.is_none()
-                    && let Some(previous_url) = previous_backdrop_url.as_deref()
-                {
-                    lyric_foreground_target = blurred_cover(previous_url, window, cx)
-                        .and_then(Result::ok)
-                        .map(|cover| {
-                            readable_lyric_color(
-                                cover.sampled_rgb(),
-                                theme.background.opacity(0.28),
-                            )
-                        });
-                }
-                let lyric_foreground = transition(
-                    ("cover-backdrop", "lyric-foreground"),
-                    lyric_foreground_target.unwrap_or(theme.foreground),
-                    Transition::new(track_transition_duration),
-                    window,
-                    cx,
-                );
-                let lyrics = self.render_lyrics_panel(
-                    &track_mid,
-                    lyric_foreground,
-                    compact,
+                let overlay = theme.background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY);
+                let current_lyric_foreground = self.lyric_foreground_for_url(
+                    &current_backdrop_url,
                     narrow,
+                    overlay,
+                    theme.foreground,
                     window,
                     cx,
                 );
+                let previous_lyric_foreground = previous_backdrop_url.as_deref().and_then(|url| {
+                    self.lyric_foreground_for_url(
+                        url,
+                        narrow,
+                        overlay,
+                        theme.foreground,
+                        window,
+                        cx,
+                    )
+                });
+                let lyric_foreground = match (previous_lyric_foreground, current_lyric_foreground) {
+                    (Some(previous), Some(current)) => {
+                        interpolate_color(previous, current, current_backdrop_opacity)
+                    }
+                    (Some(previous), None) => previous,
+                    (None, Some(current)) => current,
+                    (None, None) => theme.foreground,
+                };
+                let lyrics = if defer_new_lyrics {
+                    div().into_any_element()
+                } else {
+                    self.render_lyrics_panel(
+                        &track_mid,
+                        lyric_foreground,
+                        compact,
+                        narrow,
+                        window,
+                        cx,
+                    )
+                };
                 let backdrop_images = div()
                     .absolute()
                     .inset_0()
@@ -7832,7 +8045,7 @@ impl LyruneView {
                                 div()
                                     .absolute()
                                     .inset_0()
-                                    .bg(theme.background.opacity(0.28)),
+                                    .bg(theme.background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY)),
                             )
                             .child(content)
                             .child(
@@ -7876,7 +8089,7 @@ impl LyruneView {
         let track = self.current_track_data().cloned();
         let has_track = track.is_some();
         let quality_selector = self.render_quality_selector(has_track, cx);
-        let progress = self.render_player_progress(has_track, window, cx);
+        let progress = self.render_player_progress(has_track, narrow, window, cx);
         let theme = cx.theme();
         let is_playing = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
         let loading = self.loading_track.is_some();
@@ -8612,14 +8825,14 @@ impl Render for LyruneView {
 #[cfg(test)]
 mod tests {
     use super::{
-        LyricFrameRate, NavigationHistory, NavigationPage, PlaybackQueue, PlaylistScrollPosition,
-        SearchCategory, canonical_queue_track_index, combined_lyric_frame_interval,
-        extract_qrc_content, format_playback_time, insert_external_track_after_current,
-        insert_track_after_current, lyric_frame_is_due, lyric_horizontal_scroll_offset,
-        lyric_position_for_frame_rate, parse_lyrics, playlist_title_is_long, readable_lyric_color,
-        resolved_playlist_scroll_row,
+        LYRIC_MINIMUM_CONTRAST, LyricFrameRate, NavigationHistory, NavigationPage, PlaybackQueue,
+        PlaylistScrollPosition, SearchCategory, adjacent_lyric_timing, canonical_queue_track_index,
+        combined_lyric_frame_interval, contrast_ratio, extract_qrc_content, format_playback_time,
+        insert_external_track_after_current, insert_track_after_current, lyric_edge_opacity,
+        lyric_frame_is_due, lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
+        parse_lyrics, playlist_title_is_long, readable_lyric_color, resolved_playlist_scroll_row,
     };
-    use gpui::{Pixels, black, px, white};
+    use gpui::{Pixels, Rgba, black, px, rgb};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
     use std::time::{Duration, Instant};
 
@@ -8651,15 +8864,34 @@ mod tests {
     }
 
     #[test]
-    fn lyric_foreground_uses_the_higher_contrast_neutral() {
-        assert_eq!(
-            readable_lyric_color([0.05, 0.05, 0.05], black().opacity(0.28)),
-            white()
-        );
-        assert_eq!(
-            readable_lyric_color([0.95, 0.95, 0.95], white().opacity(0.28)),
-            black()
-        );
+    fn lyric_foreground_preserves_a_readable_theme_color() {
+        let preferred = rgb(0x182030).into();
+        let result =
+            readable_lyric_color([0.95, 0.95, 0.95], black().opacity(0.28), preferred).to_rgb();
+        let preferred = preferred.to_rgb();
+
+        assert!((result.r - preferred.r).abs() < 1e-6);
+        assert!((result.g - preferred.g).abs() < 1e-6);
+        assert!((result.b - preferred.b).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lyric_foreground_minimally_corrects_insufficient_theme_contrast() {
+        let background = Rgba {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.,
+        };
+        let result = readable_lyric_color(
+            [background.r, background.g, background.b],
+            black().opacity(0.),
+            rgb(0x777777).into(),
+        )
+        .to_rgb();
+
+        assert!(contrast_ratio(result, background) >= LYRIC_MINIMUM_CONTRAST);
+        assert!(result.r > 0. && result.g > 0. && result.b > 0.);
     }
 
     #[test]
@@ -8680,6 +8912,14 @@ mod tests {
             lyric_horizontal_scroll_offset(px(1000.), px(600.), px(1000.)),
             px(400.)
         );
+    }
+
+    #[test]
+    fn lyric_rows_fade_before_reaching_the_viewport_edge() {
+        assert_eq!(lyric_edge_opacity(px(100.), px(204.), px(0.), px(400.)), 1.);
+        assert!((lyric_edge_opacity(px(272.), px(376.), px(0.), px(400.)) - 0.5).abs() < 1e-6);
+        assert_eq!(lyric_edge_opacity(px(296.), px(400.), px(0.), px(400.)), 0.);
+        assert_eq!(lyric_edge_opacity(px(-10.), px(94.), px(0.), px(400.)), 0.);
     }
 
     #[test]
@@ -8756,6 +8996,37 @@ mod tests {
         assert_eq!(lyrics.lines[2].start, Duration::from_secs(20));
         assert_eq!(lyrics.active_index(Duration::from_secs(5)), Some(0));
         assert_eq!(lyrics.active_index(Duration::from_secs(10)), Some(1));
+    }
+
+    #[test]
+    fn untimed_qrc_tail_extends_to_the_next_line() {
+        let timing = (Duration::from_millis(100), Duration::from_millis(600));
+
+        assert_eq!(
+            adjacent_lyric_timing(
+                Some(timing),
+                None,
+                Duration::ZERO,
+                Duration::from_millis(900)
+            ),
+            (Duration::from_millis(600), Duration::from_millis(900))
+        );
+    }
+
+    #[test]
+    fn untimed_qrc_text_between_words_uses_the_timing_gap() {
+        let previous = (Duration::from_millis(100), Duration::from_millis(600));
+        let next = (Duration::from_millis(900), Duration::from_millis(1_200));
+
+        assert_eq!(
+            adjacent_lyric_timing(
+                Some(previous),
+                Some(next),
+                Duration::ZERO,
+                Duration::from_millis(1_500)
+            ),
+            (Duration::from_millis(600), Duration::from_millis(900))
+        );
     }
 
     #[test]

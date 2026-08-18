@@ -27,7 +27,7 @@
 
 + UI 设计部分大量参考了 Spotify，与 Open Design 勾兑后由其转换为具体 Prompt 交由 Codex 执行；
 
-+ 代码全部由 GPT 5.6 Sol Extra High 编写，截至 1.0.0 发布总耗时三四天，消耗 ChatGPT Pro 20x 七日限额的 50%左右。
++ 代码全部由 GPT 5.6 Sol Extra High 编写，截至 1.0.0 发布总耗时三四天，全程 Fast Mode 消耗 ChatGPT Pro 20x 七日限额的 50%左右。
 
 ## 功能
 

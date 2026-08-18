@@ -49,17 +49,25 @@ pub struct PersistedWindowSize {
 pub enum LyricFrameRate {
     Fps30,
     Fps60,
+    Fps90,
     Fps120,
     Display,
 }
 
 impl LyricFrameRate {
-    pub const ALL: [Self; 4] = [Self::Fps30, Self::Fps60, Self::Fps120, Self::Display];
+    pub const ALL: [Self; 5] = [
+        Self::Fps30,
+        Self::Fps60,
+        Self::Fps90,
+        Self::Fps120,
+        Self::Display,
+    ];
 
     pub const fn id(self) -> &'static str {
         match self {
             Self::Fps30 => "lyrics-fps-30",
             Self::Fps60 => "lyrics-fps-60",
+            Self::Fps90 => "lyrics-fps-90",
             Self::Fps120 => "lyrics-fps-120",
             Self::Display => "lyrics-fps-display",
         }
@@ -69,6 +77,7 @@ impl LyricFrameRate {
         match self {
             Self::Fps30 => "30",
             Self::Fps60 => "60",
+            Self::Fps90 => "90",
             Self::Fps120 => "120",
             Self::Display => "默认",
         }
@@ -78,6 +87,7 @@ impl LyricFrameRate {
         match self {
             Self::Fps30 => Some(Duration::from_nanos(1_000_000_000 / 30)),
             Self::Fps60 => Some(Duration::from_nanos(1_000_000_000 / 60)),
+            Self::Fps90 => Some(Duration::from_nanos(1_000_000_000 / 90)),
             Self::Fps120 => Some(Duration::from_nanos(1_000_000_000 / 120)),
             Self::Display => None,
         }
@@ -633,6 +643,10 @@ mod tests {
         assert_eq!(
             LyricFrameRate::Fps60.frame_interval(),
             Some(Duration::from_nanos(1_000_000_000 / 60))
+        );
+        assert_eq!(
+            LyricFrameRate::Fps90.frame_interval(),
+            Some(Duration::from_nanos(1_000_000_000 / 90))
         );
         assert_eq!(
             LyricFrameRate::Fps120.frame_interval(),

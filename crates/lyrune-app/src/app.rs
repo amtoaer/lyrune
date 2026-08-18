@@ -19,7 +19,7 @@ use gpui_component::{
     avatar::Avatar,
     button::{Button, ButtonVariants as _},
     h_flex, h_resizable,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, MaskPattern, NumberInput},
     list::{List, ListEvent, ListState},
     resizable_panel,
     scroll::ScrollableElement as _,
@@ -33,7 +33,7 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::task::JoinHandle;
 use wana_kana::{ConvertJapanese as _, IsJapaneseStr as _};
 
-use crate::cache::AudioCache;
+use crate::cache::{AudioCache, audio_cache_limit_bytes};
 use crate::credentials::CredentialStore;
 use crate::design::{self, AppFonts, ColorTheme};
 use crate::http::{blurred_cover, blurred_image_source, cached_image_source};
@@ -1965,6 +1965,7 @@ pub struct LyruneView {
     ui_font_input: Entity<InputState>,
     monospace_font_input: Entity<InputState>,
     lyric_font_input: Entity<InputState>,
+    audio_cache_limit_input: Entity<InputState>,
     progress_slider: Entity<SliderState>,
     volume_slider: Entity<SliderState>,
 
@@ -1972,6 +1973,7 @@ pub struct LyruneView {
     audio_cache: Option<AudioCache>,
     protocol_client: Option<ProtocolClient>,
     cdn_maintenance: Option<JoinHandle<()>>,
+    audio_cache_maintenance: Option<JoinHandle<()>>,
     playback_queue: Option<PlaybackQueue>,
     queue_generation: u64,
     queue_recommendation_loading: bool,
@@ -2049,14 +2051,15 @@ impl LyruneView {
                 true,
             ),
         };
-        let audio_cache = match AudioCache::new() {
-            Ok(cache) => Some(cache),
-            Err(error) => {
-                initial_status = format!("{initial_status}；音频缓存初始化失败：{error:#}");
-                initial_status_is_error = true;
-                None
-            }
-        };
+        let audio_cache =
+            match AudioCache::new(audio_cache_limit_bytes(settings.audio_cache_limit_gb)) {
+                Ok(cache) => Some(cache),
+                Err(error) => {
+                    initial_status = format!("{initial_status}；音频缓存初始化失败：{error:#}");
+                    initial_status_is_error = true;
+                    None
+                }
+            };
         let lyric_disk_cache = LyricDiskCache::new().ok();
         let cdn_cache = match CdnCacheStore::load() {
             Ok(cache) => cache,
@@ -2100,6 +2103,17 @@ impl LyruneView {
                 .default_value(settings.lyric_font_families.join(", "))
                 .placeholder("例如：LXGW WenKai, Noto Sans CJK JP")
         });
+        let audio_cache_limit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.audio_cache_limit_gb.to_string())
+                .mask_pattern(MaskPattern::Number {
+                    separator: None,
+                    fraction: None,
+                })
+                .validate(|value, _| value.parse::<u64>().is_ok_and(|value| value > 0))
+                .min(1.)
+                .step(1.)
+        });
         let (load_more_sender, load_more_receiver) = async_channel::bounded(1);
         let (track_event_sender, track_event_receiver) = async_channel::unbounded();
         let track_table = cx.new(|cx| {
@@ -2132,6 +2146,15 @@ impl LyruneView {
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::PressEnter { .. }) {
                         this.submit_search(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &audio_cache_limit_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_audio_cache_limit(window, cx);
                     }
                 },
             ),
@@ -2247,12 +2270,14 @@ impl LyruneView {
             ui_font_input,
             monospace_font_input,
             lyric_font_input,
+            audio_cache_limit_input,
             progress_slider,
             volume_slider,
             audio,
             audio_cache,
             protocol_client,
             cdn_maintenance: None,
+            audio_cache_maintenance: None,
             playback_queue: None,
             queue_generation: 0,
             queue_recommendation_loading: false,
@@ -2315,6 +2340,7 @@ impl LyruneView {
             last_mpris_position_sync: Instant::now(),
         };
         view.attach_window(window, cx);
+        view.start_audio_cache_maintenance();
         view.start_cdn_maintenance();
         view.restore_credential(cx);
         view
@@ -2787,6 +2813,18 @@ impl LyruneView {
                     Err(_) => tokio::time::sleep(CDN_REFRESH_RETRY).await,
                 }
             }
+        }));
+    }
+
+    fn start_audio_cache_maintenance(&mut self) {
+        if let Some(task) = self.audio_cache_maintenance.take() {
+            task.abort();
+        }
+        let Some(cache) = self.audio_cache.clone() else {
+            return;
+        };
+        self.audio_cache_maintenance = Some(RUNTIME.spawn(async move {
+            let _ = cache.maintain().await;
         }));
     }
 
@@ -4900,6 +4938,32 @@ impl LyruneView {
         cx.notify();
     }
 
+    fn apply_audio_cache_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.settings.audio_cache_limit_gb;
+        let value = self
+            .audio_cache_limit_input
+            .read(cx)
+            .value()
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(current);
+        self.audio_cache_limit_input.update(cx, |input, cx| {
+            input.set_value(value.to_string(), window, cx)
+        });
+        if value == current {
+            return;
+        }
+
+        self.settings.audio_cache_limit_gb = value;
+        if let Some(cache) = &self.audio_cache {
+            cache.set_max_size_bytes(audio_cache_limit_bytes(value));
+        }
+        self.persist_settings();
+        self.start_audio_cache_maintenance();
+        cx.notify();
+    }
+
     fn apply_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ui = parse_font_families(self.ui_font_input.read(cx).value().as_ref());
         let monospace = parse_font_families(self.monospace_font_input.read(cx).value().as_ref());
@@ -4925,11 +4989,18 @@ impl LyruneView {
         );
     }
 
-    fn reset_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn reset_font_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ui = default_ui_font_families();
         let monospace = default_monospace_font_families();
         let lyrics = default_lyric_font_families();
-        self.set_font_settings(ui, monospace, lyrics, window, cx);
+        self.ui_font_input
+            .update(cx, |input, cx| input.set_value(ui.join(", "), window, cx));
+        self.monospace_font_input.update(cx, |input, cx| {
+            input.set_value(monospace.join(", "), window, cx)
+        });
+        self.lyric_font_input.update(cx, |input, cx| {
+            input.set_value(lyrics.join(", "), window, cx)
+        });
     }
 
     fn set_font_settings(
@@ -5834,7 +5905,7 @@ impl LyruneView {
                                                         .outline()
                                                         .on_click(cx.listener(
                                                             |this, _, window, cx| {
-                                                                this.reset_font_settings(window, cx)
+                                                                this.reset_font_inputs(window, cx)
                                                             },
                                                         )),
                                                 )
@@ -5864,6 +5935,32 @@ impl LyruneView {
                                                 .child("应用于后续加载的歌曲"),
                                         )
                                         .children(quality_rows),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(div().font_medium().child("歌曲缓存上限"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("超过上限时自动清理最久未播放的歌曲"),
+                                        )
+                                        .child(
+                                            NumberInput::new(&self.audio_cache_limit_input)
+                                                .w(px(180.))
+                                                .h(px(40.))
+                                                .suffix(
+                                                    div()
+                                                        .pr_2()
+                                                        .text_sm()
+                                                        .text_color(theme.secondary_foreground)
+                                                        .child("GB"),
+                                                ),
+                                        ),
                                 )
                                 .child(
                                     v_flex()
@@ -8807,6 +8904,9 @@ impl Drop for LyruneView {
         }
         self.persist_settings();
         if let Some(task) = self.cdn_maintenance.take() {
+            task.abort();
+        }
+        if let Some(task) = self.audio_cache_maintenance.take() {
             task.abort();
         }
     }

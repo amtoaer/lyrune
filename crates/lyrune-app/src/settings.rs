@@ -12,6 +12,8 @@ use qqmusic_api::integration::{
     CdnCache, Quality, Track, UserPlaylist, UserPlaylistId, UserProfile,
 };
 
+pub const DEFAULT_AUDIO_CACHE_LIMIT_GB: u64 = 10;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PersistedPlayback {
     pub account_id: u64,
@@ -115,6 +117,7 @@ pub struct AppSettings {
     pub ui_font_families: Vec<String>,
     pub monospace_font_families: Vec<String>,
     pub lyric_font_families: Vec<String>,
+    pub audio_cache_limit_gb: u64,
     pub playback_quality: Quality,
     #[serde(alias = "lyric_frame_rate")]
     pub lyric_highlight_frame_rate: LyricFrameRate,
@@ -134,6 +137,7 @@ impl Default for AppSettings {
             ui_font_families: default_ui_font_families(),
             monospace_font_families: default_monospace_font_families(),
             lyric_font_families: default_lyric_font_families(),
+            audio_cache_limit_gb: DEFAULT_AUDIO_CACHE_LIMIT_GB,
             playback_quality: Quality::default(),
             lyric_highlight_frame_rate: LyricFrameRate::Fps30,
             lyric_scroll_frame_rate: LyricFrameRate::Display,
@@ -157,6 +161,7 @@ impl AppSettings {
         );
         self.lyric_font_families =
             normalize_font_families(self.lyric_font_families, default_lyric_font_families());
+        self.audio_cache_limit_gb = self.audio_cache_limit_gb.max(1);
         if self.current_playback.as_ref().is_some_and(|playback| {
             playback.track_mid.trim().is_empty()
                 || playback.queue_tracks.is_empty()
@@ -614,6 +619,7 @@ mod tests {
             default_monospace_font_families()
         );
         assert_eq!(settings.lyric_font_families, [".SystemUIFont"]);
+        assert_eq!(settings.audio_cache_limit_gb, DEFAULT_AUDIO_CACHE_LIMIT_GB);
         assert_eq!(settings.playback_quality, Quality::Standard);
         assert_eq!(settings.lyric_highlight_frame_rate, LyricFrameRate::Fps30);
         assert_eq!(settings.lyric_scroll_frame_rate, LyricFrameRate::Display);
@@ -640,6 +646,7 @@ mod tests {
             ui_font_families: default_ui_font_families(),
             monospace_font_families: default_monospace_font_families(),
             lyric_font_families: default_lyric_font_families(),
+            audio_cache_limit_gb: 0,
             playback_quality: Quality::High,
             lyric_highlight_frame_rate: LyricFrameRate::Fps30,
             lyric_scroll_frame_rate: LyricFrameRate::Display,
@@ -651,6 +658,7 @@ mod tests {
         .normalized();
         assert_eq!(settings.volume, 1.);
         assert_eq!(settings.last_nonzero_volume, 0.01);
+        assert_eq!(settings.audio_cache_limit_gb, 1);
     }
 
     #[test]
@@ -668,6 +676,7 @@ mod tests {
             ui_font_families: vec!["Inter".to_owned(), "Noto Sans CJK SC".to_owned()],
             monospace_font_families: vec!["JetBrains Mono".to_owned()],
             lyric_font_families: vec!["LXGW WenKai".to_owned(), "Noto Sans JP".to_owned()],
+            audio_cache_limit_gb: 24,
             playback_quality: Quality::HiRes,
             lyric_highlight_frame_rate: LyricFrameRate::Fps120,
             lyric_scroll_frame_rate: LyricFrameRate::Display,
@@ -708,6 +717,7 @@ mod tests {
             expected.monospace_font_families
         );
         assert_eq!(restored.lyric_font_families, expected.lyric_font_families);
+        assert_eq!(restored.audio_cache_limit_gb, expected.audio_cache_limit_gb);
         assert_eq!(restored.playback_quality, expected.playback_quality);
         assert_eq!(
             restored.lyric_highlight_frame_rate,

@@ -1,12 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use bytes::Bytes;
@@ -22,13 +23,18 @@ use serde::{Deserialize, Serialize};
 use stream_download::source::{SourceStream, StreamOutcome};
 use stream_download::storage::StorageProvider;
 use stream_download::{Settings, StreamDownload};
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
 use xxhash_rust::xxh3::xxh3_128;
 
 const CACHE_SCHEMA_VERSION: u32 = 1;
+const CACHE_INDEX_SCHEMA_VERSION: u32 = 1;
+const CACHE_INDEX_FILE: &str = "index.json";
+const CACHE_INDEX_TEMP_FILE: &str = "index.json.tmp";
+const CACHE_INDEX_FLUSH_DELAY: Duration = Duration::from_secs(3);
+const BYTES_PER_GB: u64 = 1_000_000_000;
 const MIN_PREFETCH_BYTES: u64 = 256 * 1024;
 const MAX_PREFETCH_BYTES: u64 = 4 * 1024 * 1024;
 const PREFETCH_SECONDS: u64 = 6;
@@ -44,21 +50,145 @@ pub(crate) fn cache_key(bytes: &[u8]) -> String {
     format!("{:032x}", xxh3_128(bytes))
 }
 
+pub(crate) const fn audio_cache_limit_bytes(limit_gb: u64) -> u64 {
+    limit_gb.saturating_mul(BYTES_PER_GB)
+}
+
 #[derive(Clone)]
 pub struct AudioCache {
     root: Arc<PathBuf>,
     client: Client,
     key_locks: Arc<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
+    active_entries: Arc<Mutex<HashMap<String, usize>>>,
+    index: Arc<AsyncMutex<CacheIndex>>,
+    index_write_lock: Arc<AsyncMutex<()>>,
+    maintenance_lock: Arc<AsyncMutex<()>>,
+    index_flush_scheduled: Arc<AtomicBool>,
+    max_size_bytes: Arc<AtomicU64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CacheIndexEntry {
+    size_bytes: u64,
+    last_accessed_secs: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PersistedCacheIndex {
+    schema_version: u32,
+    clean: bool,
+    entries: HashMap<String, CacheIndexEntry>,
+}
+
+#[derive(Default)]
+struct CacheIndex {
+    entries: HashMap<String, CacheIndexEntry>,
+    active_writes: HashSet<String>,
+    total_size_bytes: u64,
+    revision: u64,
+    persisted_revision: u64,
+    initialized: bool,
+}
+
+impl CacheIndex {
+    fn replace_entries(&mut self, mut entries: HashMap<String, CacheIndexEntry>) {
+        for (key, entry) in self.entries.drain() {
+            entries.insert(key, entry);
+        }
+        self.total_size_bytes = entries
+            .values()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.size_bytes));
+        self.entries = entries;
+        self.initialized = true;
+        self.mark_changed();
+    }
+
+    fn update_entry(&mut self, key: String, size_bytes: u64, last_accessed_secs: u64) {
+        let previous_size = self
+            .entries
+            .insert(
+                key,
+                CacheIndexEntry {
+                    size_bytes,
+                    last_accessed_secs,
+                },
+            )
+            .map_or(0, |entry| entry.size_bytes);
+        self.total_size_bytes = self
+            .total_size_bytes
+            .saturating_sub(previous_size)
+            .saturating_add(size_bytes);
+        self.mark_changed();
+    }
+
+    fn remove_entry(&mut self, key: &str) {
+        let Some(entry) = self.entries.remove(key) else {
+            return;
+        };
+        self.total_size_bytes = self.total_size_bytes.saturating_sub(entry.size_bytes);
+        self.mark_changed();
+    }
+
+    fn mark_changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn persisted(&self) -> PersistedCacheIndex {
+        PersistedCacheIndex {
+            schema_version: CACHE_INDEX_SCHEMA_VERSION,
+            clean: self.initialized && self.active_writes.is_empty(),
+            entries: self.entries.clone(),
+        }
+    }
+}
+
+pub(crate) struct CacheLease {
+    key: String,
+    active_entries: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl CacheLease {
+    fn new(key: String, active_entries: Arc<Mutex<HashMap<String, usize>>>) -> Self {
+        let mut entries = active_entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *entries.entry(key.clone()).or_default() += 1;
+        drop(entries);
+        Self {
+            key,
+            active_entries,
+        }
+    }
+}
+
+impl Drop for CacheLease {
+    fn drop(&mut self) {
+        let mut entries = self
+            .active_entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = entries.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                entries.remove(&self.key);
+            }
+        }
+    }
 }
 
 impl AudioCache {
-    pub fn new() -> Result<Self> {
+    pub fn new(max_size_bytes: u64) -> Result<Self> {
         let project_dirs =
             ProjectDirs::from("dev", "lyrune", "Lyrune").context("无法确定 Lyrune 音频缓存目录")?;
-        Self::with_root(project_dirs.cache_dir().join("audio-v1"))
+        Self::with_root_and_limit(project_dirs.cache_dir().join("audio-v1"), max_size_bytes)
     }
 
+    #[cfg(test)]
     fn with_root(root: PathBuf) -> Result<Self> {
+        Self::with_root_and_limit(root, u64::MAX)
+    }
+
+    fn with_root_and_limit(root: PathBuf, max_size_bytes: u64) -> Result<Self> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
@@ -73,7 +203,212 @@ impl AudioCache {
             root: Arc::new(root),
             client,
             key_locks: Arc::default(),
+            active_entries: Arc::default(),
+            index: Arc::default(),
+            index_write_lock: Arc::default(),
+            maintenance_lock: Arc::default(),
+            index_flush_scheduled: Arc::new(AtomicBool::new(false)),
+            max_size_bytes: Arc::new(AtomicU64::new(max_size_bytes)),
         })
+    }
+
+    pub fn set_max_size_bytes(&self, max_size_bytes: u64) {
+        self.max_size_bytes.store(max_size_bytes, Ordering::Relaxed);
+    }
+
+    pub async fn maintain(&self) -> Result<()> {
+        self.initialize_index().await?;
+        self.enforce_limit().await
+    }
+
+    async fn initialize_index(&self) -> Result<()> {
+        let _maintenance = self.maintenance_lock.lock().await;
+        if self.index.lock().await.initialized {
+            return Ok(());
+        }
+
+        tokio::fs::create_dir_all(self.root.as_ref())
+            .await
+            .context("无法创建音频缓存目录")?;
+        let index_path = self.root.join(CACHE_INDEX_FILE);
+        let persisted = tokio::fs::read(&index_path)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PersistedCacheIndex>(&bytes).ok())
+            .filter(|index| index.schema_version == CACHE_INDEX_SCHEMA_VERSION && index.clean);
+        let entries = match persisted {
+            Some(index) => index.entries,
+            None => rebuild_cache_index(self.root.as_ref()).await?,
+        };
+
+        self.index.lock().await.replace_entries(entries);
+        self.persist_index().await
+    }
+
+    async fn persist_index(&self) -> Result<()> {
+        let _write = self.index_write_lock.lock().await;
+        let (persisted, revision) = {
+            let index = self.index.lock().await;
+            (index.persisted(), index.revision)
+        };
+        tokio::fs::create_dir_all(self.root.as_ref())
+            .await
+            .context("无法创建音频缓存目录")?;
+        let bytes = serde_json::to_vec(&persisted).context("无法序列化歌曲缓存索引")?;
+        let temporary_path = self.root.join(CACHE_INDEX_TEMP_FILE);
+        let index_path = self.root.join(CACHE_INDEX_FILE);
+        let mut temporary = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary_path)
+            .await
+            .context("无法创建歌曲缓存临时索引")?;
+        temporary
+            .write_all(&bytes)
+            .await
+            .context("无法写入歌曲缓存临时索引")?;
+        temporary
+            .sync_data()
+            .await
+            .context("无法同步歌曲缓存临时索引")?;
+        drop(temporary);
+        tokio::fs::rename(&temporary_path, &index_path)
+            .await
+            .context("无法替换歌曲缓存索引")?;
+        self.index.lock().await.persisted_revision = revision;
+        Ok(())
+    }
+
+    fn schedule_index_flush(&self) {
+        if self
+            .index_flush_scheduled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let cache = self.clone();
+        drop(tokio::spawn(async move {
+            tokio::time::sleep(CACHE_INDEX_FLUSH_DELAY).await;
+            let persisted = cache.persist_index().await.is_ok();
+            cache.index_flush_scheduled.store(false, Ordering::Release);
+            if persisted {
+                let dirty = {
+                    let index = cache.index.lock().await;
+                    index.revision != index.persisted_revision
+                };
+                if dirty {
+                    cache.schedule_index_flush();
+                }
+            }
+        }));
+    }
+
+    async fn record_access(&self, key: &str, size_bytes: u64) {
+        self.index
+            .lock()
+            .await
+            .update_entry(key.to_owned(), size_bytes, unix_timestamp_secs());
+        self.schedule_index_flush();
+    }
+
+    async fn begin_cache_write(&self, key: &str, size_bytes: u64) {
+        {
+            let mut index = self.index.lock().await;
+            index.active_writes.insert(key.to_owned());
+            index.update_entry(key.to_owned(), size_bytes, unix_timestamp_secs());
+        }
+        let _ = self.persist_index().await;
+    }
+
+    async fn finish_cache_write(&self, key: &str, size_bytes: u64) {
+        {
+            let mut index = self.index.lock().await;
+            index.active_writes.remove(key);
+            index.update_entry(key.to_owned(), size_bytes, unix_timestamp_secs());
+        }
+        let _ = self.persist_index().await;
+        let _ = self.enforce_limit().await;
+    }
+
+    fn lease(&self, key: &str) -> CacheLease {
+        CacheLease::new(key.to_owned(), self.active_entries.clone())
+    }
+
+    fn entry_is_active(&self, key: &str) -> bool {
+        self.active_entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(key)
+    }
+
+    async fn enforce_limit(&self) -> Result<()> {
+        let _maintenance = self.maintenance_lock.lock().await;
+        let max_size_bytes = self.max_size_bytes.load(Ordering::Relaxed);
+        let mut changed = false;
+
+        loop {
+            let mut candidates = {
+                let index = self.index.lock().await;
+                if index.total_size_bytes <= max_size_bytes {
+                    break;
+                }
+                index
+                    .entries
+                    .iter()
+                    .map(|(key, entry)| (key.clone(), entry.last_accessed_secs))
+                    .collect::<Vec<_>>()
+            };
+            candidates.sort_unstable_by(|left, right| {
+                left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0))
+            });
+
+            let mut removed_any = false;
+            for (key, _) in candidates {
+                if self.entry_is_active(&key) {
+                    continue;
+                }
+                let Ok(_guard) = self.key_lock(&key).try_lock_owned() else {
+                    continue;
+                };
+                if self.entry_is_active(&key) {
+                    continue;
+                }
+                let should_remove = {
+                    let index = self.index.lock().await;
+                    index.total_size_bytes > max_size_bytes && index.entries.contains_key(&key)
+                };
+                if !should_remove {
+                    break;
+                }
+
+                let paths = CachePaths::new(self.root.as_ref(), &key);
+                match tokio::fs::remove_file(&paths.media).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => continue,
+                }
+                match tokio::fs::remove_file(&paths.metadata).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => {}
+                }
+                self.index.lock().await.remove_entry(&key);
+                changed = true;
+                removed_any = true;
+            }
+
+            if !removed_any {
+                break;
+            }
+        }
+
+        if changed {
+            self.persist_index().await?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -192,9 +527,12 @@ impl AudioCache {
             && metadata.as_ref().is_some_and(|metadata| metadata.complete)
         {
             let source = File::open(&paths.media).context("无法打开已缓存的歌曲")?;
-            drop(guard);
+            self.record_access(&key, existing_length).await;
             return Ok(PreparedStream {
-                source: CachedAudioSource::Complete(source),
+                source: CachedAudioSource::Complete {
+                    source,
+                    _lease: self.lease(&key),
+                },
                 content_length: Some(existing_length),
                 format_hint: quality_format_hint(quality),
                 cancellation: None,
@@ -278,6 +616,7 @@ impl AudioCache {
             .bytes_stream()
             .map(|chunk| chunk.map_err(|error| io::Error::other(error.to_string())));
         let stream: ByteStream = Box::new(local_stream.chain(network_stream));
+        self.begin_cache_write(&key, existing_length).await;
         let source = ResumeSource {
             stream,
             client: self.client.clone(),
@@ -289,6 +628,8 @@ impl AudioCache {
             metadata_path: paths.metadata.clone(),
             metadata,
             random_accessed: false,
+            cache: self.clone(),
+            cache_key: key.clone(),
             _guard: guard,
         };
         let settings = Settings::default()
@@ -298,17 +639,29 @@ impl AudioCache {
                 quality,
             ))
             .retry_timeout(Duration::from_secs(5));
-        let download = StreamDownload::from_stream(
+        let download = match StreamDownload::from_stream(
             source,
-            CacheStorageProvider { path: paths.media },
+            CacheStorageProvider {
+                path: paths.media.clone(),
+            },
             settings,
         )
         .await
-        .map_err(|error| anyhow!("无法初始化歌曲流：{error}"))?;
+        {
+            Ok(download) => download,
+            Err(error) => {
+                let size_bytes = file_length(&paths.media).await.unwrap_or_default();
+                self.finish_cache_write(&key, size_bytes).await;
+                return Err(anyhow!("无法初始化歌曲流：{error}"));
+            }
+        };
         let cancellation = Some(download.cancellation_token());
 
         Ok(PreparedStream {
-            source: CachedAudioSource::Streaming(download),
+            source: CachedAudioSource::Streaming {
+                source: download,
+                _lease: self.lease(&key),
+            },
             content_length,
             format_hint: quality_format_hint(quality),
             cancellation,
@@ -478,23 +831,29 @@ impl AudioCache {
     }
 }
 
-pub struct PreparedStream {
+pub(crate) struct PreparedStream {
     pub source: CachedAudioSource,
     pub content_length: Option<u64>,
     pub format_hint: &'static str,
     pub cancellation: Option<CancellationToken>,
 }
 
-pub enum CachedAudioSource {
-    Complete(File),
-    Streaming(StreamingSource),
+pub(crate) enum CachedAudioSource {
+    Complete {
+        source: File,
+        _lease: CacheLease,
+    },
+    Streaming {
+        source: StreamingSource,
+        _lease: CacheLease,
+    },
 }
 
 impl Read for CachedAudioSource {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         match self {
-            Self::Complete(file) => file.read(buffer),
-            Self::Streaming(stream) => stream.read(buffer),
+            Self::Complete { source, .. } => source.read(buffer),
+            Self::Streaming { source, .. } => source.read(buffer),
         }
     }
 }
@@ -502,8 +861,8 @@ impl Read for CachedAudioSource {
 impl Seek for CachedAudioSource {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
         match self {
-            Self::Complete(file) => file.seek(position),
-            Self::Streaming(stream) => stream.seek(position),
+            Self::Complete { source, .. } => source.seek(position),
+            Self::Streaming { source, .. } => source.seek(position),
         }
     }
 }
@@ -727,6 +1086,55 @@ async fn file_length(path: &Path) -> Option<u64> {
         .map(|metadata| metadata.len())
 }
 
+async fn rebuild_cache_index(root: &Path) -> Result<HashMap<String, CacheIndexEntry>> {
+    let mut entries = HashMap::new();
+    let mut directory = tokio::fs::read_dir(root)
+        .await
+        .context("无法扫描歌曲缓存目录")?;
+    while let Some(entry) = directory
+        .next_entry()
+        .await
+        .context("无法读取歌曲缓存目录项")?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("media") {
+            continue;
+        }
+        let Some(key) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let last_accessed_secs = metadata
+            .modified()
+            .ok()
+            .and_then(system_time_secs)
+            .unwrap_or_else(unix_timestamp_secs);
+        entries.insert(
+            key.to_owned(),
+            CacheIndexEntry {
+                size_bytes: metadata.len(),
+                last_accessed_secs,
+            },
+        );
+    }
+    Ok(entries)
+}
+
+fn unix_timestamp_secs() -> u64 {
+    system_time_secs(SystemTime::now()).unwrap_or_default()
+}
+
+fn system_time_secs(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CacheStorageProvider {
     path: PathBuf,
@@ -763,6 +1171,8 @@ struct ResumeSource {
     metadata_path: PathBuf,
     metadata: CacheMetadata,
     random_accessed: bool,
+    cache: AudioCache,
+    cache_key: String,
     _guard: OwnedMutexGuard<()>,
 }
 
@@ -898,6 +1308,7 @@ impl SourceStream for ResumeSource {
             .is_none_or(|content_length| content_length == file_length);
         self.metadata.complete =
             result.is_ok() && outcome == StreamOutcome::Completed && expected_complete;
+        let mut indexed_length = file_length;
         if !self.metadata.complete && self.random_accessed {
             let _ = tokio::fs::OpenOptions::new()
                 .create(true)
@@ -905,10 +1316,14 @@ impl SourceStream for ResumeSource {
                 .truncate(true)
                 .open(&self.media_path)
                 .await;
+            indexed_length = 0;
         }
         if let Ok(bytes) = serde_json::to_vec(&self.metadata) {
             let _ = tokio::fs::write(&self.metadata_path, bytes).await;
         }
+        self.cache
+            .finish_cache_write(&self.cache_key, indexed_length)
+            .await;
 
         if result.is_ok() && outcome == StreamOutcome::Completed && !expected_complete {
             return Err(io::Error::new(
@@ -925,6 +1340,7 @@ impl SourceStream for ResumeSource {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::io::{Read as _, Seek as _, SeekFrom};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -936,8 +1352,9 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     use super::{
-        AudioCache, CacheIdentity, CachePaths, ContentRange, MAX_PREFETCH_BYTES,
-        MIN_PREFETCH_BYTES, file_length, parse_content_range, prefetch_bytes,
+        AudioCache, CACHE_INDEX_FILE, CACHE_INDEX_SCHEMA_VERSION, CacheIdentity, CacheIndex,
+        CachePaths, ContentRange, MAX_PREFETCH_BYTES, MIN_PREFETCH_BYTES, PersistedCacheIndex,
+        file_length, parse_content_range, prefetch_bytes,
     };
 
     fn track(mid: &str, media_mid: &str, title: &str) -> Track {
@@ -977,6 +1394,16 @@ mod tests {
     }
 
     #[test]
+    fn index_stays_unclean_until_initial_recovery_finishes() {
+        let mut index = CacheIndex::default();
+        index.update_entry("new".to_owned(), 4, 1);
+        assert!(!index.persisted().clean);
+
+        index.initialized = true;
+        assert!(index.persisted().clean);
+    }
+
+    #[test]
     fn parses_http_content_range() {
         assert_eq!(
             parse_content_range("bytes 1024-2047/4096"),
@@ -1013,6 +1440,93 @@ mod tests {
             prefetch_bytes(Some(128 * 1024), 240, Quality::HiRes),
             128 * 1024
         );
+    }
+
+    #[tokio::test]
+    async fn cache_limit_evicts_the_least_recently_used_entry() {
+        let root = test_cache_dir();
+        fs::create_dir_all(&root).expect("create cache directory");
+        let cache = AudioCache::with_root_and_limit(root.clone(), 10)
+            .expect("create size-limited audio cache");
+        for key in ["older", "newer"] {
+            let paths = CachePaths::new(&root, key);
+            fs::write(paths.media, [0_u8; 6]).expect("write cached media");
+            fs::write(paths.metadata, b"{}").expect("write cached metadata");
+        }
+        {
+            let mut index = cache.index.lock().await;
+            index.update_entry("older".to_owned(), 6, 1);
+            index.update_entry("newer".to_owned(), 6, 2);
+        }
+
+        cache.enforce_limit().await.expect("enforce cache limit");
+
+        assert!(!CachePaths::new(&root, "older").media.exists());
+        assert!(CachePaths::new(&root, "newer").media.exists());
+        let index = cache.index.lock().await;
+        assert_eq!(index.total_size_bytes, 6);
+        assert!(!index.entries.contains_key("older"));
+        assert!(index.entries.contains_key("newer"));
+        drop(index);
+        fs::remove_dir_all(root).expect("remove test cache directory");
+    }
+
+    #[tokio::test]
+    async fn cache_limit_never_evicts_an_active_entry() {
+        let root = test_cache_dir();
+        fs::create_dir_all(&root).expect("create cache directory");
+        let cache = AudioCache::with_root_and_limit(root.clone(), 6)
+            .expect("create size-limited audio cache");
+        for key in ["active", "idle"] {
+            let paths = CachePaths::new(&root, key);
+            fs::write(paths.media, [0_u8; 6]).expect("write cached media");
+            fs::write(paths.metadata, b"{}").expect("write cached metadata");
+        }
+        {
+            let mut index = cache.index.lock().await;
+            index.update_entry("active".to_owned(), 6, 1);
+            index.update_entry("idle".to_owned(), 6, 2);
+        }
+        let lease = cache.lease("active");
+
+        cache.enforce_limit().await.expect("enforce cache limit");
+
+        assert!(CachePaths::new(&root, "active").media.exists());
+        assert!(!CachePaths::new(&root, "idle").media.exists());
+        drop(lease);
+        fs::remove_dir_all(root).expect("remove test cache directory");
+    }
+
+    #[tokio::test]
+    async fn unclean_index_is_rebuilt_from_cached_media() {
+        let root = test_cache_dir();
+        fs::create_dir_all(&root).expect("create cache directory");
+        fs::write(CachePaths::new(&root, "recovered").media, [0_u8; 7])
+            .expect("write cached media");
+        let unclean = PersistedCacheIndex {
+            schema_version: CACHE_INDEX_SCHEMA_VERSION,
+            clean: false,
+            entries: HashMap::new(),
+        };
+        fs::write(
+            root.join(CACHE_INDEX_FILE),
+            serde_json::to_vec(&unclean).expect("serialize unclean index"),
+        )
+        .expect("write unclean index");
+        let cache = AudioCache::with_root(root.clone()).expect("create audio cache");
+
+        cache.maintain().await.expect("rebuild cache index");
+
+        let index = cache.index.lock().await;
+        assert_eq!(index.total_size_bytes, 7);
+        assert_eq!(index.entries["recovered"].size_bytes, 7);
+        drop(index);
+        let persisted: PersistedCacheIndex = serde_json::from_slice(
+            &fs::read(root.join(CACHE_INDEX_FILE)).expect("read rebuilt index"),
+        )
+        .expect("parse rebuilt index");
+        assert!(persisted.clean);
+        fs::remove_dir_all(root).expect("remove test cache directory");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

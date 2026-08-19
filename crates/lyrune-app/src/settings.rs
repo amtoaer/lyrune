@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -21,7 +22,7 @@ pub struct PersistedPlayback {
     pub track_mid: String,
     pub position_ms: u64,
     #[serde(default)]
-    pub queue_tracks: Vec<Track>,
+    pub queue_tracks: Vec<Arc<Track>>,
     #[serde(default)]
     pub queue_modified: bool,
     #[serde(default)]
@@ -288,7 +289,6 @@ impl CdnCacheStore {
 #[derive(Debug, Default)]
 pub struct LibraryCache {
     directories: Vec<CachedLibraryDirectory>,
-    playlists: Vec<CachedPlaylistSnapshot>,
 }
 
 #[derive(Debug)]
@@ -299,56 +299,8 @@ struct CachedLibraryDirectory {
     playlists: Vec<UserPlaylist>,
 }
 
-#[derive(Debug)]
-struct CachedPlaylistSnapshot {
-    account_id: u64,
-    fetched_at_secs: u64,
-    revision: u64,
-    playlist: UserPlaylist,
-    tracks: Vec<Track>,
-    has_more: bool,
-    next_offset: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct PlaylistSnapshot {
-    pub revision: u64,
-    pub playlist: UserPlaylist,
-    pub tracks: Vec<Track>,
-    pub has_more: bool,
-    pub next_offset: u64,
-}
-
 impl LibraryCache {
-    pub fn track_liked(
-        &self,
-        account_id: u64,
-        mid: &str,
-        now_secs: u64,
-        ttl: Duration,
-    ) -> Option<bool> {
-        let snapshot = self.playlists.iter().find(|snapshot| {
-            snapshot.account_id == account_id
-                && snapshot.playlist.id == UserPlaylistId::Liked
-                && is_fresh(snapshot.fetched_at_secs, now_secs, ttl)
-        })?;
-        if snapshot.tracks.iter().any(|track| track.mid == mid) {
-            Some(true)
-        } else if snapshot.has_more {
-            None
-        } else {
-            Some(false)
-        }
-    }
-
-    pub fn set_track_liked(&mut self, account_id: u64, track: Track, liked: bool) {
-        let update_count = |playlist: &mut UserPlaylist| {
-            playlist.track_count = if liked {
-                playlist.track_count.saturating_add(1)
-            } else {
-                playlist.track_count.saturating_sub(1)
-            };
-        };
+    pub fn update_liked_track_count(&mut self, account_id: u64, liked: bool) {
         if let Some(directory) = self
             .directories
             .iter_mut()
@@ -358,28 +310,11 @@ impl LibraryCache {
                 .iter_mut()
                 .find(|playlist| playlist.id == UserPlaylistId::Liked)
         {
-            update_count(playlist);
-        }
-        let Some(snapshot) = self.playlists.iter_mut().find(|snapshot| {
-            snapshot.account_id == account_id && snapshot.playlist.id == UserPlaylistId::Liked
-        }) else {
-            return;
-        };
-        update_count(&mut snapshot.playlist);
-        let index = snapshot
-            .tracks
-            .iter()
-            .position(|item| item.mid == track.mid);
-        match (liked, index) {
-            (true, None) => {
-                snapshot.tracks.insert(0, track);
-                snapshot.next_offset = snapshot.next_offset.saturating_add(1);
-            }
-            (false, Some(index)) => {
-                snapshot.tracks.remove(index);
-                snapshot.next_offset = snapshot.next_offset.saturating_sub(1);
-            }
-            _ => {}
+            playlist.track_count = if liked {
+                playlist.track_count.saturating_add(1)
+            } else {
+                playlist.track_count.saturating_sub(1)
+            };
         }
     }
 
@@ -425,123 +360,6 @@ impl LibraryCache {
             });
         }
     }
-
-    pub fn fresh_playlist(
-        &self,
-        account_id: u64,
-        playlist_id: &UserPlaylistId,
-        now_secs: u64,
-        ttl: Duration,
-    ) -> Option<PlaylistSnapshot> {
-        self.playlists
-            .iter()
-            .find(|snapshot| {
-                snapshot.account_id == account_id
-                    && snapshot.playlist.id == *playlist_id
-                    && (matches!(playlist_id, UserPlaylistId::Search { .. })
-                        || is_fresh(snapshot.fetched_at_secs, now_secs, ttl))
-            })
-            .map(|snapshot| PlaylistSnapshot {
-                revision: snapshot.revision,
-                playlist: snapshot.playlist.clone(),
-                tracks: snapshot.tracks.clone(),
-                has_more: snapshot.has_more,
-                next_offset: snapshot.next_offset,
-            })
-    }
-
-    pub fn cached_playlist(
-        &self,
-        account_id: u64,
-        playlist_id: &UserPlaylistId,
-    ) -> Option<PlaylistSnapshot> {
-        self.playlists
-            .iter()
-            .find(|snapshot| {
-                snapshot.account_id == account_id && snapshot.playlist.id == *playlist_id
-            })
-            .map(|snapshot| PlaylistSnapshot {
-                revision: snapshot.revision,
-                playlist: snapshot.playlist.clone(),
-                tracks: snapshot.tracks.clone(),
-                has_more: snapshot.has_more,
-                next_offset: snapshot.next_offset,
-            })
-    }
-
-    pub fn store_playlist_page(
-        &mut self,
-        account_id: u64,
-        playlist: UserPlaylist,
-        tracks: Vec<Track>,
-        has_more: bool,
-        next_offset: u64,
-        offset: u64,
-        fetched_at_secs: u64,
-        revision: u64,
-    ) -> bool {
-        if offset == 0 {
-            return self.replace_playlist(
-                account_id,
-                playlist,
-                tracks,
-                has_more,
-                next_offset,
-                fetched_at_secs,
-                revision,
-            );
-        }
-
-        let Some(snapshot) = self.playlists.iter_mut().find(|snapshot| {
-            snapshot.account_id == account_id
-                && snapshot.playlist.id == playlist.id
-                && snapshot.next_offset == offset
-                && snapshot.revision == revision
-        }) else {
-            return false;
-        };
-        snapshot.playlist = playlist;
-        snapshot.tracks.extend(tracks);
-        snapshot.has_more = has_more;
-        snapshot.next_offset = next_offset;
-        true
-    }
-
-    pub fn replace_playlist(
-        &mut self,
-        account_id: u64,
-        playlist: UserPlaylist,
-        tracks: Vec<Track>,
-        has_more: bool,
-        next_offset: u64,
-        fetched_at_secs: u64,
-        revision: u64,
-    ) -> bool {
-        if self.playlists.iter().any(|snapshot| {
-            snapshot.account_id == account_id
-                && snapshot.playlist.id == playlist.id
-                && snapshot.revision > revision
-        }) {
-            return false;
-        }
-        let cached = CachedPlaylistSnapshot {
-            account_id,
-            fetched_at_secs,
-            revision,
-            playlist,
-            tracks,
-            has_more,
-            next_offset,
-        };
-        if let Some(snapshot) = self.playlists.iter_mut().find(|snapshot| {
-            snapshot.account_id == account_id && snapshot.playlist.id == cached.playlist.id
-        }) {
-            *snapshot = cached;
-        } else {
-            self.playlists.push(cached);
-        }
-        true
-    }
 }
 
 fn settings_path() -> Result<PathBuf> {
@@ -571,18 +389,6 @@ fn normalized_volume(value: f32, fallback: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn playlist() -> UserPlaylist {
-        UserPlaylist {
-            id: UserPlaylistId::Created { tid: 42, dir_id: 0 },
-            title: "测试歌单".to_owned(),
-            cover_url: None,
-            description: String::new(),
-            owner: "tester".to_owned(),
-            owner_avatar_url: None,
-            track_count: 2,
-        }
-    }
 
     fn track(mid: &str) -> Track {
         Track {
@@ -691,7 +497,7 @@ mod tests {
                 },
                 track_mid: "restored-track".to_owned(),
                 position_ms: 92_345,
-                queue_tracks: vec![track("restored-track")],
+                queue_tracks: vec![Arc::new(track("restored-track"))],
                 queue_modified: true,
                 queue_continuation: Some(PersistedQueueContinuation::Radar {
                     next_page: 4,
@@ -773,7 +579,7 @@ mod tests {
             playlist_id: UserPlaylistId::Liked,
             track_mid: "track-mid".to_owned(),
             position_ms: 92_345,
-            queue_tracks: vec![track("track-mid")],
+            queue_tracks: vec![Arc::new(track("track-mid"))],
             queue_modified: false,
             queue_continuation: None,
         };
@@ -833,15 +639,16 @@ mod tests {
     }
 
     #[test]
-    fn library_cache_uses_ttl_and_only_appends_contiguous_pages() {
+    fn library_directory_uses_ttl_and_tracks_liked_count_changes() {
         let mut cache = LibraryCache::default();
         let profile = UserProfile {
             id: "10001".to_owned(),
             nickname: "tester".to_owned(),
             avatar_url: None,
         };
-        let playlist = playlist();
-        cache.replace_directory(10001, profile, vec![playlist.clone()], 100);
+        let mut liked = UserPlaylist::liked();
+        liked.track_count = 2;
+        cache.replace_directory(10001, profile, vec![liked], 100);
         assert!(
             cache
                 .fresh_directory(10001, 399, Duration::from_secs(300))
@@ -853,169 +660,9 @@ mod tests {
                 .is_none()
         );
 
-        assert!(cache.store_playlist_page(
-            10001,
-            playlist.clone(),
-            vec![track("first")],
-            true,
-            1,
-            0,
-            100,
-            1,
-        ));
-        assert!(!cache.store_playlist_page(
-            10001,
-            playlist.clone(),
-            vec![track("skipped")],
-            false,
-            3,
-            2,
-            100,
-            1,
-        ));
-        assert!(cache.store_playlist_page(
-            10001,
-            playlist.clone(),
-            vec![track("second")],
-            false,
-            2,
-            1,
-            100,
-            1,
-        ));
-
-        let snapshot = cache
-            .fresh_playlist(10001, &playlist.id, 399, Duration::from_secs(300))
-            .expect("fresh playlist snapshot");
-        assert_eq!(
-            snapshot
-                .tracks
-                .iter()
-                .map(|track| track.mid.as_str())
-                .collect::<Vec<_>>(),
-            ["first", "second"]
-        );
-        assert!(!snapshot.has_more);
-        assert_eq!(snapshot.next_offset, 2);
-        assert!(
-            cache
-                .fresh_playlist(10001, &playlist.id, 400, Duration::from_secs(300))
-                .is_none()
-        );
-        assert_eq!(
-            cache
-                .cached_playlist(10001, &playlist.id)
-                .expect("stale snapshot remains available within the session")
-                .tracks
-                .len(),
-            2
-        );
-
-        assert!(cache.store_playlist_page(
-            10001,
-            playlist.clone(),
-            vec![track("refreshed")],
-            false,
-            1,
-            0,
-            400,
-            2,
-        ));
-        let refreshed = cache
-            .fresh_playlist(10001, &playlist.id, 400, Duration::from_secs(300))
-            .expect("refreshed playlist snapshot");
-        assert_eq!(refreshed.tracks.len(), 1);
-        assert_eq!(refreshed.tracks[0].mid, "refreshed");
-        assert!(!cache.replace_playlist(
-            10001,
-            playlist.clone(),
-            vec![track("stale")],
-            false,
-            1,
-            401,
-            1,
-        ));
-        assert_eq!(
-            cache
-                .fresh_playlist(10001, &playlist.id, 401, Duration::from_secs(300))
-                .expect("newer snapshot remains")
-                .tracks[0]
-                .mid,
-            "refreshed"
-        );
-    }
-
-    #[test]
-    fn liked_state_uses_fresh_complete_data_and_updates_the_cached_prefix() {
-        let mut cache = LibraryCache::default();
-        let profile = UserProfile {
-            id: "10001".to_owned(),
-            nickname: "tester".to_owned(),
-            avatar_url: None,
-        };
-        let mut liked = UserPlaylist::liked();
-        liked.track_count = 2;
-        cache.replace_directory(10001, profile, vec![liked.clone()], 100);
-        assert!(cache.replace_playlist(10001, liked, vec![track("first")], true, 1, 100, 1,));
-
-        let ttl = Duration::from_secs(300);
-        assert_eq!(cache.track_liked(10001, "first", 399, ttl), Some(true));
-        assert_eq!(cache.track_liked(10001, "missing", 399, ttl), None);
-        assert_eq!(cache.track_liked(10001, "first", 400, ttl), None);
-
-        cache.set_track_liked(10001, track("second"), true);
-        let snapshot = cache
-            .cached_playlist(10001, &UserPlaylistId::Liked)
-            .expect("liked playlist snapshot");
-        assert_eq!(
-            snapshot
-                .tracks
-                .iter()
-                .map(|track| track.mid.as_str())
-                .collect::<Vec<_>>(),
-            ["second", "first"]
-        );
-        assert_eq!(snapshot.next_offset, 2);
-
-        cache.set_track_liked(10001, track("first"), false);
-        let snapshot = cache
-            .cached_playlist(10001, &UserPlaylistId::Liked)
-            .expect("updated liked playlist snapshot");
-        assert_eq!(snapshot.tracks.len(), 1);
-        assert_eq!(snapshot.tracks[0].mid, "second");
-        assert_eq!(snapshot.next_offset, 1);
-        assert_eq!(
-            cache.directories[0].playlists[0].track_count,
-            snapshot.playlist.track_count
-        );
-    }
-
-    #[test]
-    fn search_queue_snapshot_remains_available_within_session() {
-        let mut cache = LibraryCache::default();
-        let playlist = UserPlaylist {
-            id: UserPlaylistId::Search {
-                query: "search query".to_owned(),
-            },
-            title: "Search results".to_owned(),
-            cover_url: None,
-            description: String::new(),
-            owner: String::new(),
-            owner_avatar_url: None,
-            track_count: 1,
-        };
-        assert!(cache.replace_playlist(
-            10001,
-            playlist.clone(),
-            vec![track("search-track")],
-            false,
-            1,
-            100,
-            1,
-        ));
-        let snapshot = cache
-            .fresh_playlist(10001, &playlist.id, 10_000, Duration::from_secs(300))
-            .expect("search queue snapshot");
-        assert_eq!(snapshot.tracks[0].mid, "search-track");
+        cache.update_liked_track_count(10001, true);
+        assert_eq!(cache.directories[0].playlists[0].track_count, 3);
+        cache.update_liked_track_count(10001, false);
+        assert_eq!(cache.directories[0].playlists[0].track_count, 2);
     }
 }

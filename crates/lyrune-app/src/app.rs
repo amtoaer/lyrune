@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -64,10 +64,12 @@ use xxhash_rust::xxh3::xxh3_128;
 
 const PAGE_SIZE: u64 = 100;
 const ARTIST_PAGE_SIZE: u64 = 5;
+const SEARCH_PAGE_SIZE: usize = 20;
+const NAVIGATION_HISTORY_LIMIT: usize = 10;
 const PROGRESS_TICK: Duration = Duration::from_millis(250);
 const PLAYBACK_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
-const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const LYRIC_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
 const LYRIC_ROW_HEIGHT: f32 = 104.;
@@ -1569,14 +1571,6 @@ fn unix_timestamp_secs() -> u64 {
         .as_secs()
 }
 
-fn new_cache_revision() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .min(u64::MAX as u128) as u64
-}
-
 pub(crate) static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     Builder::new_multi_thread()
         .worker_threads(2)
@@ -1654,13 +1648,258 @@ impl SearchCategory {
             Self::Playlists => MediaIcon::Playlist,
         }
     }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Songs => 0,
+            Self::Playlists => 1,
+            Self::Albums => 2,
+            Self::Artists => 3,
+        }
+    }
 }
 
+#[derive(Clone)]
 enum SearchMoreResults {
     Songs(SearchPage<Track>),
     Artists(SearchPage<SearchArtist>),
     Albums(SearchPage<SearchAlbum>),
     Playlists(SearchPage<UserPlaylist>),
+}
+
+fn lock_resource<T>(resource: &Mutex<T>) -> MutexGuard<'_, T> {
+    resource.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn share_items<T>(items: Vec<T>) -> Vec<Arc<T>> {
+    items.into_iter().map(Arc::new).collect()
+}
+
+#[derive(Clone)]
+struct SharedSearchPage<T> {
+    items: Vec<Arc<T>>,
+    has_more: bool,
+    next_offset: u64,
+}
+
+impl<T> From<SearchPage<T>> for SharedSearchPage<T> {
+    fn from(page: SearchPage<T>) -> Self {
+        Self {
+            items: share_items(page.items),
+            has_more: page.has_more,
+            next_offset: page.next_offset,
+        }
+    }
+}
+
+fn append_shared_search_page<T>(target: &mut SharedSearchPage<T>, page: SearchPage<T>) {
+    target.items.extend(share_items(page.items));
+    target.has_more = page.has_more;
+    target.next_offset = page.next_offset;
+}
+
+#[derive(Clone)]
+struct SharedSearchResults {
+    songs: SharedSearchPage<Track>,
+    artists: SharedSearchPage<SearchArtist>,
+    albums: SharedSearchPage<SearchAlbum>,
+    playlists: SharedSearchPage<UserPlaylist>,
+}
+
+impl From<SearchResults> for SharedSearchResults {
+    fn from(results: SearchResults) -> Self {
+        Self {
+            songs: results.songs.into(),
+            artists: results.artists.into(),
+            albums: results.albums.into(),
+            playlists: results.playlists.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SearchVisibleCounts {
+    songs: usize,
+    artists: usize,
+    albums: usize,
+    playlists: usize,
+}
+
+impl Default for SearchVisibleCounts {
+    fn default() -> Self {
+        Self {
+            songs: SEARCH_PAGE_SIZE,
+            artists: SEARCH_PAGE_SIZE,
+            albums: SEARCH_PAGE_SIZE,
+            playlists: SEARCH_PAGE_SIZE,
+        }
+    }
+}
+
+impl SearchVisibleCounts {
+    fn get(self, category: SearchCategory) -> usize {
+        match category {
+            SearchCategory::Songs => self.songs,
+            SearchCategory::Artists => self.artists,
+            SearchCategory::Albums => self.albums,
+            SearchCategory::Playlists => self.playlists,
+        }
+    }
+
+    fn get_mut(&mut self, category: SearchCategory) -> &mut usize {
+        match category {
+            SearchCategory::Songs => &mut self.songs,
+            SearchCategory::Artists => &mut self.artists,
+            SearchCategory::Albums => &mut self.albums,
+            SearchCategory::Playlists => &mut self.playlists,
+        }
+    }
+}
+
+struct SearchResource {
+    results: Option<SharedSearchResults>,
+    loading: bool,
+    loading_more: [bool; 4],
+    error: Option<String>,
+}
+
+impl Default for SearchResource {
+    fn default() -> Self {
+        Self {
+            results: None,
+            loading: false,
+            loading_more: [false; 4],
+            error: None,
+        }
+    }
+}
+
+struct ArtistResource {
+    songs: Option<SharedSearchPage<Track>>,
+    track_count: u64,
+    songs_loading: bool,
+    songs_loading_more: bool,
+    song_error: Option<String>,
+    albums: Option<SharedSearchPage<SearchAlbum>>,
+    albums_loading: bool,
+    albums_loading_more: bool,
+    album_error: Option<String>,
+}
+
+impl Default for ArtistResource {
+    fn default() -> Self {
+        Self {
+            songs: None,
+            track_count: 0,
+            songs_loading: false,
+            songs_loading_more: false,
+            song_error: None,
+            albums: None,
+            albums_loading: false,
+            albums_loading_more: false,
+            album_error: None,
+        }
+    }
+}
+
+struct PlaylistResource {
+    playlist: UserPlaylist,
+    tracks: Vec<Arc<Track>>,
+    has_more: bool,
+    next_offset: u64,
+    fetched_at_secs: u64,
+    loading: bool,
+}
+
+impl PlaylistResource {
+    fn empty(playlist: UserPlaylist) -> Self {
+        Self {
+            playlist,
+            tracks: Vec::new(),
+            has_more: true,
+            next_offset: 0,
+            fetched_at_secs: 0,
+            loading: false,
+        }
+    }
+
+    fn is_fresh(&self, now_secs: u64) -> bool {
+        matches!(self.playlist.id, UserPlaylistId::Search { .. })
+            || now_secs.saturating_sub(self.fetched_at_secs) < LIBRARY_CACHE_TTL.as_secs()
+    }
+
+    fn apply_page(
+        &mut self,
+        playlist: UserPlaylist,
+        tracks: Vec<Arc<Track>>,
+        has_more: bool,
+        next_offset: u64,
+        offset: u64,
+    ) {
+        if offset == 0 {
+            self.tracks = tracks;
+        } else if offset == self.next_offset {
+            self.tracks.extend(tracks);
+        } else {
+            return;
+        }
+        self.playlist = playlist;
+        self.has_more = has_more;
+        self.next_offset = next_offset;
+        self.fetched_at_secs = unix_timestamp_secs();
+    }
+}
+
+fn update_liked_playlist_resource(
+    resource: &SharedPlaylistResource,
+    track: &Track,
+    liked: bool,
+) -> Option<(UserPlaylist, Vec<Arc<Track>>, bool)> {
+    let mut state = lock_resource(resource);
+    if state.fetched_at_secs == 0 {
+        return None;
+    }
+    let index = state.tracks.iter().position(|item| item.mid == track.mid);
+    match (liked, index) {
+        (true, None) => state.tracks.insert(0, Arc::new(track.clone())),
+        (false, Some(index)) => {
+            state.tracks.remove(index);
+        }
+        _ => return None,
+    }
+    state.playlist.track_count = if liked {
+        state.playlist.track_count.saturating_add(1)
+    } else {
+        state.playlist.track_count.saturating_sub(1)
+    };
+    state.next_offset = if liked {
+        state.next_offset.saturating_add(1)
+    } else {
+        state.next_offset.saturating_sub(1)
+    };
+    Some((state.playlist.clone(), state.tracks.clone(), state.has_more))
+}
+
+type SharedSearchResource = Arc<Mutex<SearchResource>>;
+type SharedArtistResource = Arc<Mutex<ArtistResource>>;
+type SharedPlaylistResource = Arc<Mutex<PlaylistResource>>;
+
+#[derive(Default)]
+struct PageResourceCache {
+    searches: HashMap<(u64, String), Weak<Mutex<SearchResource>>>,
+    artists: HashMap<(u64, String), Weak<Mutex<ArtistResource>>>,
+    playlists: HashMap<(u64, UserPlaylistId), Weak<Mutex<PlaylistResource>>>,
+}
+
+impl PageResourceCache {
+    fn prune(&mut self) {
+        self.searches
+            .retain(|_, resource| resource.strong_count() > 0);
+        self.artists
+            .retain(|_, resource| resource.strong_count() > 0);
+        self.playlists
+            .retain(|_, resource| resource.strong_count() > 0);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1669,16 +1908,10 @@ enum SongRowSource {
     Artist,
 }
 
-fn append_search_page<T>(target: &mut SearchPage<T>, mut page: SearchPage<T>) {
-    target.items.append(&mut page.items);
-    target.has_more = page.has_more;
-    target.next_offset = page.next_offset;
-}
-
 fn insert_track_after_current(
-    tracks: &mut Vec<Track>,
+    tracks: &mut Vec<Arc<Track>>,
     current_index: Option<usize>,
-    track: Track,
+    track: Arc<Track>,
 ) -> usize {
     let mut current_index = current_index.filter(|index| *index < tracks.len());
     if let Some(existing_index) = tracks.iter().position(|item| item.mid == track.mid) {
@@ -1700,7 +1933,7 @@ fn insert_track_after_current(
 fn insert_external_track_after_current(
     queue: &mut PlaybackQueue,
     current_index: Option<usize>,
-    track: Track,
+    track: Arc<Track>,
 ) -> usize {
     let index = insert_track_after_current(&mut queue.tracks, current_index, track);
     queue.modified = true;
@@ -1736,14 +1969,20 @@ enum NavigationPage {
     Search {
         query: String,
         category: SearchCategory,
+        visible_counts: SearchVisibleCounts,
+        resource: Option<SharedSearchResource>,
     },
     Artist {
         artist: SearchArtist,
+        visible_song_count: usize,
+        visible_album_count: usize,
+        resource: Option<SharedArtistResource>,
     },
     Playlist {
         playlist: UserPlaylist,
         selected_index: Option<usize>,
         scroll_position: PlaylistScrollPosition,
+        resource: Option<SharedPlaylistResource>,
     },
 }
 
@@ -1763,6 +2002,17 @@ impl NavigationPage {
                 },
             ) => playlist.id == other.id,
             _ => false,
+        }
+    }
+
+    fn playlist_resource(&self, playlist_id: &UserPlaylistId) -> Option<SharedPlaylistResource> {
+        match self {
+            Self::Playlist {
+                playlist,
+                resource: Some(resource),
+                ..
+            } if playlist.id == *playlist_id => Some(resource.clone()),
+            _ => None,
         }
     }
 }
@@ -1785,6 +2035,9 @@ impl NavigationHistory {
             self.back.push(current);
         }
         self.forward.clear();
+        while self.back.len() + 1 > NAVIGATION_HISTORY_LIMIT {
+            self.back.remove(0);
+        }
     }
 
     fn go_back(&mut self, current: Option<NavigationPage>) -> Option<NavigationPage> {
@@ -1807,6 +2060,24 @@ impl NavigationHistory {
         self.back.clear();
         self.forward.clear();
     }
+
+    fn playlist_resources(&self, playlist_id: &UserPlaylistId) -> Vec<SharedPlaylistResource> {
+        let mut resources = Vec::new();
+        for resource in self
+            .back
+            .iter()
+            .chain(&self.forward)
+            .filter_map(|page| page.playlist_resource(playlist_id))
+        {
+            if !resources
+                .iter()
+                .any(|current| Arc::ptr_eq(current, &resource))
+            {
+                resources.push(resource);
+            }
+        }
+        resources
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1825,7 +2096,7 @@ struct PlaybackLocation {
 
 struct PlaybackQueue {
     playlist_id: UserPlaylistId,
-    tracks: Vec<Track>,
+    tracks: Vec<Arc<Track>>,
     modified: bool,
     continuation: Option<PersistedQueueContinuation>,
 }
@@ -1924,13 +2195,10 @@ pub struct LyruneView {
     library_loading: bool,
     selected_playlist_index: Option<usize>,
     selected_playlist: Option<UserPlaylist>,
-    page_offset: u64,
-    page_loading: bool,
+    selected_playlist_resource: Option<SharedPlaylistResource>,
     pending_playlist_scroll_position: Option<PlaylistScrollPosition>,
     library_generation: u64,
-    playlist_generation: u64,
     playlist_force_refresh: bool,
-    playlist_cache_revision: u64,
     playlist_page_requests: SingleFlight<PlaylistPageKey, PlaylistPage>,
     main_content: MainContent,
     navigation_history: NavigationHistory,
@@ -1941,23 +2209,13 @@ pub struct LyruneView {
     home_generation: u64,
     home_recommendation_loading: Option<RecommendationKind>,
     search_query: String,
-    search_results: Option<SearchResults>,
+    search_resource: Option<SharedSearchResource>,
+    search_visible_counts: SearchVisibleCounts,
     search_category: SearchCategory,
-    search_loading: bool,
-    search_loading_more: bool,
-    search_error: Option<String>,
-    search_generation: u64,
     selected_artist: Option<SearchArtist>,
-    artist_songs: Option<SearchPage<Track>>,
-    artist_track_count: u64,
-    artist_songs_loading: bool,
-    artist_songs_loading_more: bool,
-    artist_song_error: Option<String>,
-    artist_albums: Option<SearchPage<SearchAlbum>>,
-    artist_albums_loading: bool,
-    artist_albums_loading_more: bool,
-    artist_album_error: Option<String>,
-    artist_generation: u64,
+    artist_resource: Option<SharedArtistResource>,
+    artist_visible_song_count: usize,
+    artist_visible_album_count: usize,
 
     playlist_list: Entity<ListState<PlaylistListDelegate>>,
     track_table: Entity<TableState<TrackTableDelegate>>,
@@ -2009,6 +2267,7 @@ pub struct LyruneView {
     fonts: AppFonts,
     settings: AppSettings,
     library_cache: LibraryCache,
+    page_resource_cache: PageResourceCache,
     liked_tracks: HashMap<String, bool>,
     liked_state_loading: HashSet<String>,
     liked_toggle_loading: HashSet<String>,
@@ -2232,13 +2491,10 @@ impl LyruneView {
             library_loading: false,
             selected_playlist_index: None,
             selected_playlist: None,
-            page_offset: 0,
-            page_loading: false,
+            selected_playlist_resource: None,
             pending_playlist_scroll_position: None,
             library_generation: 0,
-            playlist_generation: 0,
             playlist_force_refresh: false,
-            playlist_cache_revision: 0,
             playlist_page_requests: SingleFlight::default(),
             main_content: MainContent::Home,
             navigation_history: NavigationHistory::default(),
@@ -2249,23 +2505,13 @@ impl LyruneView {
             home_generation: 0,
             home_recommendation_loading: None,
             search_query: String::new(),
-            search_results: None,
+            search_resource: None,
+            search_visible_counts: SearchVisibleCounts::default(),
             search_category: SearchCategory::Songs,
-            search_loading: false,
-            search_loading_more: false,
-            search_error: None,
-            search_generation: 0,
             selected_artist: None,
-            artist_songs: None,
-            artist_track_count: 0,
-            artist_songs_loading: false,
-            artist_songs_loading_more: false,
-            artist_song_error: None,
-            artist_albums: None,
-            artist_albums_loading: false,
-            artist_albums_loading_more: false,
-            artist_album_error: None,
-            artist_generation: 0,
+            artist_resource: None,
+            artist_visible_song_count: ARTIST_PAGE_SIZE as usize,
+            artist_visible_album_count: ARTIST_PAGE_SIZE as usize,
             playlist_list,
             track_table,
             search_input,
@@ -2315,6 +2561,7 @@ impl LyruneView {
             fonts,
             settings,
             library_cache,
+            page_resource_cache: PageResourceCache::default(),
             liked_tracks: HashMap::new(),
             liked_state_loading: HashSet::new(),
             liked_toggle_loading: HashSet::new(),
@@ -2831,6 +3078,82 @@ impl LyruneView {
         }));
     }
 
+    fn shared_search_resource(&mut self, query: &str) -> SharedSearchResource {
+        let account_id = self
+            .credential
+            .as_ref()
+            .map_or(0, |credential| credential.music_id);
+        let key = (account_id, query.to_owned());
+        if let Some(resource) = self
+            .page_resource_cache
+            .searches
+            .get(&key)
+            .and_then(Weak::upgrade)
+        {
+            return resource;
+        }
+        let resource = Arc::new(Mutex::new(SearchResource::default()));
+        self.page_resource_cache
+            .searches
+            .insert(key, Arc::downgrade(&resource));
+        resource
+    }
+
+    fn shared_artist_resource(&mut self, artist_mid: &str) -> SharedArtistResource {
+        let account_id = self
+            .credential
+            .as_ref()
+            .map_or(0, |credential| credential.music_id);
+        let key = (account_id, artist_mid.to_owned());
+        if let Some(resource) = self
+            .page_resource_cache
+            .artists
+            .get(&key)
+            .and_then(Weak::upgrade)
+        {
+            return resource;
+        }
+        let resource = Arc::new(Mutex::new(ArtistResource::default()));
+        self.page_resource_cache
+            .artists
+            .insert(key, Arc::downgrade(&resource));
+        resource
+    }
+
+    fn shared_playlist_resource(
+        &mut self,
+        playlist: UserPlaylist,
+        force_refresh: bool,
+        cache_policy: PlaylistCachePolicy,
+    ) -> SharedPlaylistResource {
+        let account_id = self
+            .credential
+            .as_ref()
+            .map_or(0, |credential| credential.music_id);
+        let key = (account_id, playlist.id.clone());
+        if !force_refresh
+            && let Some(resource) = self
+                .page_resource_cache
+                .playlists
+                .get(&key)
+                .and_then(Weak::upgrade)
+            && (matches!(cache_policy, PlaylistCachePolicy::AllowStale)
+                || lock_resource(&resource).is_fresh(unix_timestamp_secs()))
+        {
+            return resource;
+        }
+
+        let resource = Arc::new(Mutex::new(PlaylistResource::empty(playlist)));
+        self.page_resource_cache
+            .playlists
+            .insert(key, Arc::downgrade(&resource));
+        resource
+    }
+
+    fn prune_page_resources(&mut self) {
+        self.page_resource_cache.prune();
+    }
+
     fn current_navigation_page(&self, cx: &App) -> Option<NavigationPage> {
         match self.main_content {
             MainContent::Home => Some(NavigationPage::Home),
@@ -2838,11 +3161,19 @@ impl LyruneView {
             MainContent::Search => Some(NavigationPage::Search {
                 query: self.search_query.clone(),
                 category: self.search_category,
+                visible_counts: self.search_visible_counts,
+                resource: self.search_resource.clone(),
             }),
-            MainContent::Artist => self
-                .selected_artist
-                .clone()
-                .map(|artist| NavigationPage::Artist { artist }),
+            MainContent::Artist => {
+                self.selected_artist
+                    .clone()
+                    .map(|artist| NavigationPage::Artist {
+                        artist,
+                        visible_song_count: self.artist_visible_song_count,
+                        visible_album_count: self.artist_visible_album_count,
+                        resource: self.artist_resource.clone(),
+                    })
+            }
             MainContent::Playlist => self.selected_playlist.clone().map(|playlist| {
                 let table = self.track_table.read(cx);
                 let scroll_position = PlaylistScrollPosition {
@@ -2859,6 +3190,7 @@ impl LyruneView {
                     playlist,
                     selected_index: self.selected_playlist_index,
                     scroll_position,
+                    resource: self.selected_playlist_resource.clone(),
                 }
             }),
         }
@@ -2873,6 +3205,9 @@ impl LyruneView {
         match page {
             NavigationPage::Home => {
                 self.main_content = MainContent::Home;
+                self.search_resource = None;
+                self.artist_resource = None;
+                self.selected_playlist_resource = None;
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(None, window, cx);
                 });
@@ -2883,36 +3218,58 @@ impl LyruneView {
             }
             NavigationPage::Settings => {
                 self.main_content = MainContent::Settings;
+                self.search_resource = None;
+                self.artist_resource = None;
+                self.selected_playlist_resource = None;
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(None, window, cx);
                 });
                 cx.notify();
             }
-            NavigationPage::Search { query, category } => {
+            NavigationPage::Search {
+                query,
+                category,
+                visible_counts,
+                resource,
+            } => {
                 self.main_content = MainContent::Search;
                 self.search_category = category;
+                self.search_visible_counts = visible_counts;
+                self.artist_resource = None;
+                self.selected_playlist_resource = None;
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(None, window, cx);
                 });
                 self.search_input.update(cx, |input, cx| {
                     input.set_value(query.clone(), window, cx);
                 });
-                if self.search_query != query || self.search_results.is_none() {
-                    self.start_search(query, cx);
-                } else {
-                    cx.notify();
-                }
+                self.search_query = query.clone();
+                let resource = resource.unwrap_or_else(|| self.shared_search_resource(&query));
+                self.search_resource = Some(resource.clone());
+                self.start_search(resource, query, cx);
             }
-            NavigationPage::Artist { artist } => {
+            NavigationPage::Artist {
+                artist,
+                visible_song_count,
+                visible_album_count,
+                resource,
+            } => {
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(None, window, cx);
                 });
-                self.open_artist(artist, cx);
+                self.search_resource = None;
+                self.selected_playlist_resource = None;
+                self.artist_visible_song_count = visible_song_count;
+                self.artist_visible_album_count = visible_album_count;
+                let resource =
+                    resource.unwrap_or_else(|| self.shared_artist_resource(artist.mid.as_str()));
+                self.open_artist(artist, resource, cx);
             }
             NavigationPage::Playlist {
                 playlist,
                 selected_index,
                 scroll_position,
+                resource,
             } => {
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(selected_index.map(IndexPath::new), window, cx);
@@ -2923,10 +3280,12 @@ impl LyruneView {
                     false,
                     PlaylistCachePolicy::AllowStale,
                     scroll_position,
+                    resource,
                     cx,
                 );
             }
         }
+        self.prune_page_resources();
     }
 
     fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2950,41 +3309,50 @@ impl LyruneView {
             return;
         }
         window.blur();
+        let resource = self.shared_search_resource(&query);
         let target = NavigationPage::Search {
             query,
             category: SearchCategory::Songs,
+            visible_counts: SearchVisibleCounts::default(),
+            resource: Some(resource),
         };
         let current = self.current_navigation_page(cx);
         self.navigation_history.record(current, &target);
         self.apply_navigation_page(target, window, cx);
     }
 
-    fn start_search(&mut self, query: String, cx: &mut Context<Self>) {
+    fn start_search(
+        &mut self,
+        resource: SharedSearchResource,
+        query: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some(credential) = self.credential.clone() else {
-            self.search_error = Some("请先登录 QQ 音乐".to_owned());
+            lock_resource(&resource).error = Some("请先登录 QQ 音乐".to_owned());
             cx.notify();
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
-            self.search_error = Some("QQ 音乐客户端不可用".to_owned());
+            lock_resource(&resource).error = Some("QQ 音乐客户端不可用".to_owned());
             cx.notify();
             return;
         };
-        self.search_generation = self.search_generation.wrapping_add(1);
-        let generation = self.search_generation;
-        self.search_query = query.clone();
-        self.search_results = None;
-        self.search_category = SearchCategory::Songs;
-        self.search_loading = true;
-        self.search_loading_more = false;
-        self.search_error = None;
+        {
+            let mut state = lock_resource(&resource);
+            if state.results.is_some() || state.loading {
+                cx.notify();
+                return;
+            }
+            state.loading = true;
+            state.error = None;
+        }
         cx.notify();
 
         let (sender, receiver) = async_channel::bounded(1);
         drop(RUNTIME.spawn(async move {
             let result = tokio::time::timeout(
                 Duration::from_secs(30),
-                client.search(&credential, &query, 20),
+                client.search(&credential, &query, SEARCH_PAGE_SIZE as u64),
             )
             .await
             .context("QQ 音乐搜索等待超过 30 秒")
@@ -2997,73 +3365,105 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.search_generation != generation {
-                    return;
-                }
-                this.search_loading = false;
+                let mut state = lock_resource(&resource);
+                state.loading = false;
                 match result {
                     Ok(results) => {
-                        this.search_results = Some(results);
-                        this.search_error = None;
+                        state.results = Some(results.into());
+                        state.error = None;
                     }
                     Err(error) => {
-                        this.search_results = None;
-                        this.search_error = Some(format!("搜索失败：{error:#}"));
+                        state.results = None;
+                        state.error = Some(format!("搜索失败：{error:#}"));
                     }
                 }
-                cx.notify();
+                drop(state);
+                if this
+                    .search_resource
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &resource))
+                {
+                    cx.notify();
+                }
             });
         })
         .detach();
     }
 
     fn load_more_search(&mut self, cx: &mut Context<Self>) {
-        if self.search_loading || self.search_loading_more {
-            return;
-        }
-        let Some(results) = self.search_results.as_ref() else {
+        let Some(resource) = self.search_resource.clone() else {
             return;
         };
-        let (offset, has_more) = match self.search_category {
-            SearchCategory::Songs => (results.songs.next_offset, results.songs.has_more),
-            SearchCategory::Artists => (results.artists.next_offset, results.artists.has_more),
-            SearchCategory::Albums => (results.albums.next_offset, results.albums.has_more),
-            SearchCategory::Playlists => {
-                (results.playlists.next_offset, results.playlists.has_more)
-            }
-        };
-        if !has_more {
-            return;
-        }
+        let category = self.search_category;
+        let target_count = self.search_visible_counts.get(category) + SEARCH_PAGE_SIZE;
         let Some(credential) = self.credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
+            lock_resource(&resource).error = Some("QQ 音乐客户端不可用".to_owned());
+            cx.notify();
             return;
         };
+        let offset = {
+            let mut state = lock_resource(&resource);
+            if state.loading || state.loading_more[category.index()] {
+                return;
+            }
+            let Some(results) = state.results.as_ref() else {
+                return;
+            };
+            let (len, offset, has_more) = match category {
+                SearchCategory::Songs => (
+                    results.songs.items.len(),
+                    results.songs.next_offset,
+                    results.songs.has_more,
+                ),
+                SearchCategory::Artists => (
+                    results.artists.items.len(),
+                    results.artists.next_offset,
+                    results.artists.has_more,
+                ),
+                SearchCategory::Albums => (
+                    results.albums.items.len(),
+                    results.albums.next_offset,
+                    results.albums.has_more,
+                ),
+                SearchCategory::Playlists => (
+                    results.playlists.items.len(),
+                    results.playlists.next_offset,
+                    results.playlists.has_more,
+                ),
+            };
+            if len >= target_count || !has_more {
+                *self.search_visible_counts.get_mut(category) = target_count;
+                cx.notify();
+                return;
+            }
+            state.loading_more[category.index()] = true;
+            state.error = None;
+            offset
+        };
+        *self.search_visible_counts.get_mut(category) = target_count;
         let query = self.search_query.clone();
-        let category = self.search_category;
-        let generation = self.search_generation;
-        self.search_loading_more = true;
         cx.notify();
 
         let (sender, receiver) = async_channel::bounded(1);
         drop(RUNTIME.spawn(async move {
             let result = match category {
                 SearchCategory::Songs => client
-                    .search_songs(&credential, &query, offset, 20)
+                    .search_songs(&credential, &query, offset, SEARCH_PAGE_SIZE as u64)
                     .await
                     .map(SearchMoreResults::Songs),
                 SearchCategory::Artists => client
-                    .search_artists(&credential, &query, offset, 20)
+                    .search_artists(&credential, &query, offset, SEARCH_PAGE_SIZE as u64)
                     .await
                     .map(SearchMoreResults::Artists),
                 SearchCategory::Albums => client
-                    .search_albums(&credential, &query, offset, 20)
+                    .search_albums(&credential, &query, offset, SEARCH_PAGE_SIZE as u64)
                     .await
                     .map(SearchMoreResults::Albums),
                 SearchCategory::Playlists => client
-                    .search_playlists(&credential, &query, offset, 20)
+                    .search_playlists(&credential, &query, offset, SEARCH_PAGE_SIZE as u64)
                     .await
                     .map(SearchMoreResults::Playlists),
             };
@@ -3075,43 +3475,49 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.search_generation != generation {
-                    return;
-                }
-                this.search_loading_more = false;
-                if this.search_category != category {
-                    cx.notify();
-                    return;
-                }
-                match (this.search_results.as_mut(), result) {
+                let mut state = lock_resource(&resource);
+                state.loading_more[category.index()] = false;
+                match (state.results.as_mut(), result) {
                     (Some(results), Ok(SearchMoreResults::Songs(page))) => {
-                        append_search_page(&mut results.songs, page)
+                        append_shared_search_page(&mut results.songs, page)
                     }
                     (Some(results), Ok(SearchMoreResults::Artists(page))) => {
-                        append_search_page(&mut results.artists, page)
+                        append_shared_search_page(&mut results.artists, page)
                     }
                     (Some(results), Ok(SearchMoreResults::Albums(page))) => {
-                        append_search_page(&mut results.albums, page)
+                        append_shared_search_page(&mut results.albums, page)
                     }
                     (Some(results), Ok(SearchMoreResults::Playlists(page))) => {
-                        append_search_page(&mut results.playlists, page)
+                        append_shared_search_page(&mut results.playlists, page)
                     }
                     (_, Err(error)) => {
-                        this.search_error = Some(format!("继续加载搜索结果失败：{error:#}"));
+                        state.error = Some(format!("继续加载搜索结果失败：{error:#}"));
                     }
                     _ => {}
                 }
-                cx.notify();
+                drop(state);
+                if this
+                    .search_resource
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &resource))
+                {
+                    cx.notify();
+                }
             });
         })
         .detach();
     }
 
     fn select_search_track(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(results) = self.search_results.as_ref() else {
+        let Some(resource) = self.search_resource.as_ref() else {
             return;
         };
-        let Some(track) = results.songs.items.get(index).cloned() else {
+        let Some(track) = lock_resource(resource)
+            .results
+            .as_ref()
+            .and_then(|results| results.songs.items.get(index))
+            .cloned()
+        else {
             return;
         };
         if self
@@ -3271,7 +3677,7 @@ impl LyruneView {
                         this.queue_waiting_for_recommendation = false;
                         this.playback_queue = Some(PlaybackQueue {
                             playlist_id: UserPlaylistId::Recommendation { kind },
-                            tracks,
+                            tracks: share_items(tracks),
                             modified: false,
                             continuation: Some(continuation),
                         });
@@ -3362,7 +3768,7 @@ impl LyruneView {
                             for track in tracks {
                                 if !queue.tracks.iter().any(|item| item.mid == track.mid) {
                                     first_added.get_or_insert(queue.tracks.len());
-                                    queue.tracks.push(track);
+                                    queue.tracks.push(Arc::new(track));
                                 }
                             }
                         }
@@ -3541,11 +3947,17 @@ impl LyruneView {
             }
         }
 
+        let resource = self.shared_playlist_resource(
+            playlist.clone(),
+            force_refresh,
+            PlaylistCachePolicy::Fresh,
+        );
         if record_navigation {
             let target = NavigationPage::Playlist {
                 playlist: playlist.clone(),
                 selected_index: Some(index),
                 scroll_position: PlaylistScrollPosition::top(),
+                resource: Some(resource.clone()),
             };
             let current = self.current_navigation_page(cx);
             self.navigation_history.record(current, &target);
@@ -3556,6 +3968,7 @@ impl LyruneView {
             force_refresh,
             PlaylistCachePolicy::Fresh,
             PlaylistScrollPosition::top(),
+            Some(resource),
             cx,
         );
     }
@@ -3566,44 +3979,47 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = NavigationPage::Artist { artist };
+        let resource = self.shared_artist_resource(&artist.mid);
+        let target = NavigationPage::Artist {
+            artist,
+            visible_song_count: ARTIST_PAGE_SIZE as usize,
+            visible_album_count: ARTIST_PAGE_SIZE as usize,
+            resource: Some(resource),
+        };
         let current = self.current_navigation_page(cx);
         self.navigation_history.record(current, &target);
         self.apply_navigation_page(target, window, cx);
     }
 
-    fn open_artist(&mut self, artist: SearchArtist, cx: &mut Context<Self>) {
-        let artist_changed = self
-            .selected_artist
-            .as_ref()
-            .is_none_or(|selected| selected.mid != artist.mid);
-        if artist_changed {
-            self.artist_generation = self.artist_generation.wrapping_add(1);
-            self.artist_songs = None;
-            self.artist_track_count = 0;
-            self.artist_songs_loading = false;
-            self.artist_songs_loading_more = false;
-            self.artist_song_error = None;
-            self.artist_albums = None;
-            self.artist_albums_loading = false;
-            self.artist_albums_loading_more = false;
-            self.artist_album_error = None;
-        }
+    fn open_artist(
+        &mut self,
+        artist: SearchArtist,
+        resource: SharedArtistResource,
+        cx: &mut Context<Self>,
+    ) {
         self.selected_artist = Some(artist);
+        self.artist_resource = Some(resource.clone());
         self.main_content = MainContent::Artist;
-        if self.artist_songs.is_none() && !self.artist_songs_loading {
+        let (load_songs, load_albums) = {
+            let state = lock_resource(&resource);
+            (
+                state.songs.is_none() && !state.songs_loading,
+                state.albums.is_none() && !state.albums_loading,
+            )
+        };
+        if load_songs {
             self.load_artist_songs(false, cx);
         }
-        if self.artist_albums.is_none() && !self.artist_albums_loading {
+        if load_albums {
             self.load_artist_albums(false, cx);
         }
         cx.notify();
     }
 
     fn load_artist_songs(&mut self, append: bool, cx: &mut Context<Self>) {
-        if self.artist_songs_loading || self.artist_songs_loading_more {
+        let Some(resource) = self.artist_resource.clone() else {
             return;
-        }
+        };
         let Some(artist) = self.selected_artist.clone() else {
             return;
         };
@@ -3611,27 +4027,39 @@ impl LyruneView {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
-            self.artist_song_error = Some("QQ 音乐客户端不可用".to_owned());
+            lock_resource(&resource).song_error = Some("QQ 音乐客户端不可用".to_owned());
             cx.notify();
             return;
         };
-        let offset = if append {
-            let Some(page) = self.artist_songs.as_ref().filter(|page| page.has_more) else {
-                return;
-            };
-            page.next_offset
-        } else {
-            0
-        };
-        let generation = self.artist_generation;
-        let artist_mid = artist.mid.clone();
-        let playlist = artist.into_playlist();
-        self.artist_song_error = None;
         if append {
-            self.artist_songs_loading_more = true;
-        } else {
-            self.artist_songs_loading = true;
+            self.artist_visible_song_count = self
+                .artist_visible_song_count
+                .saturating_add(ARTIST_PAGE_SIZE as usize);
         }
+        let target_count = self.artist_visible_song_count;
+        let offset = {
+            let mut state = lock_resource(&resource);
+            if state.songs_loading || state.songs_loading_more {
+                return;
+            }
+            if let Some(page) = &state.songs {
+                if page.items.len() >= target_count || !page.has_more {
+                    cx.notify();
+                    return;
+                }
+            } else if append {
+                return;
+            }
+            let offset = state.songs.as_ref().map_or(0, |page| page.next_offset);
+            state.song_error = None;
+            if append {
+                state.songs_loading_more = true;
+            } else {
+                state.songs_loading = true;
+            }
+            offset
+        };
+        let playlist = artist.into_playlist();
         cx.notify();
 
         let (sender, receiver) = async_channel::bounded(1);
@@ -3647,53 +4075,44 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.artist_generation != generation
-                    || this
-                        .selected_artist
-                        .as_ref()
-                        .map(|artist| artist.mid.as_str())
-                        != Some(artist_mid.as_str())
-                {
-                    return;
+                let mut state = lock_resource(&resource);
+                state.songs_loading = false;
+                state.songs_loading_more = false;
+                match result {
+                    Ok(page) => {
+                        state.track_count = page.total;
+                        let page = SearchPage {
+                            items: page.tracks,
+                            has_more: page.has_more,
+                            next_offset: page.next_offset,
+                        };
+                        if offset == 0 {
+                            state.songs = Some(page.into());
+                        } else if let Some(songs) = &mut state.songs {
+                            append_shared_search_page(songs, page);
+                        }
+                    }
+                    Err(error) => {
+                        state.song_error = Some(format!("加载歌手歌曲失败：{error:#}"));
+                    }
                 }
-                this.finish_artist_song_load(result, append);
-                cx.notify();
+                drop(state);
+                if this
+                    .artist_resource
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &resource))
+                {
+                    cx.notify();
+                }
             });
         })
         .detach();
     }
 
-    fn finish_artist_song_load(&mut self, result: anyhow::Result<PlaylistPage>, append: bool) {
-        self.artist_songs_loading = false;
-        self.artist_songs_loading_more = false;
-        match result {
-            Ok(page) => {
-                self.artist_track_count = page.total;
-                let page = SearchPage {
-                    items: page.tracks,
-                    has_more: page.has_more,
-                    next_offset: page.next_offset,
-                };
-                if append {
-                    if let Some(songs) = &mut self.artist_songs {
-                        append_search_page(songs, page);
-                    } else {
-                        self.artist_songs = Some(page);
-                    }
-                } else {
-                    self.artist_songs = Some(page);
-                }
-            }
-            Err(error) => {
-                self.artist_song_error = Some(format!("加载歌手歌曲失败：{error:#}"));
-            }
-        }
-    }
-
     fn load_artist_albums(&mut self, append: bool, cx: &mut Context<Self>) {
-        if self.artist_albums_loading || self.artist_albums_loading_more {
+        let Some(resource) = self.artist_resource.clone() else {
             return;
-        }
+        };
         let Some(artist) = self.selected_artist.clone() else {
             return;
         };
@@ -3701,26 +4120,38 @@ impl LyruneView {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
-            self.artist_album_error = Some("QQ 音乐客户端不可用".to_owned());
+            lock_resource(&resource).album_error = Some("QQ 音乐客户端不可用".to_owned());
             cx.notify();
             return;
         };
-        let offset = if append {
-            let Some(page) = self.artist_albums.as_ref().filter(|page| page.has_more) else {
-                return;
-            };
-            page.next_offset
-        } else {
-            0
-        };
-        let generation = self.artist_generation;
-        let artist_mid = artist.mid.clone();
-        self.artist_album_error = None;
         if append {
-            self.artist_albums_loading_more = true;
-        } else {
-            self.artist_albums_loading = true;
+            self.artist_visible_album_count = self
+                .artist_visible_album_count
+                .saturating_add(ARTIST_PAGE_SIZE as usize);
         }
+        let target_count = self.artist_visible_album_count;
+        let offset = {
+            let mut state = lock_resource(&resource);
+            if state.albums_loading || state.albums_loading_more {
+                return;
+            }
+            if let Some(page) = &state.albums {
+                if page.items.len() >= target_count || !page.has_more {
+                    cx.notify();
+                    return;
+                }
+            } else if append {
+                return;
+            }
+            let offset = state.albums.as_ref().map_or(0, |page| page.next_offset);
+            state.album_error = None;
+            if append {
+                state.albums_loading_more = true;
+            } else {
+                state.albums_loading = true;
+            }
+            offset
+        };
         cx.notify();
 
         let (sender, receiver) = async_channel::bounded(1);
@@ -3736,56 +4167,57 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.artist_generation != generation
-                    || this
-                        .selected_artist
-                        .as_ref()
-                        .map(|artist| artist.mid.as_str())
-                        != Some(artist_mid.as_str())
-                {
-                    return;
+                let mut state = lock_resource(&resource);
+                state.albums_loading = false;
+                state.albums_loading_more = false;
+                match result {
+                    Ok(page) if offset == 0 => state.albums = Some(page.into()),
+                    Ok(page) => {
+                        if let Some(albums) = &mut state.albums {
+                            append_shared_search_page(albums, page);
+                        }
+                    }
+                    Err(error) => {
+                        state.album_error = Some(format!("加载歌手专辑失败：{error:#}"));
+                    }
                 }
-                this.finish_artist_album_load(result, append);
-                cx.notify();
+                drop(state);
+                if this
+                    .artist_resource
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &resource))
+                {
+                    cx.notify();
+                }
             });
         })
         .detach();
-    }
-
-    fn finish_artist_album_load(
-        &mut self,
-        result: anyhow::Result<SearchPage<SearchAlbum>>,
-        append: bool,
-    ) {
-        self.artist_albums_loading = false;
-        self.artist_albums_loading_more = false;
-        match result {
-            Ok(page) if append => {
-                if let Some(albums) = &mut self.artist_albums {
-                    append_search_page(albums, page);
-                } else {
-                    self.artist_albums = Some(page);
-                }
-            }
-            Ok(page) => self.artist_albums = Some(page),
-            Err(error) => {
-                self.artist_album_error = Some(format!("加载歌手专辑失败：{error:#}"));
-            }
-        }
     }
 
     fn select_artist_track(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(artist) = self.selected_artist.clone() else {
             return;
         };
-        let Some(songs) = self.artist_songs.as_ref() else {
+        let Some(resource) = self.artist_resource.as_ref() else {
             return;
         };
-        let Some(selected_track) = songs.items.get(index) else {
-            return;
+        let (selected_track, tracks, has_more, track_count) = {
+            let state = lock_resource(resource);
+            let Some(songs) = state.songs.as_ref() else {
+                return;
+            };
+            let Some(selected_track) = songs.items.get(index).cloned() else {
+                return;
+            };
+            (
+                selected_track,
+                songs.items.clone(),
+                songs.has_more,
+                state.track_count,
+            )
         };
         let mut playlist = artist.into_playlist();
-        playlist.track_count = self.artist_track_count;
+        playlist.track_count = track_count;
 
         if let Some(queue_index) = self
             .playback_queue
@@ -3802,8 +4234,6 @@ impl LyruneView {
             return;
         }
 
-        let tracks = songs.items.clone();
-        let has_more = songs.has_more;
         self.pending_playback_restore = None;
         self.replace_playback_queue(playlist, tracks, has_more, cx);
         self.start_playback(index, Duration::ZERO, None, true, cx);
@@ -3815,10 +4245,13 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let resource =
+            self.shared_playlist_resource(playlist.clone(), false, PlaylistCachePolicy::Fresh);
         let target = NavigationPage::Playlist {
             playlist: playlist.clone(),
             selected_index: None,
             scroll_position: PlaylistScrollPosition::top(),
+            resource: Some(resource.clone()),
         };
         let current = self.current_navigation_page(cx);
         self.navigation_history.record(current, &target);
@@ -3831,6 +4264,7 @@ impl LyruneView {
             false,
             PlaylistCachePolicy::Fresh,
             PlaylistScrollPosition::top(),
+            Some(resource),
             cx,
         );
     }
@@ -3873,17 +4307,15 @@ impl LyruneView {
         force_refresh: bool,
         cache_policy: PlaylistCachePolicy,
         scroll_position: PlaylistScrollPosition,
+        resource: Option<SharedPlaylistResource>,
         cx: &mut Context<Self>,
     ) {
         self.main_content = MainContent::Playlist;
+        self.search_resource = None;
+        self.artist_resource = None;
 
-        self.playlist_generation = self.playlist_generation.wrapping_add(1);
         self.playlist_force_refresh = force_refresh;
-        self.playlist_cache_revision = new_cache_revision();
         self.selected_playlist_index = selected_index;
-        self.selected_playlist = Some(playlist.clone());
-        self.page_offset = 0;
-        self.page_loading = false;
         self.pending_playlist_scroll_position = Some(scroll_position);
         if let Some(index) = selected_index {
             self.playlist_list.update(cx, |list, cx| {
@@ -3899,67 +4331,54 @@ impl LyruneView {
             table.refresh(cx);
             cx.notify();
         });
-        let cached_snapshot = if force_refresh {
-            None
-        } else {
-            self.credential
-                .as_ref()
-                .and_then(|credential| match cache_policy {
-                    PlaylistCachePolicy::Fresh => self.library_cache.fresh_playlist(
-                        credential.music_id,
-                        &playlist.id,
-                        unix_timestamp_secs(),
-                        LIBRARY_CACHE_TTL,
-                    ),
-                    PlaylistCachePolicy::AllowStale => self
-                        .library_cache
-                        .cached_playlist(credential.music_id, &playlist.id),
-                })
+        let resource = resource.unwrap_or_else(|| {
+            self.shared_playlist_resource(playlist.clone(), force_refresh, cache_policy)
+        });
+        let (playlist, tracks, has_more, loading, loaded) = {
+            let state = lock_resource(&resource);
+            (
+                state.playlist.clone(),
+                state.tracks.clone(),
+                state.has_more,
+                state.loading,
+                state.fetched_at_secs != 0,
+            )
         };
-        if let Some(snapshot) = cached_snapshot {
-            self.playlist_cache_revision = snapshot.revision;
-            self.page_offset = snapshot.next_offset;
-            self.selected_playlist = Some(snapshot.playlist.clone());
-            if let Some(index) = self.selected_playlist_index {
-                self.playlist_list.update(cx, |list, cx| {
-                    list.delegate_mut()
-                        .update_playlist(index, snapshot.playlist.clone());
-                    cx.notify();
-                });
-            }
-            let track_count = snapshot.tracks.len();
-            self.track_table.update(cx, |table, cx| {
-                table
-                    .delegate_mut()
-                    .append(snapshot.tracks, snapshot.has_more);
+        self.selected_playlist_resource = Some(resource);
+        self.selected_playlist = Some(playlist.clone());
+        if let Some(index) = self.selected_playlist_index {
+            self.playlist_list.update(cx, |list, cx| {
+                list.delegate_mut().update_playlist(index, playlist.clone());
                 cx.notify();
             });
-            self.restore_pending_playlist_scroll(cx);
-            self.status = StatusMessage::info(if track_count == 0 {
-                format!("歌单“{}”中暂时没有歌曲", snapshot.playlist.title)
-            } else {
-                format!("已打开歌单“{}”", snapshot.playlist.title)
-            });
-            self.sync_table_playback_state(cx);
-            cx.notify();
-            if self.pending_playlist_scroll_position.is_some() {
-                self.load_playlist_page(cx);
-            }
-            return;
         }
-        self.status = StatusMessage::info(format!("正在加载歌单“{}”…", playlist.title));
+        self.track_table.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .set_tracks(tracks.clone(), has_more, loading);
+            cx.notify();
+        });
+        self.restore_pending_playlist_scroll(cx);
+        self.status = StatusMessage::info(if !loaded {
+            format!("正在加载歌单“{}”…", playlist.title)
+        } else if tracks.is_empty() {
+            format!("歌单“{}”中暂时没有歌曲", playlist.title)
+        } else {
+            format!("已打开歌单“{}”", playlist.title)
+        });
         self.sync_table_playback_state(cx);
-        self.load_playlist_page(cx);
+        cx.notify();
+        self.prune_page_resources();
+        if !loaded || self.pending_playlist_scroll_position.is_some() {
+            self.load_playlist_page(cx);
+        }
     }
 
     fn load_playlist_page(&mut self, cx: &mut Context<Self>) {
-        if self.page_loading {
-            return;
-        }
         let Some(credential) = self.credential.clone() else {
             return;
         };
-        let Some(playlist) = self.selected_playlist.clone() else {
+        let Some(resource) = self.selected_playlist_resource.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -3968,13 +4387,17 @@ impl LyruneView {
             return;
         };
 
-        let generation = self.playlist_generation;
-        let offset = self.page_offset;
-        let cache_revision = self.playlist_cache_revision;
+        let (playlist, offset) = {
+            let mut state = lock_resource(&resource);
+            if state.loading || !state.has_more {
+                return;
+            }
+            state.loading = true;
+            (state.playlist.clone(), state.next_offset)
+        };
         let force_refresh = offset == 0 && self.playlist_force_refresh;
         self.playlist_force_refresh = false;
         let requests = self.playlist_page_requests.clone();
-        self.page_loading = true;
         self.track_table.update(cx, |table, cx| {
             table.delegate_mut().set_loading(true);
             cx.notify();
@@ -3999,60 +4422,59 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.playlist_generation != generation {
-                    return;
-                }
-                this.page_loading = false;
-                match result {
+                let active = this
+                    .selected_playlist_resource
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &resource));
+                let mut state = lock_resource(&resource);
+                state.loading = false;
+                let error = match result {
                     Ok(page) => {
-                        let new_tracks = page.tracks.len();
-                        if let Some(credential) = &this.credential {
-                            this.library_cache.store_playlist_page(
-                                credential.music_id,
-                                page.playlist.clone(),
-                                page.tracks.clone(),
-                                page.has_more,
-                                page.next_offset,
-                                offset,
-                                unix_timestamp_secs(),
-                                cache_revision,
-                            );
-                        }
-                        this.page_offset = page.next_offset;
-                        this.selected_playlist = Some(page.playlist.clone());
-                        if let Some(index) = this.selected_playlist_index {
-                            this.playlist_list.update(cx, |list, cx| {
-                                list.delegate_mut()
-                                    .update_playlist(index, page.playlist.clone());
-                                cx.notify();
-                            });
-                        }
-                        this.track_table.update(cx, |table, cx| {
-                            table.delegate_mut().append(page.tracks, page.has_more);
+                        state.apply_page(
+                            page.playlist,
+                            share_items(page.tracks),
+                            page.has_more,
+                            page.next_offset,
+                            offset,
+                        );
+                        None
+                    }
+                    Err(error) => Some(format!("加载歌单失败：{error:#}")),
+                };
+                let snapshot =
+                    active.then(|| (state.playlist.clone(), state.tracks.clone(), state.has_more));
+                drop(state);
+                if let Some((playlist, tracks, has_more)) = snapshot {
+                    this.selected_playlist = Some(playlist.clone());
+                    if let Some(index) = this.selected_playlist_index {
+                        this.playlist_list.update(cx, |list, cx| {
+                            list.delegate_mut().update_playlist(index, playlist.clone());
                             cx.notify();
                         });
-                        if offset == 0 {
-                            this.status = StatusMessage::info(if new_tracks == 0 {
-                                format!("歌单“{}”中暂时没有歌曲", page.playlist.title)
+                    }
+                    this.track_table.update(cx, |table, cx| {
+                        table
+                            .delegate_mut()
+                            .set_tracks(tracks.clone(), has_more, false);
+                        cx.notify();
+                    });
+                    this.status = error.map_or_else(
+                        || {
+                            StatusMessage::info(if tracks.is_empty() {
+                                format!("歌单“{}”中暂时没有歌曲", playlist.title)
                             } else {
-                                format!("已打开歌单“{}”", page.playlist.title)
-                            });
-                        }
-                        this.restore_pending_playlist_scroll(cx);
-                        if this.pending_playlist_scroll_position.is_some() {
-                            this.load_playlist_page(cx);
-                        }
+                                format!("已打开歌单“{}”", playlist.title)
+                            })
+                        },
+                        StatusMessage::error,
+                    );
+                    this.restore_pending_playlist_scroll(cx);
+                    if this.pending_playlist_scroll_position.is_some() {
+                        this.load_playlist_page(cx);
                     }
-                    Err(error) => {
-                        this.track_table.update(cx, |table, cx| {
-                            table.delegate_mut().set_loading(false);
-                            cx.notify();
-                        });
-                        this.status = StatusMessage::error(format!("加载歌单失败：{error:#}"));
-                    }
+                    this.sync_table_playback_state(cx);
+                    cx.notify();
                 }
-                this.sync_table_playback_state(cx);
-                cx.notify();
             });
         })
         .detach();
@@ -4084,15 +4506,23 @@ impl LyruneView {
     fn replace_playback_queue(
         &mut self,
         playlist: UserPlaylist,
-        tracks: Vec<Track>,
+        tracks: Vec<Arc<Track>>,
         has_more: bool,
         cx: &mut Context<Self>,
     ) {
         self.home_recommendation_loading = None;
         self.queue_generation = self.queue_generation.wrapping_add(1);
         let generation = self.queue_generation;
-        let mut offset = tracks.len() as u64;
-        let initial_tracks = tracks.clone();
+        let playlist_resource = self
+            .selected_playlist_resource
+            .as_ref()
+            .filter(|resource| lock_resource(resource).playlist.id == playlist.id)
+            .cloned();
+        let mut offset = playlist_resource
+            .as_ref()
+            .map_or(tracks.len() as u64, |resource| {
+                lock_resource(resource).next_offset
+            });
         self.playback_queue = Some(PlaybackQueue {
             playlist_id: playlist.id.clone(),
             tracks,
@@ -4111,10 +4541,8 @@ impl LyruneView {
         let Some(client) = self.protocol_client.clone() else {
             return;
         };
-        let account_id = credential.music_id;
-        let cached_playlist = playlist.clone();
-        let cache_revision = self.playlist_cache_revision;
         let requests = self.playlist_page_requests.clone();
+        let queue_resource = playlist_resource.clone();
 
         let (sender, receiver) = async_channel::bounded(1);
         drop(RUNTIME.spawn(async move {
@@ -4122,6 +4550,7 @@ impl LyruneView {
                 let mut remaining = Vec::new();
                 let mut has_more = true;
                 while has_more {
+                    let page_offset = offset;
                     let page = request_playlist_page(
                         requests.clone(),
                         client.clone(),
@@ -4134,7 +4563,17 @@ impl LyruneView {
                     .context("无法补全 QQ 音乐播放队列")?;
                     offset = page.next_offset;
                     has_more = page.has_more;
-                    remaining.extend(page.tracks);
+                    let tracks = share_items(page.tracks);
+                    if let Some(resource) = &queue_resource {
+                        lock_resource(resource).apply_page(
+                            page.playlist,
+                            tracks.clone(),
+                            page.has_more,
+                            page.next_offset,
+                            page_offset,
+                        );
+                    }
+                    remaining.extend(tracks);
                 }
                 Ok::<_, anyhow::Error>(remaining)
             }
@@ -4151,23 +4590,28 @@ impl LyruneView {
                     return;
                 }
                 if let (Some(queue), Ok(tracks)) = (&mut this.playback_queue, result) {
-                    let mut cached_tracks = initial_tracks;
-                    cached_tracks.extend(tracks.iter().cloned());
-                    for track in tracks {
+                    for track in &tracks {
                         if !queue.tracks.iter().any(|item| item.mid == track.mid) {
-                            queue.tracks.push(track);
+                            queue.tracks.push(track.clone());
                         }
                     }
-                    let cached_track_count = cached_tracks.len() as u64;
-                    this.library_cache.replace_playlist(
-                        account_id,
-                        cached_playlist,
-                        cached_tracks,
-                        false,
-                        cached_track_count,
-                        unix_timestamp_secs(),
-                        cache_revision,
-                    );
+                    if let Some(resource) = playlist_resource {
+                        let state = lock_resource(&resource);
+                        let active = this
+                            .selected_playlist_resource
+                            .as_ref()
+                            .is_some_and(|current| Arc::ptr_eq(current, &resource));
+                        let snapshot = active.then(|| (state.tracks.clone(), state.has_more));
+                        drop(state);
+                        if let Some((tracks, has_more)) = snapshot {
+                            this.track_table.update(cx, |table, cx| {
+                                table.delegate_mut().set_tracks(tracks, has_more, false);
+                                cx.notify();
+                            });
+                            this.restore_pending_playlist_scroll(cx);
+                            this.sync_table_playback_state(cx);
+                        }
+                    }
                     this.persist_current_playback();
                     #[cfg(target_os = "linux")]
                     this.sync_mpris(false);
@@ -4431,7 +4875,12 @@ impl LyruneView {
             self.lyric_motion_state = None;
             self.pending_lyric_reveal_mid = self.cover_backdrop_expanded.then(|| track.mid.clone());
         }
-        self.ensure_track_lyrics(client.clone(), credential.clone(), track.clone(), cx);
+        self.ensure_track_lyrics(
+            client.clone(),
+            credential.clone(),
+            track.as_ref().clone(),
+            cx,
+        );
         self.play_generation = self.play_generation.wrapping_add(1);
         let generation = self.play_generation;
         self.current_track = Some(index);
@@ -4537,7 +4986,7 @@ impl LyruneView {
                 Ok::<_, anyhow::Error>((
                     playback,
                     PlaybackLocation {
-                        track_mid: track.mid,
+                        track_mid: track.mid.clone(),
                         quality,
                         urls,
                     },
@@ -5305,11 +5754,13 @@ impl LyruneView {
     }
 
     fn current_track_data(&self) -> Option<&Track> {
-        self.current_track.and_then(|index| {
-            self.playback_queue
-                .as_ref()
-                .and_then(|queue| queue.tracks.get(index))
-        })
+        self.current_track
+            .and_then(|index| {
+                self.playback_queue
+                    .as_ref()
+                    .and_then(|queue| queue.tracks.get(index))
+            })
+            .map(Arc::as_ref)
     }
 
     fn ensure_track_like_state(&mut self, mid: String, cx: &mut Context<Self>) {
@@ -5319,12 +5770,24 @@ impl LyruneView {
         let Some(credential) = self.credential.clone() else {
             return;
         };
-        if let Some(liked) = self.library_cache.track_liked(
-            credential.music_id,
-            &mid,
-            unix_timestamp_secs(),
-            LIBRARY_CACHE_TTL,
-        ) {
+        let liked = self
+            .page_resource_cache
+            .playlists
+            .get(&(credential.music_id, UserPlaylistId::Liked))
+            .and_then(Weak::upgrade)
+            .and_then(|resource| {
+                let state = lock_resource(&resource);
+                if !state.is_fresh(unix_timestamp_secs()) || state.fetched_at_secs == 0 {
+                    None
+                } else if state.tracks.iter().any(|track| track.mid == mid) {
+                    Some(true)
+                } else if state.has_more {
+                    None
+                } else {
+                    Some(false)
+                }
+            });
+        if let Some(liked) = liked {
             self.liked_tracks.insert(mid, liked);
             cx.notify();
             return;
@@ -5483,40 +5946,53 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) {
         self.library_cache
-            .set_track_liked(account_id, track.clone(), liked);
+            .update_liked_track_count(account_id, liked);
         self.playlist_list.update(cx, |list, cx| {
             list.delegate_mut().update_liked_track_count(liked);
             cx.notify();
         });
-        if self
-            .selected_playlist
+        let cached_resource = self
+            .page_resource_cache
+            .playlists
+            .get(&(account_id, UserPlaylistId::Liked))
+            .and_then(Weak::upgrade);
+        let active_resource = self
+            .selected_playlist_resource
             .as_ref()
-            .is_none_or(|playlist| playlist.id != UserPlaylistId::Liked)
-        {
-            return;
-        }
-        if let Some(playlist) = &mut self.selected_playlist {
-            playlist.track_count = if liked {
-                playlist.track_count.saturating_add(1)
-            } else {
-                playlist.track_count.saturating_sub(1)
-            };
-        }
-        let page_changed = self.track_table.update(cx, |table, cx| {
-            let changed = table.delegate_mut().set_track_liked(track, liked);
-            if changed {
-                table.clear_selection(cx);
+            .and_then(|resource| {
+                (lock_resource(resource).playlist.id == UserPlaylistId::Liked)
+                    .then(|| resource.clone())
+            });
+        let mut resources = self
+            .navigation_history
+            .playlist_resources(&UserPlaylistId::Liked);
+        for resource in active_resource.iter().chain(cached_resource.iter()) {
+            if !resources
+                .iter()
+                .any(|current| Arc::ptr_eq(current, resource))
+            {
+                resources.push(resource.clone());
             }
-            cx.notify();
-            changed
-        });
-        if page_changed {
-            self.page_offset = if liked {
-                self.page_offset.saturating_add(1)
-            } else {
-                self.page_offset.saturating_sub(1)
-            };
         }
+        let mut active_snapshot = None;
+        for resource in resources {
+            let snapshot = update_liked_playlist_resource(&resource, &track, liked);
+            if active_resource
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, &resource))
+            {
+                active_snapshot = snapshot;
+            }
+        }
+        let Some((playlist, tracks, has_more)) = active_snapshot else {
+            return;
+        };
+        self.selected_playlist = Some(playlist);
+        self.track_table.update(cx, |table, cx| {
+            table.delegate_mut().set_tracks(tracks, has_more, false);
+            table.clear_selection(cx);
+            cx.notify();
+        });
         self.sync_table_playback_state(cx);
     }
 
@@ -5528,7 +6004,6 @@ impl LyruneView {
     fn logout(&mut self, cx: &mut Context<Self>) {
         self.login_generation = self.login_generation.wrapping_add(1);
         self.library_generation = self.library_generation.wrapping_add(1);
-        self.playlist_generation = self.playlist_generation.wrapping_add(1);
         self.home_generation = self.home_generation.wrapping_add(1);
         self.queue_generation = self.queue_generation.wrapping_add(1);
         self.play_generation = self.play_generation.wrapping_add(1);
@@ -5550,9 +6025,13 @@ impl LyruneView {
         self.home_loaded = false;
         self.home_error = None;
         self.home_recommendation_loading = None;
+        self.search_resource = None;
+        self.selected_artist = None;
+        self.artist_resource = None;
         self.selected_playlist_index = None;
         self.selected_playlist = None;
-        self.page_loading = false;
+        self.selected_playlist_resource = None;
+        self.page_resource_cache = PageResourceCache::default();
         self.playback_queue = None;
         self.queue_recommendation_loading = false;
         self.queue_waiting_for_recommendation = false;
@@ -6037,56 +6516,34 @@ impl LyruneView {
                     ),
             )
             .child(
-                h_flex()
-                    .h(px(60.))
-                    .px_5()
-                    .justify_between()
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .size(px(34.))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(media_icon_hsla(
-                                        MediaIcon::Library,
-                                        theme.secondary_foreground,
-                                        px(20.),
-                                    )),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_0p5()
-                                    .child(div().font_semibold().child("音乐库"))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child("你的 QQ 音乐歌单"),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        Button::new("reload-library")
-                            .ghost()
-                            .rounded(px(999.))
-                            .size(px(44.))
-                            .p_0()
-                            .tooltip("重新加载歌单")
-                            .disabled(self.library_loading)
-                            .loading(self.library_loading)
-                            .when(!self.library_loading, |button| {
-                                button.child(media_icon_hsla(
-                                    MediaIcon::Refresh,
+                h_flex().h(px(60.)).px_5().justify_between().child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            div()
+                                .size(px(34.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(media_icon_hsla(
+                                    MediaIcon::Library,
                                     theme.secondary_foreground,
-                                    px(18.),
-                                ))
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.load_library(true, cx))),
-                    ),
+                                    px(20.),
+                                )),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_0p5()
+                                .child(div().font_semibold().child("音乐库"))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("你的 QQ 音乐歌单"),
+                                ),
+                        ),
+                ),
             )
             .child(
                 div()
@@ -6393,11 +6850,19 @@ impl LyruneView {
                 px(999.),
                 cx,
             ));
-        let track_count = self.artist_track_count;
-        let has_tracks = self
-            .artist_songs
-            .as_ref()
-            .is_some_and(|songs| !songs.items.is_empty());
+        let (track_count, has_tracks) =
+            self.artist_resource
+                .as_ref()
+                .map_or((0, false), |resource| {
+                    let state = lock_resource(resource);
+                    (
+                        state.track_count,
+                        state
+                            .songs
+                            .as_ref()
+                            .is_some_and(|songs| !songs.items.is_empty()),
+                    )
+                });
 
         div()
             .h(if narrow {
@@ -6511,9 +6976,35 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let songs = self.artist_songs.clone();
-        let song_has_more = songs.as_ref().is_some_and(|page| page.has_more);
-        let song_body = if self.artist_songs_loading {
+        let (
+            songs,
+            songs_loading,
+            songs_loading_more,
+            song_error,
+            albums,
+            albums_loading,
+            albums_loading_more,
+            album_error,
+        ) = self.artist_resource.as_ref().map_or_else(
+            || (None, false, false, None, None, false, false, None),
+            |resource| {
+                let state = lock_resource(resource);
+                (
+                    state.songs.clone(),
+                    state.songs_loading,
+                    state.songs_loading_more,
+                    state.song_error.clone(),
+                    state.albums.clone(),
+                    state.albums_loading,
+                    state.albums_loading_more,
+                    state.album_error.clone(),
+                )
+            },
+        );
+        let song_has_more = songs
+            .as_ref()
+            .is_some_and(|page| page.items.len() > self.artist_visible_song_count || page.has_more);
+        let song_body = if songs_loading && songs.is_none() {
             h_flex()
                 .h(px(92.))
                 .items_center()
@@ -6523,7 +7014,7 @@ impl LyruneView {
                 .child(Spinner::new().with_size(px(22.)).color(theme.primary))
                 .child("正在加载歌曲…")
                 .into_any_element()
-        } else if let Some(error) = self.artist_song_error.clone() {
+        } else if let Some(error) = song_error {
             h_flex()
                 .h(px(92.))
                 .items_center()
@@ -6541,7 +7032,13 @@ impl LyruneView {
                 )
                 .into_any_element()
         } else if let Some(songs) = songs.filter(|page| !page.items.is_empty()) {
-            self.render_song_rows(songs.items, narrow, SongRowSource::Artist, cx)
+            let visible = self.artist_visible_song_count.min(songs.items.len());
+            self.render_song_rows(
+                songs.items[..visible].to_vec(),
+                narrow,
+                SongRowSource::Artist,
+                cx,
+            )
         } else {
             h_flex()
                 .h(px(72.))
@@ -6551,9 +7048,10 @@ impl LyruneView {
                 .into_any_element()
         };
 
-        let albums = self.artist_albums.clone();
-        let album_has_more = albums.as_ref().is_some_and(|page| page.has_more);
-        let album_body = if self.artist_albums_loading {
+        let album_has_more = albums.as_ref().is_some_and(|page| {
+            page.items.len() > self.artist_visible_album_count || page.has_more
+        });
+        let album_body = if albums_loading && albums.is_none() {
             h_flex()
                 .h(px(120.))
                 .items_center()
@@ -6563,7 +7061,7 @@ impl LyruneView {
                 .child(Spinner::new().with_size(px(22.)).color(theme.primary))
                 .child("正在加载专辑…")
                 .into_any_element()
-        } else if let Some(error) = self.artist_album_error.clone() {
+        } else if let Some(error) = album_error {
             h_flex()
                 .h(px(120.))
                 .items_center()
@@ -6581,10 +7079,11 @@ impl LyruneView {
                 )
                 .into_any_element()
         } else if let Some(albums) = albums.filter(|page| !page.items.is_empty()) {
+            let visible = self.artist_visible_album_count.min(albums.items.len());
             self.render_search_cards(
                 SearchCategory::Albums,
                 Vec::new(),
-                albums.items,
+                albums.items[..visible].to_vec(),
                 Vec::new(),
                 compact,
                 cx,
@@ -6629,9 +7128,9 @@ impl LyruneView {
                                                         .outline()
                                                         .h(px(40.))
                                                         .px_4()
-                                                        .loading(self.artist_songs_loading_more)
-                                                        .disabled(self.artist_songs_loading_more)
-                                                        .label(if self.artist_songs_loading_more {
+                                                        .loading(songs_loading_more)
+                                                        .disabled(songs_loading_more)
+                                                        .label(if songs_loading_more {
                                                             "正在加载…"
                                                         } else {
                                                             "查看更多"
@@ -6658,9 +7157,9 @@ impl LyruneView {
                                                         .outline()
                                                         .h(px(40.))
                                                         .px_4()
-                                                        .loading(self.artist_albums_loading_more)
-                                                        .disabled(self.artist_albums_loading_more)
-                                                        .label(if self.artist_albums_loading_more {
+                                                        .loading(albums_loading_more)
+                                                        .disabled(albums_loading_more)
+                                                        .label(if albums_loading_more {
                                                             "正在加载…"
                                                         } else {
                                                             "查看更多"
@@ -6980,7 +7479,7 @@ impl LyruneView {
 
     fn render_search_songs(
         &mut self,
-        songs: Vec<Track>,
+        songs: Vec<Arc<Track>>,
         narrow: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -6989,7 +7488,7 @@ impl LyruneView {
 
     fn render_song_rows(
         &mut self,
-        songs: Vec<Track>,
+        songs: Vec<Arc<Track>>,
         narrow: bool,
         source: SongRowSource,
         cx: &mut Context<Self>,
@@ -7013,7 +7512,7 @@ impl LyruneView {
                 let album = track.album.clone();
                 let duration = format_duration(track.duration_seconds);
                 let cover = self.render_search_cover(
-                    track.cover_url,
+                    track.cover_url.clone(),
                     MediaIcon::Music,
                     px(48.),
                     px(9.),
@@ -7129,9 +7628,9 @@ impl LyruneView {
     fn render_search_cards(
         &mut self,
         category: SearchCategory,
-        artists: Vec<SearchArtist>,
-        albums: Vec<SearchAlbum>,
-        playlists: Vec<UserPlaylist>,
+        artists: Vec<Arc<SearchArtist>>,
+        albums: Vec<Arc<SearchAlbum>>,
+        playlists: Vec<Arc<UserPlaylist>>,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -7175,7 +7674,7 @@ impl LyruneView {
                                 ),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_search_artist(artist.clone(), window, cx)
+                            this.open_search_artist(artist.as_ref().clone(), window, cx)
                         }))
                         .into_any_element()
                 })
@@ -7193,7 +7692,7 @@ impl LyruneView {
                         px(12.),
                         cx,
                     );
-                    let playlist = album.into_playlist();
+                    let playlist = album.as_ref().clone().into_playlist();
                     Button::new(format!("search-album-{index}"))
                         .ghost()
                         .w(card_width)
@@ -7278,7 +7777,7 @@ impl LyruneView {
                                 ),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_home_playlist(playlist.clone(), window, cx)
+                            this.open_home_playlist(playlist.as_ref().clone(), window, cx)
                         }))
                         .into_any_element()
                 })
@@ -7322,29 +7821,48 @@ impl LyruneView {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.search_category = category;
-                        this.search_error = None;
                         cx.notify();
                     }))
             })
             .collect::<Vec<_>>();
 
+        let (results, search_loading, search_loading_more, search_error) =
+            self.search_resource.as_ref().map_or_else(
+                || (None, false, false, None),
+                |resource| {
+                    let state = lock_resource(resource);
+                    (
+                        state.results.clone(),
+                        state.loading,
+                        state.loading_more[active_category.index()],
+                        state.error.clone(),
+                    )
+                },
+            );
+        let has_results = results.is_some();
         let mut content = v_flex().w_full();
         let mut has_more = false;
         let mut is_empty = false;
-        if let Some(results) = self.search_results.clone() {
+        if let Some(results) = results {
+            let visible_count = self.search_visible_counts.get(active_category);
             match self.search_category {
                 SearchCategory::Songs => {
-                    has_more = results.songs.has_more;
+                    let visible = visible_count.min(results.songs.items.len());
+                    has_more = results.songs.items.len() > visible || results.songs.has_more;
                     is_empty = results.songs.items.is_empty();
-                    content =
-                        content.child(self.render_search_songs(results.songs.items, narrow, cx));
+                    content = content.child(self.render_search_songs(
+                        results.songs.items[..visible].to_vec(),
+                        narrow,
+                        cx,
+                    ));
                 }
                 SearchCategory::Artists => {
-                    has_more = results.artists.has_more;
+                    let visible = visible_count.min(results.artists.items.len());
+                    has_more = results.artists.items.len() > visible || results.artists.has_more;
                     is_empty = results.artists.items.is_empty();
                     content = content.child(self.render_search_cards(
                         SearchCategory::Artists,
-                        results.artists.items,
+                        results.artists.items[..visible].to_vec(),
                         Vec::new(),
                         Vec::new(),
                         compact,
@@ -7352,25 +7870,28 @@ impl LyruneView {
                     ));
                 }
                 SearchCategory::Albums => {
-                    has_more = results.albums.has_more;
+                    let visible = visible_count.min(results.albums.items.len());
+                    has_more = results.albums.items.len() > visible || results.albums.has_more;
                     is_empty = results.albums.items.is_empty();
                     content = content.child(self.render_search_cards(
                         SearchCategory::Albums,
                         Vec::new(),
-                        results.albums.items,
+                        results.albums.items[..visible].to_vec(),
                         Vec::new(),
                         compact,
                         cx,
                     ));
                 }
                 SearchCategory::Playlists => {
-                    has_more = results.playlists.has_more;
+                    let visible = visible_count.min(results.playlists.items.len());
+                    has_more =
+                        results.playlists.items.len() > visible || results.playlists.has_more;
                     is_empty = results.playlists.items.is_empty();
                     content = content.child(self.render_search_cards(
                         SearchCategory::Playlists,
                         Vec::new(),
                         Vec::new(),
-                        results.playlists.items,
+                        results.playlists.items[..visible].to_vec(),
                         compact,
                         cx,
                     ));
@@ -7401,7 +7922,7 @@ impl LyruneView {
                             ),
                         )
                         .child(h_flex().gap_1().children(tabs))
-                        .when(self.search_loading, |this| {
+                        .when(search_loading, |this| {
                             this.child(
                                 v_flex()
                                     .h(px(260.))
@@ -7414,9 +7935,7 @@ impl LyruneView {
                             )
                         })
                         .when(
-                            !self.search_loading
-                                && self.search_results.is_none()
-                                && self.search_error.is_some(),
+                            !search_loading && !has_results && search_error.is_some(),
                             |this| {
                                 this.child(
                                     v_flex()
@@ -7425,7 +7944,7 @@ impl LyruneView {
                                         .justify_center()
                                         .gap_4()
                                         .text_color(theme.muted_foreground)
-                                        .child(self.search_error.clone().unwrap_or_default())
+                                        .child(search_error.clone().unwrap_or_default())
                                         .child(
                                             Button::new("retry-search")
                                                 .outline()
@@ -7433,48 +7952,47 @@ impl LyruneView {
                                                 .px_4()
                                                 .label("重新搜索")
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.start_search(this.search_query.clone(), cx)
+                                                    let Some(resource) =
+                                                        this.search_resource.clone()
+                                                    else {
+                                                        return;
+                                                    };
+                                                    this.start_search(
+                                                        resource,
+                                                        this.search_query.clone(),
+                                                        cx,
+                                                    )
                                                 })),
                                         ),
                                 )
                             },
                         )
-                        .when(
-                            !self.search_loading && self.search_results.is_some() && is_empty,
-                            |this| {
-                                this.child(
-                                    div()
-                                        .h(px(220.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_color(theme.muted_foreground)
-                                        .child(format!(
-                                            "没有找到相关{}",
-                                            self.search_category.label()
-                                        )),
-                                )
-                            },
-                        )
-                        .when(
-                            !self.search_loading && self.search_results.is_some() && !is_empty,
-                            |this| this.child(content),
-                        )
-                        .when(
-                            self.search_results.is_some() && self.search_error.is_some(),
-                            |this| {
-                                this.child(
-                                    div()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded(px(9.))
-                                        .bg(theme.danger.opacity(0.1))
-                                        .text_sm()
-                                        .text_color(theme.danger)
-                                        .child(self.search_error.clone().unwrap_or_default()),
-                                )
-                            },
-                        )
+                        .when(!search_loading && has_results && is_empty, |this| {
+                            this.child(
+                                div()
+                                    .h(px(220.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("没有找到相关{}", self.search_category.label())),
+                            )
+                        })
+                        .when(!search_loading && has_results && !is_empty, |this| {
+                            this.child(content)
+                        })
+                        .when(has_results && search_error.is_some(), |this| {
+                            this.child(
+                                div()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded(px(9.))
+                                    .bg(theme.danger.opacity(0.1))
+                                    .text_sm()
+                                    .text_color(theme.danger)
+                                    .child(search_error.clone().unwrap_or_default()),
+                            )
+                        })
                         .when(has_more, |this| {
                             this.child(
                                 h_flex().w_full().justify_center().pt_2().child(
@@ -7483,8 +8001,8 @@ impl LyruneView {
                                         .h(px(44.))
                                         .px_5()
                                         .label("加载更多")
-                                        .loading(self.search_loading_more)
-                                        .disabled(self.search_loading_more)
+                                        .loading(search_loading_more)
+                                        .disabled(search_loading_more)
                                         .on_click(
                                             cx.listener(|this, _, _, cx| this.load_more_search(cx)),
                                         ),
@@ -8930,8 +9448,9 @@ impl Render for LyruneView {
 #[cfg(test)]
 mod tests {
     use super::{
-        LYRIC_MINIMUM_CONTRAST, LyricFrameRate, NavigationHistory, NavigationPage, PlaybackQueue,
-        PlaylistScrollPosition, SearchCategory, adjacent_lyric_timing, canonical_queue_track_index,
+        LYRIC_MINIMUM_CONTRAST, LyricFrameRate, NAVIGATION_HISTORY_LIMIT, NavigationHistory,
+        NavigationPage, PlaybackQueue, PlaylistResource, PlaylistScrollPosition, SearchCategory,
+        SearchResource, SearchVisibleCounts, adjacent_lyric_timing, canonical_queue_track_index,
         combined_lyric_frame_interval, contrast_ratio, extract_qrc_content, format_playback_time,
         insert_external_track_after_current, insert_track_after_current, lyric_edge_opacity,
         lyric_frame_is_due, lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
@@ -8939,7 +9458,10 @@ mod tests {
     };
     use gpui::{Pixels, Rgba, black, px, rgb};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     fn track(mid: &str) -> Track {
         Track {
@@ -8964,7 +9486,7 @@ mod tests {
         }
     }
 
-    fn mids(tracks: &[Track]) -> Vec<&str> {
+    fn mids(tracks: &[Arc<Track>]) -> Vec<&str> {
         tracks.iter().map(|track| track.mid.as_str()).collect()
     }
 
@@ -9331,6 +9853,7 @@ mod tests {
                 row: scroll_row,
                 offset_y,
             },
+            resource: None,
         }
     }
 
@@ -9355,6 +9878,74 @@ mod tests {
         assert!(history.forward.is_empty());
         let back = history.go_back(Some(second)).unwrap();
         assert!(back.same_destination(&playlist(1)));
+    }
+
+    #[test]
+    fn new_navigation_can_claim_a_forward_resource_before_clearing_it() {
+        let NavigationPage::Playlist { playlist, .. } = playlist(1) else {
+            unreachable!();
+        };
+        let resource = Arc::new(std::sync::Mutex::new(PlaylistResource::empty(
+            playlist.clone(),
+        )));
+        let weak = Arc::downgrade(&resource);
+        let mut history = NavigationHistory {
+            back: Vec::new(),
+            forward: vec![NavigationPage::Playlist {
+                playlist: playlist.clone(),
+                selected_index: None,
+                scroll_position: PlaylistScrollPosition::top(),
+                resource: Some(resource),
+            }],
+        };
+
+        let claimed = weak.upgrade().expect("forward resource remains available");
+        let target = NavigationPage::Playlist {
+            playlist,
+            selected_index: None,
+            scroll_position: PlaylistScrollPosition::top(),
+            resource: Some(claimed),
+        };
+        history.record(Some(NavigationPage::Home), &target);
+
+        assert!(history.forward.is_empty());
+        assert!(weak.upgrade().is_some());
+    }
+
+    #[test]
+    fn navigation_history_keeps_at_most_ten_pages_including_the_current_page() {
+        let mut history = NavigationHistory::default();
+        let mut current = NavigationPage::Home;
+        for diss_id in 1..=NAVIGATION_HISTORY_LIMIT as u64 + 2 {
+            let target = playlist(diss_id);
+            history.record(Some(current), &target);
+            current = target;
+        }
+
+        assert_eq!(history.back.len() + 1, NAVIGATION_HISTORY_LIMIT);
+        assert!(history.back[0].same_destination(&playlist(3)));
+    }
+
+    #[test]
+    fn evicting_history_releases_its_shared_page_resource() {
+        let resource = Arc::new(std::sync::Mutex::new(SearchResource::default()));
+        let weak = Arc::downgrade(&resource);
+        let mut current = NavigationPage::Search {
+            query: "resource lifetime".to_owned(),
+            category: SearchCategory::Songs,
+            visible_counts: SearchVisibleCounts::default(),
+            resource: Some(resource.clone()),
+        };
+        drop(resource);
+
+        let mut history = NavigationHistory::default();
+        for diss_id in 1..=NAVIGATION_HISTORY_LIMIT as u64 {
+            let target = playlist(diss_id);
+            history.record(Some(current), &target);
+            current = target;
+        }
+
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]
@@ -9385,6 +9976,33 @@ mod tests {
     }
 
     #[test]
+    fn shared_playlist_ignores_a_late_duplicate_page() {
+        let NavigationPage::Playlist { playlist, .. } = playlist(1) else {
+            unreachable!();
+        };
+        let mut resource = PlaylistResource::empty(playlist.clone());
+        resource.apply_page(
+            playlist.clone(),
+            vec![Arc::new(track("first"))],
+            true,
+            20,
+            0,
+        );
+        resource.apply_page(
+            playlist.clone(),
+            vec![Arc::new(track("second"))],
+            true,
+            40,
+            20,
+        );
+        resource.apply_page(playlist, vec![Arc::new(track("duplicate"))], false, 40, 20);
+
+        assert_eq!(mids(&resource.tracks), ["first", "second"]);
+        assert!(resource.has_more);
+        assert_eq!(resource.next_offset, 40);
+    }
+
+    #[test]
     fn playback_time_uses_compact_player_formatting() {
         assert_eq!(format_playback_time(Duration::from_secs(137)), "2:17");
         assert_eq!(format_playback_time(Duration::from_secs(3_661)), "1:01:01");
@@ -9400,13 +10018,19 @@ mod tests {
 
     #[test]
     fn search_history_keeps_the_active_category_without_splitting_one_query() {
+        let mut visible_counts = SearchVisibleCounts::default();
+        visible_counts.albums = 60;
         let songs = NavigationPage::Search {
             query: "周杰伦".to_owned(),
             category: SearchCategory::Songs,
+            visible_counts: SearchVisibleCounts::default(),
+            resource: None,
         };
         let albums = NavigationPage::Search {
             query: "周杰伦".to_owned(),
             category: SearchCategory::Albums,
+            visible_counts,
+            resource: None,
         };
         assert!(songs.same_destination(&albums));
 
@@ -9419,7 +10043,9 @@ mod tests {
             NavigationPage::Search {
                 query,
                 category: SearchCategory::Albums,
-            } if query == "周杰伦"
+                visible_counts,
+                ..
+            } if query == "周杰伦" && visible_counts.albums == 60
         ));
     }
 
@@ -9433,9 +10059,9 @@ mod tests {
 
     #[test]
     fn search_track_is_inserted_after_the_current_track() {
-        let mut tracks = vec![track("A"), track("B")];
+        let mut tracks = vec![Arc::new(track("A")), Arc::new(track("B"))];
 
-        let inserted = insert_track_after_current(&mut tracks, Some(0), track("C"));
+        let inserted = insert_track_after_current(&mut tracks, Some(0), Arc::new(track("C")));
 
         assert_eq!(inserted, 1);
         assert_eq!(mids(&tracks), ["A", "C", "B"]);
@@ -9443,9 +10069,13 @@ mod tests {
 
     #[test]
     fn existing_search_track_is_moved_without_duplication() {
-        let mut tracks = vec![track("C"), track("A"), track("B")];
+        let mut tracks = vec![
+            Arc::new(track("C")),
+            Arc::new(track("A")),
+            Arc::new(track("B")),
+        ];
 
-        let inserted = insert_track_after_current(&mut tracks, Some(1), track("C"));
+        let inserted = insert_track_after_current(&mut tracks, Some(1), Arc::new(track("C")));
 
         assert_eq!(inserted, 1);
         assert_eq!(mids(&tracks), ["A", "C", "B"]);
@@ -9456,12 +10086,13 @@ mod tests {
         let playlist_id = UserPlaylistId::Liked;
         let mut queue = PlaybackQueue {
             playlist_id: playlist_id.clone(),
-            tracks: vec![track("A"), track("B")],
+            tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
             modified: false,
             continuation: None,
         };
 
-        let inserted = insert_external_track_after_current(&mut queue, Some(0), track("search"));
+        let inserted =
+            insert_external_track_after_current(&mut queue, Some(0), Arc::new(track("search")));
 
         assert_eq!(inserted, 1);
         assert_eq!(mids(&queue.tracks), ["A", "search", "B"]);

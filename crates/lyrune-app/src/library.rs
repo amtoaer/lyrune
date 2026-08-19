@@ -218,7 +218,7 @@ pub fn playlist_cover(
 
 pub struct TrackTableDelegate {
     columns: Vec<Column>,
-    tracks: Vec<Track>,
+    tracks: Vec<Arc<Track>>,
     loading: bool,
     has_more: bool,
     playing_index: Option<usize>,
@@ -309,24 +309,10 @@ impl TrackTableDelegate {
         self.columns = track_columns(self.compact);
     }
 
-    pub fn append(&mut self, tracks: Vec<Track>, has_more: bool) {
-        self.tracks.extend(tracks);
-        self.loading = false;
+    pub fn set_tracks(&mut self, tracks: Vec<Arc<Track>>, has_more: bool, loading: bool) {
+        self.tracks = tracks;
+        self.loading = loading;
         self.has_more = has_more;
-    }
-
-    pub fn set_track_liked(&mut self, track: Track, liked: bool) -> bool {
-        let index = self.tracks.iter().position(|item| item.mid == track.mid);
-        match (liked, index) {
-            (true, None) => {
-                self.tracks.insert(0, track);
-            }
-            (false, Some(index)) => {
-                self.tracks.remove(index);
-            }
-            _ => return false,
-        }
-        true
     }
 
     pub fn set_loading(&mut self, loading: bool) {
@@ -353,7 +339,7 @@ impl TrackTableDelegate {
         true
     }
 
-    pub fn tracks(&self) -> &[Track] {
+    pub fn tracks(&self) -> &[Arc<Track>] {
         &self.tracks
     }
 
@@ -605,7 +591,8 @@ impl TableDelegate for TrackTableDelegate {
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
-                                    let _ = sender.try_send(TrackTableEvent::Unlike(track.clone()));
+                                    let _ = sender
+                                        .try_send(TrackTableEvent::Unlike(track.as_ref().clone()));
                                 })
                                 .child(media_icon_hsla(
                                     MediaIcon::HeartFilled,

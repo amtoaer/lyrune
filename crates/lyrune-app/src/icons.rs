@@ -73,7 +73,6 @@ pub enum MediaIcon {
     Pause,
     Folder,
     Library,
-    Refresh,
     Loading,
     Shuffle,
     SkipBack,
@@ -122,7 +121,6 @@ impl MediaIcon {
             Self::Library => {
                 r#"<rect width="7" height="18" x="3" y="3" rx="1"/><path d="M7 3v18"/><path d="m14.5 5.2 3.8-1a1.5 1.5 0 0 1 1.8 1.1l3.1 11.6a1.5 1.5 0 0 1-1.1 1.8l-3.8 1a1.5 1.5 0 0 1-1.8-1.1L13.4 7a1.5 1.5 0 0 1 1.1-1.8Z"/>"#
             }
-            Self::Refresh => r#"<path d="M20 7h-5V2"/><path d="M20 7a8 8 0 1 0 1.2 8"/>"#,
             Self::Loading => r#"<path d="M21 12a9 9 0 1 1-5.2-8.2"/><path d="M21 3v6h-6"/>"#,
             Self::Shuffle => {
                 r#"<path d="m18 14 4 4-4 4"/><path d="m18 2 4 4-4 4"/><path d="M2 18h1.4a4 4 0 0 0 3.5-2.1L11.1 8a4 4 0 0 1 3.5-2H22"/><path d="M2 6h1.4a4 4 0 0 1 3.5 2.1l.6 1.1"/><path d="M14.6 18H22"/>"#

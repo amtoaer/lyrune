@@ -36,7 +36,7 @@ use wana_kana::{ConvertJapanese as _, IsJapaneseStr as _};
 use crate::cache::{AudioCache, audio_cache_limit_bytes};
 use crate::credentials::CredentialStore;
 use crate::design::{self, AppFonts, ColorTheme};
-use crate::http::{blurred_cover, blurred_image_source, cached_image_source};
+use crate::http::{CachedImageCache, blurred_cover, blurred_image_source, cached_image_source};
 use crate::icons::{MediaIcon, lyrune_icon, media_icon, media_icon_hsla};
 use crate::library::{
     PlaylistListDelegate, TrackTableDelegate, TrackTableEvent, format_duration, playlist_cover,
@@ -1968,6 +1968,7 @@ pub struct LyruneView {
     audio_cache_limit_input: Entity<InputState>,
     progress_slider: Entity<SliderState>,
     volume_slider: Entity<SliderState>,
+    image_cache: Entity<CachedImageCache>,
 
     audio: Option<AudioPlayer>,
     audio_cache: Option<AudioCache>,
@@ -2128,6 +2129,7 @@ impl LyruneView {
         });
         let progress_slider = cx.new(|_| progress_slider_state(0.));
         let volume_slider = cx.new(|_| volume_slider_state(settings.volume));
+        let image_cache = CachedImageCache::new(cx);
 
         let subscriptions = vec![
             cx.subscribe(&playlist_list, |this, _, event: &ListEvent, cx| {
@@ -2273,6 +2275,7 @@ impl LyruneView {
             audio_cache_limit_input,
             progress_slider,
             volume_slider,
+            image_cache,
             audio,
             audio_cache,
             protocol_client,
@@ -8666,6 +8669,7 @@ impl LyruneView {
             return v_flex()
                 .relative()
                 .size_full()
+                .image_cache(self.image_cache.clone())
                 .font(self.fonts.ui.clone())
                 .bg(theme.background)
                 .text_color(theme.foreground)
@@ -8846,6 +8850,7 @@ impl LyruneView {
         v_flex()
             .relative()
             .size_full()
+            .image_cache(self.image_cache.clone())
             .font(self.fonts.ui.clone())
             .bg(theme.background)
             .text_color(theme.foreground)

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -5,11 +6,11 @@ use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use directories::ProjectDirs;
-use futures_util::{AsyncReadExt as _, future::BoxFuture};
+use futures_util::{AsyncReadExt as _, FutureExt as _, future::BoxFuture};
 use gpui::http_client::{self, AsyncBody, HttpClient, Request, Response, Url};
 use gpui::{
-    App, Asset, Image, ImageCacheError, ImageFormat, ImageSource, ImgResourceLoader, Resource,
-    Window,
+    App, AppContext as _, Asset, Entity, Image, ImageCache, ImageCacheError, ImageCacheItem,
+    ImageFormat, ImageSource, ImgResourceLoader, RenderImage, Resource, Window, hash,
 };
 use image::imageops::FilterType;
 
@@ -17,6 +18,7 @@ use crate::app::RUNTIME;
 use crate::cache::cache_key;
 
 const IMAGE_CACHE_DIR: &str = "images-v1";
+const DECODED_IMAGE_CACHE_CAPACITY: usize = 48;
 const MAX_SATURATION_COMPRESSION: f32 = 0.35;
 
 #[derive(Clone)]
@@ -24,6 +26,11 @@ enum CachedImageFile {}
 
 #[derive(Clone)]
 enum BlurredCoverImage {}
+
+pub struct CachedImageCache {
+    usages: Vec<u64>,
+    items: HashMap<u64, ImageCacheItem>,
+}
 
 pub struct BlurredCover {
     image: Arc<Image>,
@@ -61,6 +68,81 @@ impl Asset for CachedImageFile {
     }
 }
 
+impl CachedImageCache {
+    pub fn new(cx: &mut App) -> Entity<Self> {
+        let cache = cx.new(|_| Self {
+            usages: Vec::with_capacity(DECODED_IMAGE_CACHE_CAPACITY),
+            items: HashMap::with_capacity(DECODED_IMAGE_CACHE_CAPACITY),
+        });
+        cx.observe_release(&cache, |cache, cx| {
+            for (_, mut item) in std::mem::take(&mut cache.items) {
+                if let Some(Ok(image)) = item.get() {
+                    cx.drop_image(image, None);
+                }
+            }
+        })
+        .detach();
+        cache
+    }
+}
+
+impl ImageCache for CachedImageCache {
+    fn load(
+        &mut self,
+        resource: &Resource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        let key = hash(resource);
+        if let Some(item) = self.items.get_mut(&key) {
+            let index = self
+                .usages
+                .iter()
+                .position(|cached| *cached == key)
+                .expect("图片缓存条目与使用顺序应保持一致");
+            self.usages.remove(index);
+            self.usages.insert(0, key);
+            return item.get();
+        }
+
+        let source = match resource {
+            Resource::Uri(uri) => {
+                let path = match window.use_asset::<CachedImageFile>(&uri.to_string(), cx)? {
+                    Ok(path) => path,
+                    Err(error) => return Some(Err(error)),
+                };
+                Resource::Path(path)
+            }
+            _ => resource.clone(),
+        };
+        let future = ImgResourceLoader::load(source, cx);
+        let task = cx.background_executor().spawn(future).shared();
+
+        if self.usages.len() == DECODED_IMAGE_CACHE_CAPACITY {
+            let oldest = self.usages.pop().expect("已满图片缓存应包含最旧条目");
+            let mut item = self
+                .items
+                .remove(&oldest)
+                .expect("图片缓存条目与使用顺序应保持一致");
+            if let Some(Ok(image)) = item.get() {
+                cx.drop_image(image, Some(window));
+            }
+        }
+        self.items
+            .insert(key, ImageCacheItem::Loading(task.clone()));
+        self.usages.insert(0, key);
+
+        let entity = window.current_view();
+        window
+            .spawn(cx, async move |cx| {
+                _ = task.await;
+                cx.on_next_frame(move |_, cx| cx.notify(entity));
+            })
+            .detach();
+        None
+    }
+}
+
 impl Asset for BlurredCoverImage {
     type Source = String;
     type Output = Result<Arc<BlurredCover>, ImageCacheError>;
@@ -80,15 +162,7 @@ impl Asset for BlurredCoverImage {
 }
 
 pub fn cached_image_source(url: String) -> ImageSource {
-    let source = url;
-    (move |window: &mut Window, cx: &mut App| {
-        let path = match window.use_asset::<CachedImageFile>(&source, cx)? {
-            Ok(path) => path,
-            Err(error) => return Some(Err(error)),
-        };
-        window.use_asset::<ImgResourceLoader>(&Resource::Path(path), cx)
-    })
-    .into()
+    url.into()
 }
 
 pub fn blurred_image_source(url: String) -> ImageSource {

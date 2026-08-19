@@ -95,13 +95,13 @@ impl ListDelegate for PlaylistListDelegate {
     fn render_item(
         &mut self,
         index: IndexPath,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
         let playlist = self.playlists.get(index.row)?.clone();
         let selected = self.selected_index == Some(index);
         let subtitle = playlist_subtitle(&playlist);
-        let cover = playlist_cover(&playlist, px(44.), px(9.), cx);
+        let cover = playlist_cover(&playlist, px(44.), px(9.), window.scale_factor(), cx);
 
         Some(
             ListItem::new(("playlist", index.row))
@@ -158,6 +158,7 @@ pub fn playlist_cover(
     playlist: &UserPlaylist,
     size: Pixels,
     radius: Pixels,
+    scale_factor: f32,
     cx: &App,
 ) -> AnyElement {
     if playlist.id == UserPlaylistId::Liked {
@@ -192,7 +193,7 @@ pub fn playlist_cover(
     }
 
     if let Some(url) = playlist.cover_url.clone() {
-        return img(cached_image_source(url))
+        return img(cached_image_source(url, size, scale_factor))
             .size(size)
             .flex_shrink_0()
             .rounded(radius)
@@ -415,7 +416,7 @@ impl TableDelegate for TrackTableDelegate {
         &mut self,
         row_ix: usize,
         col_ix: usize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let Some(track) = self.tracks.get(row_ix).cloned() else {
@@ -481,7 +482,7 @@ impl TableDelegate for TrackTableDelegate {
             }
             "title" => {
                 let cover = match track.cover_url.clone() {
-                    Some(url) => img(cached_image_source(url))
+                    Some(url) => img(cached_image_source(url, px(44.), window.scale_factor()))
                         .size(px(44.))
                         .flex_shrink_0()
                         .rounded(px(9.))

@@ -37,7 +37,7 @@ gpui-platform = { package = "gpui_platform", git = "https://github.com/zed-indus
     "x11",
 ] }
 hex = "0.4"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 keyring = "4.1.6"
 ksni = { version = "0.3.6", features = ["blocking"] }
 md5 = "0.8"

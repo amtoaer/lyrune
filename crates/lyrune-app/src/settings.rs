@@ -14,6 +14,10 @@ use qqmusic_api::integration::{
 };
 
 pub const DEFAULT_AUDIO_CACHE_LIMIT_GB: u64 = 10;
+pub const DEFAULT_IMAGE_CACHE_CAPACITY: usize = 36;
+pub const DEFAULT_NAVIGATION_HISTORY_LIMIT: usize = 10;
+pub const MAX_IMAGE_CACHE_CAPACITY: usize = 512;
+pub const MAX_NAVIGATION_HISTORY_LIMIT: usize = 100;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PersistedPlayback {
@@ -119,6 +123,8 @@ pub struct AppSettings {
     pub monospace_font_families: Vec<String>,
     pub lyric_font_families: Vec<String>,
     pub audio_cache_limit_gb: u64,
+    pub image_cache_capacity: usize,
+    pub navigation_history_limit: usize,
     pub playback_quality: Quality,
     #[serde(alias = "lyric_frame_rate")]
     pub lyric_highlight_frame_rate: LyricFrameRate,
@@ -139,6 +145,8 @@ impl Default for AppSettings {
             monospace_font_families: default_monospace_font_families(),
             lyric_font_families: default_lyric_font_families(),
             audio_cache_limit_gb: DEFAULT_AUDIO_CACHE_LIMIT_GB,
+            image_cache_capacity: DEFAULT_IMAGE_CACHE_CAPACITY,
+            navigation_history_limit: DEFAULT_NAVIGATION_HISTORY_LIMIT,
             playback_quality: Quality::default(),
             lyric_highlight_frame_rate: LyricFrameRate::Fps30,
             lyric_scroll_frame_rate: LyricFrameRate::Display,
@@ -163,6 +171,10 @@ impl AppSettings {
         self.lyric_font_families =
             normalize_font_families(self.lyric_font_families, default_lyric_font_families());
         self.audio_cache_limit_gb = self.audio_cache_limit_gb.max(1);
+        self.image_cache_capacity = self.image_cache_capacity.clamp(1, MAX_IMAGE_CACHE_CAPACITY);
+        self.navigation_history_limit = self
+            .navigation_history_limit
+            .clamp(1, MAX_NAVIGATION_HISTORY_LIMIT);
         if self.current_playback.as_ref().is_some_and(|playback| {
             playback.track_mid.trim().is_empty()
                 || playback.queue_tracks.is_empty()
@@ -426,6 +438,11 @@ mod tests {
         );
         assert_eq!(settings.lyric_font_families, [".SystemUIFont"]);
         assert_eq!(settings.audio_cache_limit_gb, DEFAULT_AUDIO_CACHE_LIMIT_GB);
+        assert_eq!(settings.image_cache_capacity, DEFAULT_IMAGE_CACHE_CAPACITY);
+        assert_eq!(
+            settings.navigation_history_limit,
+            DEFAULT_NAVIGATION_HISTORY_LIMIT
+        );
         assert_eq!(settings.playback_quality, Quality::Standard);
         assert_eq!(settings.lyric_highlight_frame_rate, LyricFrameRate::Fps30);
         assert_eq!(settings.lyric_scroll_frame_rate, LyricFrameRate::Display);
@@ -453,6 +470,8 @@ mod tests {
             monospace_font_families: default_monospace_font_families(),
             lyric_font_families: default_lyric_font_families(),
             audio_cache_limit_gb: 0,
+            image_cache_capacity: 0,
+            navigation_history_limit: usize::MAX,
             playback_quality: Quality::High,
             lyric_highlight_frame_rate: LyricFrameRate::Fps30,
             lyric_scroll_frame_rate: LyricFrameRate::Display,
@@ -465,6 +484,11 @@ mod tests {
         assert_eq!(settings.volume, 1.);
         assert_eq!(settings.last_nonzero_volume, 0.01);
         assert_eq!(settings.audio_cache_limit_gb, 1);
+        assert_eq!(settings.image_cache_capacity, 1);
+        assert_eq!(
+            settings.navigation_history_limit,
+            MAX_NAVIGATION_HISTORY_LIMIT
+        );
     }
 
     #[test]
@@ -483,6 +507,8 @@ mod tests {
             monospace_font_families: vec!["JetBrains Mono".to_owned()],
             lyric_font_families: vec!["LXGW WenKai".to_owned(), "Noto Sans JP".to_owned()],
             audio_cache_limit_gb: 24,
+            image_cache_capacity: 72,
+            navigation_history_limit: 16,
             playback_quality: Quality::HiRes,
             lyric_highlight_frame_rate: LyricFrameRate::Fps120,
             lyric_scroll_frame_rate: LyricFrameRate::Display,
@@ -524,6 +550,11 @@ mod tests {
         );
         assert_eq!(restored.lyric_font_families, expected.lyric_font_families);
         assert_eq!(restored.audio_cache_limit_gb, expected.audio_cache_limit_gb);
+        assert_eq!(restored.image_cache_capacity, expected.image_cache_capacity);
+        assert_eq!(
+            restored.navigation_history_limit,
+            expected.navigation_history_limit
+        );
         assert_eq!(restored.playback_quality, expected.playback_quality);
         assert_eq!(
             restored.lyric_highlight_frame_rate,

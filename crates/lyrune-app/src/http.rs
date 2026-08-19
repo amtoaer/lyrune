@@ -10,7 +10,7 @@ use futures_util::{AsyncReadExt as _, FutureExt as _, future::BoxFuture};
 use gpui::http_client::{self, AsyncBody, HttpClient, Request, Response, Url};
 use gpui::{
     App, AppContext as _, Asset, Entity, Image, ImageCache, ImageCacheError, ImageCacheItem,
-    ImageFormat, ImageSource, ImgResourceLoader, RenderImage, Resource, Window, hash,
+    ImageFormat, ImageSource, ImgResourceLoader, Pixels, RenderImage, Resource, Window, hash,
 };
 use image::imageops::FilterType;
 
@@ -18,16 +18,72 @@ use crate::app::RUNTIME;
 use crate::cache::cache_key;
 
 const IMAGE_CACHE_DIR: &str = "images-v1";
-const DECODED_IMAGE_CACHE_CAPACITY: usize = 48;
+const THUMBNAIL_CACHE_DIR: &str = "thumbnails-v1";
 const MAX_SATURATION_COMPRESSION: f32 = 0.35;
 
 #[derive(Clone)]
 enum CachedImageFile {}
 
 #[derive(Clone)]
+enum CachedThumbnailFile {}
+
+#[derive(Clone)]
 enum BlurredCoverImage {}
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum CachedImageSize {
+    Px64,
+    Px128,
+    Px256,
+    Px512,
+}
+
+impl CachedImageSize {
+    const ALL: [Self; 4] = [Self::Px64, Self::Px128, Self::Px256, Self::Px512];
+
+    fn pixels(self) -> u32 {
+        match self {
+            Self::Px64 => 64,
+            Self::Px128 => 128,
+            Self::Px256 => 256,
+            Self::Px512 => 512,
+        }
+    }
+
+    fn for_display_size(size: Pixels, scale_factor: f32) -> Option<Self> {
+        let physical_size = (f32::from(size) * scale_factor).ceil();
+        if physical_size <= 64. {
+            Some(Self::Px64)
+        } else if physical_size <= 128. {
+            Some(Self::Px128)
+        } else if physical_size <= 256. {
+            Some(Self::Px256)
+        } else if physical_size <= 512. {
+            Some(Self::Px512)
+        } else {
+            None
+        }
+    }
+
+    fn resource_suffix(self) -> &'static str {
+        match self {
+            Self::Px64 => "#lyrune-thumbnail-v1-64",
+            Self::Px128 => "#lyrune-thumbnail-v1-128",
+            Self::Px256 => "#lyrune-thumbnail-v1-256",
+            Self::Px512 => "#lyrune-thumbnail-v1-512",
+        }
+    }
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct ThumbnailSource {
+    original: Arc<Path>,
+    cache_key: String,
+    size: CachedImageSize,
+}
+
 pub struct CachedImageCache {
+    capacity: usize,
     usages: Vec<u64>,
     items: HashMap<u64, ImageCacheItem>,
 }
@@ -68,11 +124,32 @@ impl Asset for CachedImageFile {
     }
 }
 
+impl Asset for CachedThumbnailFile {
+    type Source = ThumbnailSource;
+    type Output = Result<Arc<Path>, ImageCacheError>;
+
+    fn load(
+        source: Self::Source,
+        _cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
+        async move {
+            RUNTIME
+                .spawn_blocking(move || cache_thumbnail_file(source))
+                .await
+                .context("等待缩略图缓存任务失败")?
+                .map(Arc::from)
+                .map_err(ImageCacheError::from)
+        }
+    }
+}
+
 impl CachedImageCache {
-    pub fn new(cx: &mut App) -> Entity<Self> {
+    pub fn new(capacity: usize, cx: &mut App) -> Entity<Self> {
+        let capacity = capacity.max(1);
         let cache = cx.new(|_| Self {
-            usages: Vec::with_capacity(DECODED_IMAGE_CACHE_CAPACITY),
-            items: HashMap::with_capacity(DECODED_IMAGE_CACHE_CAPACITY),
+            capacity,
+            usages: Vec::with_capacity(capacity),
+            items: HashMap::with_capacity(capacity),
         });
         cx.observe_release(&cache, |cache, cx| {
             for (_, mut item) in std::mem::take(&mut cache.items) {
@@ -83,6 +160,26 @@ impl CachedImageCache {
         })
         .detach();
         cache
+    }
+
+    pub fn set_capacity(&mut self, capacity: usize, window: &mut Window, cx: &mut App) {
+        self.capacity = capacity.max(1);
+        while self.usages.len() > self.capacity {
+            self.evict_oldest(window, cx);
+        }
+        self.usages.shrink_to(self.capacity);
+        self.items.shrink_to(self.capacity);
+    }
+
+    fn evict_oldest(&mut self, window: &mut Window, cx: &mut App) {
+        let oldest = self.usages.pop().expect("非空图片缓存应包含最旧条目");
+        let mut item = self
+            .items
+            .remove(&oldest)
+            .expect("图片缓存条目与使用顺序应保持一致");
+        if let Some(Ok(image)) = item.get() {
+            cx.drop_image(image, Some(window));
+        }
     }
 }
 
@@ -107,9 +204,23 @@ impl ImageCache for CachedImageCache {
 
         let source = match resource {
             Resource::Uri(uri) => {
-                let path = match window.use_asset::<CachedImageFile>(&uri.to_string(), cx)? {
+                let (url, thumbnail_size) = split_thumbnail_resource(&uri.to_string());
+                let path = match window.use_asset::<CachedImageFile>(&url, cx)? {
                     Ok(path) => path,
                     Err(error) => return Some(Err(error)),
+                };
+                let path = if let Some(size) = thumbnail_size {
+                    let source = ThumbnailSource {
+                        original: path.clone(),
+                        cache_key: image_cache_key(&url),
+                        size,
+                    };
+                    match window.use_asset::<CachedThumbnailFile>(&source, cx)? {
+                        Ok(thumbnail) => thumbnail,
+                        Err(_) => path,
+                    }
+                } else {
+                    path
                 };
                 Resource::Path(path)
             }
@@ -118,15 +229,8 @@ impl ImageCache for CachedImageCache {
         let future = ImgResourceLoader::load(source, cx);
         let task = cx.background_executor().spawn(future).shared();
 
-        if self.usages.len() == DECODED_IMAGE_CACHE_CAPACITY {
-            let oldest = self.usages.pop().expect("已满图片缓存应包含最旧条目");
-            let mut item = self
-                .items
-                .remove(&oldest)
-                .expect("图片缓存条目与使用顺序应保持一致");
-            if let Some(Ok(image)) = item.get() {
-                cx.drop_image(image, Some(window));
-            }
+        if self.usages.len() >= self.capacity {
+            self.evict_oldest(window, cx);
         }
         self.items
             .insert(key, ImageCacheItem::Loading(task.clone()));
@@ -161,8 +265,13 @@ impl Asset for BlurredCoverImage {
     }
 }
 
-pub fn cached_image_source(url: String) -> ImageSource {
-    url.into()
+pub fn cached_image_source(url: String, size: Pixels, scale_factor: f32) -> ImageSource {
+    match CachedImageSize::for_display_size(size, scale_factor) {
+        Some(size) => ImageSource::Resource(Resource::Uri(
+            format!("{url}{}", size.resource_suffix()).into(),
+        )),
+        None => url.into(),
+    }
 }
 
 pub fn blurred_image_source(url: String) -> ImageSource {
@@ -277,11 +386,78 @@ fn sample_lyrics_region(image: &image::DynamicImage, narrow: bool) -> [f32; 3] {
 }
 
 async fn cache_image_file(client: Arc<dyn HttpClient>, url: String) -> anyhow::Result<PathBuf> {
-    let root = ProjectDirs::from("dev", "lyrune", "Lyrune")
+    let root = image_cache_root()?;
+    cache_image_file_at(&root, client, url).await
+}
+
+fn image_cache_root() -> anyhow::Result<PathBuf> {
+    Ok(ProjectDirs::from("dev", "lyrune", "Lyrune")
         .context("无法确定 Lyrune 图片缓存目录")?
         .cache_dir()
-        .join(IMAGE_CACHE_DIR);
-    cache_image_file_at(&root, client, url).await
+        .join(IMAGE_CACHE_DIR))
+}
+
+fn cache_thumbnail_file(source: ThumbnailSource) -> anyhow::Result<PathBuf> {
+    let root = image_cache_root()?;
+    cache_thumbnail_file_at(&root, source)
+}
+
+fn cache_thumbnail_file_at(root: &Path, source: ThumbnailSource) -> anyhow::Result<PathBuf> {
+    let target_size = source.size.pixels();
+    let root = root.join(THUMBNAIL_CACHE_DIR).join(target_size.to_string());
+    let path = root.join(&source.cache_key);
+    if is_nonempty_file_sync(&path) {
+        return Ok(path);
+    }
+
+    let (width, height) = image::ImageReader::open(source.original.as_ref())
+        .context("无法打开待缩放图片")?
+        .with_guessed_format()
+        .context("无法识别待缩放图片格式")?
+        .into_dimensions()
+        .context("无法读取待缩放图片的尺寸")?;
+    if width <= target_size && height <= target_size {
+        return Ok(source.original.to_path_buf());
+    }
+
+    std::fs::create_dir_all(&root).context("无法创建缩略图缓存目录")?;
+    if is_nonempty_file_sync(&path) {
+        return Ok(path);
+    }
+
+    let image = image::ImageReader::open(source.original.as_ref())
+        .context("无法打开待缩放图片")?
+        .with_guessed_format()
+        .context("无法识别待缩放图片格式")?
+        .decode()
+        .context("无法解码待缩放图片")?
+        .resize(target_size, target_size, FilterType::Triangle);
+    let temporary = root.join(format!(".{}.{}.tmp", source.cache_key, std::process::id()));
+    image
+        .save_with_format(&temporary, image::ImageFormat::Png)
+        .context("无法写入缩略图缓存临时文件")?;
+    if let Err(error) = std::fs::rename(&temporary, &path) {
+        if is_nonempty_file_sync(&path) {
+            let _ = std::fs::remove_file(&temporary);
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error).context("无法提交缩略图缓存文件");
+        }
+    }
+    Ok(path)
+}
+
+fn is_nonempty_file_sync(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+}
+
+fn split_thumbnail_resource(resource: &str) -> (String, Option<CachedImageSize>) {
+    for size in CachedImageSize::ALL {
+        if let Some(url) = resource.strip_suffix(size.resource_suffix()) {
+            return (url.to_owned(), Some(size));
+        }
+    }
+    (resource.to_owned(), None)
 }
 
 async fn cache_image_file_at(
@@ -410,6 +586,73 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(image_cache_key("https://example.com/cover.jpg").len(), 32);
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn encodes_thumbnail_size_in_the_resource() {
+        let url = "https://example.com/cover.jpg?quality=100";
+
+        for size in CachedImageSize::ALL {
+            let resource = format!("{url}{}", size.resource_suffix());
+            assert_eq!(
+                split_thumbnail_resource(&resource),
+                (url.to_owned(), Some(size))
+            );
+        }
+        assert_eq!(split_thumbnail_resource(url), (url.to_owned(), None));
+    }
+
+    #[test]
+    fn selects_thumbnail_size_from_display_size_and_scale_factor() {
+        assert_eq!(
+            CachedImageSize::for_display_size(gpui::px(44.), 1.),
+            Some(CachedImageSize::Px64)
+        );
+        assert_eq!(
+            CachedImageSize::for_display_size(gpui::px(44.), 2.),
+            Some(CachedImageSize::Px128)
+        );
+        assert_eq!(
+            CachedImageSize::for_display_size(gpui::px(176.), 1.5),
+            Some(CachedImageSize::Px512)
+        );
+        assert_eq!(CachedImageSize::for_display_size(gpui::px(520.), 1.), None);
+    }
+
+    #[test]
+    fn creates_and_reuses_resized_thumbnail_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lyrune-thumbnail-cache-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let original = root.join("original");
+        image::RgbImage::from_pixel(320, 160, image::Rgb([120, 80, 200]))
+            .save_with_format(&original, image::ImageFormat::Jpeg)
+            .unwrap();
+        let source = ThumbnailSource {
+            original: Arc::from(original.as_path()),
+            cache_key: "cover".to_owned(),
+            size: CachedImageSize::Px64,
+        };
+
+        let thumbnail = cache_thumbnail_file_at(&root, source.clone()).unwrap();
+        let decoded = image::ImageReader::open(&thumbnail)
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (64, 32));
+        assert_eq!(thumbnail.file_name().unwrap(), "cover");
+
+        std::fs::remove_file(original).unwrap();
+        assert_eq!(cache_thumbnail_file_at(&root, source).unwrap(), thumbnail);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

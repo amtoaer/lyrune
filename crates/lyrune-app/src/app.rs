@@ -48,7 +48,8 @@ use crate::mpris::{
 };
 use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::settings::{
-    AppSettings, CdnCacheStore, LibraryCache, LyricFrameRate, PersistedLibraryView,
+    AppSettings, CdnCacheStore, DEFAULT_NAVIGATION_HISTORY_LIMIT, LibraryCache, LyricFrameRate,
+    MAX_IMAGE_CACHE_CAPACITY, MAX_NAVIGATION_HISTORY_LIMIT, PersistedLibraryView,
     PersistedPlayback, PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
     default_lyric_font_families, default_monospace_font_families, default_ui_font_families,
     parse_font_families,
@@ -65,7 +66,6 @@ use xxhash_rust::xxh3::xxh3_128;
 const PAGE_SIZE: u64 = 100;
 const ARTIST_PAGE_SIZE: u64 = 5;
 const SEARCH_PAGE_SIZE: usize = 20;
-const NAVIGATION_HISTORY_LIMIT: usize = 10;
 const PROGRESS_TICK: Duration = Duration::from_millis(250);
 const PLAYBACK_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
@@ -2017,13 +2017,32 @@ impl NavigationPage {
     }
 }
 
-#[derive(Default)]
 struct NavigationHistory {
+    limit: usize,
     back: Vec<NavigationPage>,
     forward: Vec<NavigationPage>,
 }
 
+impl Default for NavigationHistory {
+    fn default() -> Self {
+        Self::new(DEFAULT_NAVIGATION_HISTORY_LIMIT)
+    }
+}
+
 impl NavigationHistory {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit: limit.max(1),
+            back: Vec::new(),
+            forward: Vec::new(),
+        }
+    }
+
+    fn set_limit(&mut self, limit: usize) {
+        self.limit = limit.max(1);
+        self.trim();
+    }
+
     fn record(&mut self, current: Option<NavigationPage>, target: &NavigationPage) {
         if current
             .as_ref()
@@ -2035,9 +2054,7 @@ impl NavigationHistory {
             self.back.push(current);
         }
         self.forward.clear();
-        while self.back.len() + 1 > NAVIGATION_HISTORY_LIMIT {
-            self.back.remove(0);
-        }
+        self.trim();
     }
 
     fn go_back(&mut self, current: Option<NavigationPage>) -> Option<NavigationPage> {
@@ -2059,6 +2076,16 @@ impl NavigationHistory {
     fn clear(&mut self) {
         self.back.clear();
         self.forward.clear();
+    }
+
+    fn trim(&mut self) {
+        while self.back.len() + self.forward.len() + 1 > self.limit {
+            if !self.back.is_empty() {
+                self.back.remove(0);
+            } else if !self.forward.is_empty() {
+                self.forward.remove(0);
+            }
+        }
     }
 
     fn playlist_resources(&self, playlist_id: &UserPlaylistId) -> Vec<SharedPlaylistResource> {
@@ -2224,6 +2251,9 @@ pub struct LyruneView {
     monospace_font_input: Entity<InputState>,
     lyric_font_input: Entity<InputState>,
     audio_cache_limit_input: Entity<InputState>,
+    image_cache_capacity_input: Entity<InputState>,
+    navigation_history_limit_input: Entity<InputState>,
+    settings_scroll_handle: ScrollHandle,
     progress_slider: Entity<SliderState>,
     volume_slider: Entity<SliderState>,
     image_cache: Entity<CachedImageCache>,
@@ -2374,6 +2404,28 @@ impl LyruneView {
                 .min(1.)
                 .step(1.)
         });
+        let image_cache_capacity_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.image_cache_capacity.to_string())
+                .mask_pattern(MaskPattern::Number {
+                    separator: None,
+                    fraction: None,
+                })
+                .validate(|value, _| value.parse::<usize>().is_ok_and(|value| value > 0))
+                .min(1.)
+                .step(1.)
+        });
+        let navigation_history_limit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.navigation_history_limit.to_string())
+                .mask_pattern(MaskPattern::Number {
+                    separator: None,
+                    fraction: None,
+                })
+                .validate(|value, _| value.parse::<usize>().is_ok_and(|value| value > 0))
+                .min(1.)
+                .step(1.)
+        });
         let (load_more_sender, load_more_receiver) = async_channel::bounded(1);
         let (track_event_sender, track_event_receiver) = async_channel::unbounded();
         let track_table = cx.new(|cx| {
@@ -2388,7 +2440,7 @@ impl LyruneView {
         });
         let progress_slider = cx.new(|_| progress_slider_state(0.));
         let volume_slider = cx.new(|_| volume_slider_state(settings.volume));
-        let image_cache = CachedImageCache::new(cx);
+        let image_cache = CachedImageCache::new(settings.image_cache_capacity, cx);
 
         let subscriptions = vec![
             cx.subscribe(&playlist_list, |this, _, event: &ListEvent, cx| {
@@ -2416,6 +2468,24 @@ impl LyruneView {
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
                         this.apply_audio_cache_limit(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &image_cache_capacity_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_image_cache_capacity(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &navigation_history_limit_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_navigation_history_limit(window, cx);
                     }
                 },
             ),
@@ -2497,7 +2567,7 @@ impl LyruneView {
             playlist_force_refresh: false,
             playlist_page_requests: SingleFlight::default(),
             main_content: MainContent::Home,
-            navigation_history: NavigationHistory::default(),
+            navigation_history: NavigationHistory::new(settings.navigation_history_limit),
             home_playlists: Vec::new(),
             home_loading: false,
             home_loaded: false,
@@ -2519,6 +2589,9 @@ impl LyruneView {
             monospace_font_input,
             lyric_font_input,
             audio_cache_limit_input,
+            image_cache_capacity_input,
+            navigation_history_limit_input,
+            settings_scroll_handle: ScrollHandle::new(),
             progress_slider,
             volume_slider,
             image_cache,
@@ -5416,6 +5489,56 @@ impl LyruneView {
         cx.notify();
     }
 
+    fn apply_image_cache_capacity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.settings.image_cache_capacity;
+        let value = self
+            .image_cache_capacity_input
+            .read(cx)
+            .value()
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(current)
+            .min(MAX_IMAGE_CACHE_CAPACITY);
+        self.image_cache_capacity_input.update(cx, |input, cx| {
+            input.set_value(value.to_string(), window, cx)
+        });
+        if value == current {
+            return;
+        }
+
+        self.settings.image_cache_capacity = value;
+        self.image_cache
+            .update(cx, |cache, cx| cache.set_capacity(value, window, cx));
+        self.persist_settings();
+        cx.notify();
+    }
+
+    fn apply_navigation_history_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.settings.navigation_history_limit;
+        let value = self
+            .navigation_history_limit_input
+            .read(cx)
+            .value()
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(current)
+            .min(MAX_NAVIGATION_HISTORY_LIMIT);
+        self.navigation_history_limit_input.update(cx, |input, cx| {
+            input.set_value(value.to_string(), window, cx)
+        });
+        if value == current {
+            return;
+        }
+
+        self.settings.navigation_history_limit = value;
+        self.navigation_history.set_limit(value);
+        self.prune_page_resources();
+        self.persist_settings();
+        cx.notify();
+    }
+
     fn apply_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ui = parse_font_families(self.ui_font_input.read(cx).value().as_ref());
         let monospace = parse_font_families(self.monospace_font_input.read(cx).value().as_ref());
@@ -6138,7 +6261,7 @@ impl LyruneView {
             .into_any_element()
     }
 
-    fn render_account(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_account(&mut self, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let name = self
             .profile
@@ -6151,7 +6274,7 @@ impl LyruneView {
             .as_ref()
             .and_then(|profile| profile.avatar_url.clone())
         {
-            avatar = avatar.src(cached_image_source(url));
+            avatar = avatar.src(cached_image_source(url, px(38.), scale_factor));
         }
 
         div()
@@ -6250,6 +6373,46 @@ impl LyruneView {
                 )
                 .child(Input::new(input).w_full().h(px(40.)).aria_label(label))
         };
+        let number_setting = |label: &'static str,
+                              detail: &'static str,
+                              input: &Entity<InputState>,
+                              suffix: &'static str,
+                              divided: bool| {
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_6()
+                .when(divided, |this| {
+                    this.pt_4().border_t_1().border_color(theme.border)
+                })
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().font_medium().child(label))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(detail),
+                        ),
+                )
+                .child(
+                    NumberInput::new(input)
+                        .flex_none()
+                        .w(px(140.))
+                        .h(px(40.))
+                        .suffix(
+                            div()
+                                .pr_2()
+                                .text_sm()
+                                .text_color(theme.secondary_foreground)
+                                .child(suffix),
+                        ),
+                )
+        };
         let selected_theme = self.settings.color_theme;
         let theme_rows = ColorTheme::ALL
             .chunks(2)
@@ -6321,8 +6484,10 @@ impl LyruneView {
             })
             .collect::<Vec<_>>();
         div()
+            .id("settings-scroll")
             .flex_1()
             .min_h_0()
+            .track_scroll(&self.settings_scroll_handle)
             .overflow_y_scrollbar()
             .child(
                 h_flex().w_full().items_start().justify_center().child(
@@ -6420,29 +6585,32 @@ impl LyruneView {
                                 )
                                 .child(
                                     v_flex()
-                                        .gap_2()
+                                        .gap_4()
                                         .pt_4()
                                         .border_t_1()
                                         .border_color(theme.border)
-                                        .child(div().font_medium().child("歌曲缓存上限"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("超过上限时自动清理最久未播放的歌曲"),
-                                        )
-                                        .child(
-                                            NumberInput::new(&self.audio_cache_limit_input)
-                                                .w(px(180.))
-                                                .h(px(40.))
-                                                .suffix(
-                                                    div()
-                                                        .pr_2()
-                                                        .text_sm()
-                                                        .text_color(theme.secondary_foreground)
-                                                        .child("GB"),
-                                                ),
-                                        ),
+                                        .child(div().font_medium().child("缓存与历史"))
+                                        .child(number_setting(
+                                            "歌曲缓存上限",
+                                            "超过上限时自动清理最久未播放的歌曲",
+                                            &self.audio_cache_limit_input,
+                                            "GB",
+                                            false,
+                                        ))
+                                        .child(number_setting(
+                                            "图片内存缓存",
+                                            "图片最大缓存数，缩小该数值可以减少内存占用，但同屏显示图片超过该数值会出现渲染问题",
+                                            &self.image_cache_capacity_input,
+                                            "张",
+                                            true,
+                                        ))
+                                        .child(number_setting(
+                                            "页面历史上限",
+                                            "最多保留的页面数量（包含当前页），缩小该数值会立即清理最早的历史页面",
+                                            &self.navigation_history_limit_input,
+                                            "页",
+                                            true,
+                                        )),
                                 )
                                 .child(
                                     v_flex()
@@ -6587,6 +6755,7 @@ impl LyruneView {
         &mut self,
         compact: bool,
         narrow: bool,
+        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -6611,6 +6780,7 @@ impl LyruneView {
             &playlist,
             cover_size,
             px(18.),
+            scale_factor,
             cx,
         ));
         let owned_by_profile = matches!(
@@ -6737,7 +6907,7 @@ impl LyruneView {
                                     .font_medium()
                                     .when_some(owner_identity, |this, (owner, url)| {
                                         this.child(
-                                            img(cached_image_source(url))
+                                            img(cached_image_source(url, px(18.), scale_factor))
                                                 .size(px(18.))
                                                 .flex_shrink_0()
                                                 .rounded(px(999.)),
@@ -6797,6 +6967,7 @@ impl LyruneView {
         &mut self,
         compact: bool,
         narrow: bool,
+        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -6805,7 +6976,7 @@ impl LyruneView {
             .min_w_0()
             .h_full()
             .bg(theme.background)
-            .child(self.render_playlist_header(compact, narrow, cx))
+            .child(self.render_playlist_header(compact, narrow, scale_factor, cx))
             .child(
                 div().flex_1().min_h_0().px_5().pb_4().child(
                     div()
@@ -6827,6 +6998,7 @@ impl LyruneView {
         &mut self,
         compact: bool,
         narrow: bool,
+        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -6848,6 +7020,7 @@ impl LyruneView {
                 MediaIcon::Artist,
                 cover_size,
                 px(999.),
+                scale_factor,
                 cx,
             ));
         let (track_count, has_tracks) =
@@ -6973,6 +7146,7 @@ impl LyruneView {
         &mut self,
         compact: bool,
         narrow: bool,
+        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -7037,6 +7211,7 @@ impl LyruneView {
                 songs.items[..visible].to_vec(),
                 narrow,
                 SongRowSource::Artist,
+                scale_factor,
                 cx,
             )
         } else {
@@ -7086,6 +7261,7 @@ impl LyruneView {
                 albums.items[..visible].to_vec(),
                 Vec::new(),
                 compact,
+                scale_factor,
                 cx,
             )
         } else {
@@ -7106,7 +7282,7 @@ impl LyruneView {
                 div().flex_1().min_h_0().overflow_y_scrollbar().child(
                     v_flex()
                         .w_full()
-                        .child(self.render_artist_header(compact, narrow, cx))
+                        .child(self.render_artist_header(compact, narrow, scale_factor, cx))
                         .child(
                             v_flex()
                                 .w_full()
@@ -7177,7 +7353,13 @@ impl LyruneView {
             .into_any_element()
     }
 
-    fn render_home(&mut self, compact: bool, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_home(
+        &mut self,
+        compact: bool,
+        narrow: bool,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         if self.home_loading && self.home_playlists.is_empty() {
             return v_flex()
@@ -7248,7 +7430,7 @@ impl LyruneView {
             .into_iter()
             .enumerate()
             .map(|(index, playlist)| {
-                let cover = playlist_cover(&playlist, cover_size, px(14.), cx);
+                let cover = playlist_cover(&playlist, cover_size, px(14.), scale_factor, cx);
                 let title = playlist.title.clone();
                 let subtitle = if playlist.description.is_empty() {
                     "为你推荐".to_owned()
@@ -7455,11 +7637,12 @@ impl LyruneView {
         icon: MediaIcon,
         size: Pixels,
         radius: Pixels,
+        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
         match cover_url {
-            Some(url) => img(cached_image_source(url))
+            Some(url) => img(cached_image_source(url, size, scale_factor))
                 .size(size)
                 .flex_shrink_0()
                 .rounded(radius)
@@ -7481,9 +7664,10 @@ impl LyruneView {
         &mut self,
         songs: Vec<Arc<Track>>,
         narrow: bool,
+        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.render_song_rows(songs, narrow, SongRowSource::Search, cx)
+        self.render_song_rows(songs, narrow, SongRowSource::Search, scale_factor, cx)
     }
 
     fn render_song_rows(
@@ -7491,6 +7675,7 @@ impl LyruneView {
         songs: Vec<Arc<Track>>,
         narrow: bool,
         source: SongRowSource,
+        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -7516,6 +7701,7 @@ impl LyruneView {
                     MediaIcon::Music,
                     px(48.),
                     px(9.),
+                    scale_factor,
                     cx,
                 );
                 Button::new(format!(
@@ -7632,6 +7818,7 @@ impl LyruneView {
         albums: Vec<Arc<SearchAlbum>>,
         playlists: Vec<Arc<UserPlaylist>>,
         compact: bool,
+        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -7648,6 +7835,7 @@ impl LyruneView {
                         MediaIcon::Artist,
                         cover_size,
                         px(999.),
+                        scale_factor,
                         cx,
                     );
                     Button::new(format!("search-artist-{index}"))
@@ -7690,6 +7878,7 @@ impl LyruneView {
                         MediaIcon::Album,
                         cover_size,
                         px(12.),
+                        scale_factor,
                         cx,
                     );
                     let playlist = album.as_ref().clone().into_playlist();
@@ -7744,6 +7933,7 @@ impl LyruneView {
                         MediaIcon::Playlist,
                         cover_size,
                         px(12.),
+                        scale_factor,
                         cx,
                     );
                     Button::new(format!("search-playlist-{index}"))
@@ -7793,7 +7983,13 @@ impl LyruneView {
             .into_any_element()
     }
 
-    fn render_search(&mut self, compact: bool, narrow: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_search(
+        &mut self,
+        compact: bool,
+        narrow: bool,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let active_category = self.search_category;
         let tabs = SearchCategory::ALL
@@ -7853,6 +8049,7 @@ impl LyruneView {
                     content = content.child(self.render_search_songs(
                         results.songs.items[..visible].to_vec(),
                         narrow,
+                        scale_factor,
                         cx,
                     ));
                 }
@@ -7866,6 +8063,7 @@ impl LyruneView {
                         Vec::new(),
                         Vec::new(),
                         compact,
+                        scale_factor,
                         cx,
                     ));
                 }
@@ -7879,6 +8077,7 @@ impl LyruneView {
                         results.albums.items[..visible].to_vec(),
                         Vec::new(),
                         compact,
+                        scale_factor,
                         cx,
                     ));
                 }
@@ -7893,6 +8092,7 @@ impl LyruneView {
                         Vec::new(),
                         results.playlists.items[..visible].to_vec(),
                         compact,
+                        scale_factor,
                         cx,
                     ));
                 }
@@ -8623,10 +8823,14 @@ impl LyruneView {
                                         .overflow_hidden()
                                         .shadow_2xl()
                                         .child(
-                                            img(cached_image_source(cover_url))
-                                                .size_full()
-                                                .rounded(px(20.))
-                                                .object_fit(ObjectFit::Cover),
+                                            img(cached_image_source(
+                                                cover_url,
+                                                cover_size,
+                                                window.scale_factor(),
+                                            ))
+                                            .size_full()
+                                            .rounded(px(20.))
+                                            .object_fit(ObjectFit::Cover),
                                         ),
                                 )
                             })
@@ -8728,7 +8932,7 @@ impl LyruneView {
                 .rounded(px(10.))
                 .overflow_hidden()
                 .child(
-                    img(cached_image_source(url))
+                    img(cached_image_source(url, cover_size, window.scale_factor()))
                         .size_full()
                         .rounded(px(10.))
                         .object_fit(ObjectFit::Cover),
@@ -9182,6 +9386,7 @@ impl LyruneView {
         let theme = cx.theme().clone();
         let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);
+        let scale_factor = window.scale_factor();
         let popover_open = self.account_menu_open || self.quality_menu_open;
         if self.cover_backdrop_fully_expanded {
             return v_flex()
@@ -9235,10 +9440,12 @@ impl LyruneView {
         let sidebar_range = px(min_sidebar_width)..px(max_sidebar_width);
         let sidebar = self.render_sidebar(cx);
         let page = match self.main_content {
-            MainContent::Home => self.render_home(compact, narrow, cx),
-            MainContent::Search => self.render_search(compact, narrow, cx),
-            MainContent::Artist => self.render_artist_content(compact, narrow, cx),
-            MainContent::Playlist => self.render_playlist_content(compact, narrow, cx),
+            MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
+            MainContent::Search => self.render_search(compact, narrow, scale_factor, cx),
+            MainContent::Artist => self.render_artist_content(compact, narrow, scale_factor, cx),
+            MainContent::Playlist => {
+                self.render_playlist_content(compact, narrow, scale_factor, cx)
+            }
             MainContent::Settings => self.render_settings_page(narrow, cx),
         };
         let search_width = if narrow {
@@ -9330,7 +9537,7 @@ impl LyruneView {
                             )),
                     ),
             );
-        let account = self.render_account(cx);
+        let account = self.render_account(scale_factor, cx);
         let content = v_flex()
             .h_full()
             .min_w_0()
@@ -9448,13 +9655,14 @@ impl Render for LyruneView {
 #[cfg(test)]
 mod tests {
     use super::{
-        LYRIC_MINIMUM_CONTRAST, LyricFrameRate, NAVIGATION_HISTORY_LIMIT, NavigationHistory,
-        NavigationPage, PlaybackQueue, PlaylistResource, PlaylistScrollPosition, SearchCategory,
-        SearchResource, SearchVisibleCounts, adjacent_lyric_timing, canonical_queue_track_index,
-        combined_lyric_frame_interval, contrast_ratio, extract_qrc_content, format_playback_time,
-        insert_external_track_after_current, insert_track_after_current, lyric_edge_opacity,
-        lyric_frame_is_due, lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
-        parse_lyrics, playlist_title_is_long, readable_lyric_color, resolved_playlist_scroll_row,
+        DEFAULT_NAVIGATION_HISTORY_LIMIT, LYRIC_MINIMUM_CONTRAST, LyricFrameRate,
+        NavigationHistory, NavigationPage, PlaybackQueue, PlaylistResource, PlaylistScrollPosition,
+        SearchCategory, SearchResource, SearchVisibleCounts, adjacent_lyric_timing,
+        canonical_queue_track_index, combined_lyric_frame_interval, contrast_ratio,
+        extract_qrc_content, format_playback_time, insert_external_track_after_current,
+        insert_track_after_current, lyric_edge_opacity, lyric_frame_is_due,
+        lyric_horizontal_scroll_offset, lyric_position_for_frame_rate, parse_lyrics,
+        playlist_title_is_long, readable_lyric_color, resolved_playlist_scroll_row,
     };
     use gpui::{Pixels, Rgba, black, px, rgb};
     use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
@@ -9890,6 +10098,7 @@ mod tests {
         )));
         let weak = Arc::downgrade(&resource);
         let mut history = NavigationHistory {
+            limit: DEFAULT_NAVIGATION_HISTORY_LIMIT,
             back: Vec::new(),
             forward: vec![NavigationPage::Playlist {
                 playlist: playlist.clone(),
@@ -9916,14 +10125,30 @@ mod tests {
     fn navigation_history_keeps_at_most_ten_pages_including_the_current_page() {
         let mut history = NavigationHistory::default();
         let mut current = NavigationPage::Home;
-        for diss_id in 1..=NAVIGATION_HISTORY_LIMIT as u64 + 2 {
+        for diss_id in 1..=DEFAULT_NAVIGATION_HISTORY_LIMIT as u64 + 2 {
             let target = playlist(diss_id);
             history.record(Some(current), &target);
             current = target;
         }
 
-        assert_eq!(history.back.len() + 1, NAVIGATION_HISTORY_LIMIT);
+        assert_eq!(history.back.len() + 1, DEFAULT_NAVIGATION_HISTORY_LIMIT);
         assert!(history.back[0].same_destination(&playlist(3)));
+    }
+
+    #[test]
+    fn shrinking_navigation_history_limit_evicts_the_oldest_pages_immediately() {
+        let mut history = NavigationHistory::new(4);
+        let mut current = NavigationPage::Home;
+        for diss_id in 1..=3 {
+            let target = playlist(diss_id);
+            history.record(Some(current), &target);
+            current = target;
+        }
+
+        history.set_limit(2);
+
+        assert_eq!(history.back.len() + history.forward.len() + 1, 2);
+        assert!(history.back[0].same_destination(&playlist(2)));
     }
 
     #[test]
@@ -9939,7 +10164,7 @@ mod tests {
         drop(resource);
 
         let mut history = NavigationHistory::default();
-        for diss_id in 1..=NAVIGATION_HISTORY_LIMIT as u64 {
+        for diss_id in 1..=DEFAULT_NAVIGATION_HISTORY_LIMIT as u64 {
             let target = playlist(diss_id);
             history.record(Some(current), &target);
             current = target;

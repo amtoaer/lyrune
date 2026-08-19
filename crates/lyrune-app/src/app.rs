@@ -6484,14 +6484,17 @@ impl LyruneView {
             })
             .collect::<Vec<_>>();
         div()
-            .id("settings-scroll")
+            .relative()
             .flex_1()
             .min_h_0()
-            .track_scroll(&self.settings_scroll_handle)
-            .overflow_y_scrollbar()
             .child(
-                h_flex().w_full().items_start().justify_center().child(
-                    v_flex()
+                div()
+                    .id("settings-scroll")
+                    .size_full()
+                    .track_scroll(&self.settings_scroll_handle)
+                    .overflow_y_scroll()
+                    .child(h_flex().w_full().items_start().justify_center().child(
+                        v_flex()
                         .w_full()
                         .max_w(px(760.))
                         .gap_6()
@@ -6652,8 +6655,9 @@ impl LyruneView {
                                         ),
                                 ),
                         ),
-                ),
+                    )),
             )
+            .vertical_scrollbar(&self.settings_scroll_handle)
             .into_any_element()
     }
 

@@ -16,6 +16,12 @@ pub use protocol::{CdnCache, ProtocolClient};
 
 const QR_DATA_PREFIX: &str = "data:image/png;base64,";
 
+#[derive(Debug, thiserror::Error)]
+pub enum CredentialError {
+    #[error("QQ 音乐凭证已过期，且 Lyrune 旧版本保存的凭据缺少必要字段，请重新登录")]
+    IncompleteLegacyCredential,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct QqCredential {
     pub music_id: u64,
@@ -110,6 +116,24 @@ impl QqCredential {
             self.expires_at
         };
         expires_at.is_some_and(|expires_at| expires_at <= now + 300)
+    }
+
+    pub fn validate_refresh_fields(&self) -> Result<(), CredentialError> {
+        let common_fields_present = self.music_id != 0
+            && !self.music_key.trim().is_empty()
+            && !self.refresh_token.trim().is_empty()
+            && !self.refresh_key.trim().is_empty()
+            && !self.open_id.trim().is_empty();
+        let provider_fields_present = match self.login_type {
+            1 => !self.union_id.trim().is_empty(),
+            2 => !self.access_token.trim().is_empty(),
+            _ => !self.union_id.trim().is_empty() && !self.access_token.trim().is_empty(),
+        };
+        if common_fields_present && provider_fields_present {
+            Ok(())
+        } else {
+            Err(CredentialError::IncompleteLegacyCredential)
+        }
     }
 }
 
@@ -451,6 +475,7 @@ pub async fn refresh_credential(credential: QqCredential) -> Result<QqCredential
     if !credential.is_expiring() {
         return ProtocolClient::new()?.complete_credential(credential).await;
     }
+    credential.validate_refresh_fields()?;
 
     let client = MusicClient::new();
     let refreshed = client
@@ -475,7 +500,50 @@ pub async fn refresh_credential(credential: QqCredential) -> Result<QqCredential
 
 #[cfg(test)]
 mod tests {
-    use super::Quality;
+    use serde_json::json;
+
+    use super::{CredentialError, QqCredential, Quality};
+
+    fn credential_from_old_storage(login_type: u64) -> QqCredential {
+        serde_json::from_value(json!({
+            "music_id": 123,
+            "music_key": "music-key",
+            "refresh_token": "refresh-token",
+            "refresh_key": "refresh-key",
+            "login_type": login_type,
+            "expires_at": 1,
+            "encrypted_uin": "encrypted-uin",
+            "client_guid": "client-guid"
+        }))
+        .expect("deserialize old stored credential")
+    }
+
+    #[test]
+    fn old_stored_credential_reports_actionable_refresh_error() {
+        let credential = credential_from_old_storage(2);
+        let error = credential
+            .validate_refresh_fields()
+            .expect_err("old credential must be rejected before refresh");
+
+        assert!(matches!(error, CredentialError::IncompleteLegacyCredential));
+        assert_eq!(
+            error.to_string(),
+            "QQ 音乐凭证已过期，且 Lyrune 旧版本保存的凭据缺少必要字段，请重新登录"
+        );
+    }
+
+    #[test]
+    fn refresh_fields_follow_login_provider() {
+        let mut wechat = credential_from_old_storage(1);
+        wechat.open_id = "openid".to_owned();
+        wechat.union_id = "unionid".to_owned();
+        assert!(wechat.validate_refresh_fields().is_ok());
+
+        let mut qq = credential_from_old_storage(2);
+        qq.open_id = "openid".to_owned();
+        qq.access_token = "access-token".to_owned();
+        assert!(qq.validate_refresh_fields().is_ok());
+    }
 
     #[test]
     fn quality_maps_to_expected_qq_file_type() {

@@ -1001,15 +1001,48 @@ impl ProtocolClient {
     }
 
     async fn refresh_full_credential(&self, credential: &QqCredential) -> Result<Value> {
+        let string_music_id = if credential.string_music_id.is_empty() {
+            credential.music_id.to_string()
+        } else {
+            credential.string_music_id.clone()
+        };
+        let param = match credential.login_type {
+            1 => json!({
+                "openid": credential.open_id,
+                "refresh_token": credential.refresh_token,
+                "str_musicid": string_music_id,
+                "musickey": credential.music_key,
+                "unionid": credential.union_id,
+                "refresh_key": credential.refresh_key,
+                "loginMode": 2,
+            }),
+            2 => json!({
+                "openid": credential.open_id,
+                "access_token": credential.access_token,
+                "refresh_token": credential.refresh_token,
+                "expired_in": credential.expires_at.unwrap_or_default(),
+                "musicid": credential.music_id,
+                "musickey": credential.music_key,
+                "refresh_key": credential.refresh_key,
+                "loginMode": 2,
+            }),
+            _ => json!({
+                "openid": credential.open_id,
+                "access_token": credential.access_token,
+                "refresh_token": credential.refresh_token,
+                "expired_in": credential.expires_at.unwrap_or_default(),
+                "str_musicid": string_music_id,
+                "musicid": credential.music_id,
+                "musickey": credential.music_key,
+                "unionid": credential.union_id,
+                "refresh_key": credential.refresh_key,
+                "loginMode": 2,
+            }),
+        };
         self.call(
             "music.login.LoginServer",
             "Login",
-            json!({
-                "refresh_key": credential.refresh_key,
-                "refresh_token": credential.refresh_token,
-                "musickey": credential.music_key,
-                "musicid": credential.music_id,
-            }),
+            param,
             credential,
             Some(json!({ "tmeLoginType": credential.login_type })),
         )
@@ -1158,11 +1191,29 @@ fn apply_credential_response(credential: &mut QqCredential, data: &Value) {
     {
         credential.music_key = value;
     }
+    if let Some(value) =
+        string_field(data, &["openid", "open_id"]).filter(|value| !value.is_empty())
+    {
+        credential.open_id = value;
+    }
+    if let Some(value) = string_field(data, &["access_token"]).filter(|value| !value.is_empty()) {
+        credential.access_token = value;
+    }
     if let Some(value) = string_field(data, &["refresh_token"]).filter(|value| !value.is_empty()) {
         credential.refresh_token = value;
     }
     if let Some(value) = string_field(data, &["refresh_key"]).filter(|value| !value.is_empty()) {
         credential.refresh_key = value;
+    }
+    if let Some(value) =
+        string_field(data, &["unionid", "union_id"]).filter(|value| !value.is_empty())
+    {
+        credential.union_id = value;
+    }
+    if let Some(value) =
+        string_field(data, &["str_musicid", "string_music_id"]).filter(|value| !value.is_empty())
+    {
+        credential.string_music_id = value;
     }
     if let Some(value) =
         integer_field(data, &["loginType", "login_type"]).filter(|value| *value > 0)
@@ -1171,13 +1222,25 @@ fn apply_credential_response(credential: &mut QqCredential, data: &Value) {
     }
     if let Some(value) = integer_field(data, &["expired_at"]).filter(|value| *value > 0) {
         credential.expires_at = Some(value as i64);
-    } else if let Some(lifetime) =
+    }
+    if let Some(value) = integer_field(data, &["musickeyCreateTime", "musickey_create_time"])
+        .filter(|value| *value > 0)
+    {
+        credential.music_key_create_time = value as i64;
+    }
+    if let Some(value) =
         integer_field(data, &["keyExpiresIn", "key_expires_in"]).filter(|value| *value > 0)
     {
-        let created = integer_field(data, &["musickeyCreateTime", "musickey_create_time"])
-            .filter(|value| *value > 0)
-            .unwrap_or_else(unix_timestamp);
-        credential.expires_at = Some((created + lifetime) as i64);
+        credential.key_expires_in = value as i64;
+    }
+    if let Some(value) = integer_field(data, &["first_login", "firstLogin"]) {
+        credential.first_login = value as i64;
+    }
+    if let Some(value) = integer_field(data, &["bindAccountType", "bind_account_type"]) {
+        credential.bind_account_type = value as i64;
+    }
+    if let Some(value) = integer_field(data, &["needRefreshKeyIn", "need_refresh_key_in"]) {
+        credential.need_refresh_key_in = value as i64;
     }
     if let Some(value) = find_string_recursively(data, &["encryptUin", "encrypt_uin"])
         .filter(|value| !value.trim().is_empty())

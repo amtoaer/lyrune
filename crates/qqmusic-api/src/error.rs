@@ -38,6 +38,9 @@ pub enum MusicClientError {
     /// QQ 音乐登录失败。
     #[error("tencent login failed")]
     TencentLoginFailed,
+    /// QQ 音乐登录服务返回了业务错误码。
+    #[error("QQ 音乐登录失败（错误码 {code}）：{detail}")]
+    TencentLoginServerError { code: i64, detail: String },
     /// QQ 音乐 MQTT 登录链路失败。
     #[error("tencent mqtt login failed: {0}")]
     TencentMqttLogin(String),

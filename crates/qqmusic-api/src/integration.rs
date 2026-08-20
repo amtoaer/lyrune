@@ -20,8 +20,26 @@ const QR_DATA_PREFIX: &str = "data:image/png;base64,";
 pub struct QqCredential {
     pub music_id: u64,
     pub music_key: String,
+    #[serde(default)]
+    pub open_id: String,
+    #[serde(default)]
+    pub access_token: String,
     pub refresh_token: String,
     pub refresh_key: String,
+    #[serde(default)]
+    pub union_id: String,
+    #[serde(default)]
+    pub string_music_id: String,
+    #[serde(default)]
+    pub music_key_create_time: i64,
+    #[serde(default)]
+    pub key_expires_in: i64,
+    #[serde(default)]
+    pub first_login: i64,
+    #[serde(default)]
+    pub bind_account_type: i64,
+    #[serde(default)]
+    pub need_refresh_key_in: i64,
     pub login_type: u64,
     pub expires_at: Option<i64>,
     #[serde(default)]
@@ -35,8 +53,17 @@ impl QqCredential {
         Ok(Self {
             music_id: token.music_id,
             music_key: token.music_key,
+            open_id: token.open_id,
+            access_token: token.access_token,
             refresh_token: token.refresh_token,
             refresh_key: token.refresh_key,
+            union_id: token.union_id,
+            string_music_id: token.string_music_id,
+            music_key_create_time: token.music_key_create_time,
+            key_expires_in: token.key_expires_in,
+            first_login: token.first_login,
+            bind_account_type: token.bind_account_type,
+            need_refresh_key_in: token.need_refresh_key_in,
             login_type: token.login_type,
             expires_at: token.expires_at,
             encrypted_uin: token.encrypted_uin,
@@ -45,14 +72,24 @@ impl QqCredential {
     }
 
     pub fn to_token(&self) -> TencentLoginToken {
-        TencentLoginToken::new(
-            self.music_id,
-            self.music_key.clone(),
-            self.refresh_token.clone(),
-            self.refresh_key.clone(),
-            self.expires_at,
-            self.login_type,
-        )
+        TencentLoginToken {
+            music_id: self.music_id,
+            music_key: self.music_key.clone(),
+            open_id: self.open_id.clone(),
+            access_token: self.access_token.clone(),
+            refresh_token: self.refresh_token.clone(),
+            refresh_key: self.refresh_key.clone(),
+            union_id: self.union_id.clone(),
+            string_music_id: self.string_music_id.clone(),
+            music_key_create_time: self.music_key_create_time,
+            key_expires_in: self.key_expires_in,
+            first_login: self.first_login,
+            bind_account_type: self.bind_account_type,
+            need_refresh_key_in: self.need_refresh_key_in,
+            login_type: self.login_type,
+            expires_at: self.expires_at,
+            encrypted_uin: self.encrypted_uin.clone(),
+        }
     }
 
     pub fn cookie(&self) -> String {
@@ -67,8 +104,12 @@ impl QqCredential {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        self.expires_at
-            .is_some_and(|expires_at| expires_at <= now + 300)
+        let expires_at = if self.music_key_create_time > 0 && self.key_expires_in > 0 {
+            Some(self.music_key_create_time + self.key_expires_in)
+        } else {
+            self.expires_at
+        };
+        expires_at.is_some_and(|expires_at| expires_at <= now + 300)
     }
 }
 

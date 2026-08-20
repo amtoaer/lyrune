@@ -449,8 +449,26 @@ impl NeteaseLoginToken {
 pub struct TencentLoginToken {
     pub(crate) music_id: u64,
     pub(crate) music_key: String,
+    #[serde(default)]
+    pub(crate) open_id: String,
+    #[serde(default)]
+    pub(crate) access_token: String,
     pub(crate) refresh_token: String,
     pub(crate) refresh_key: String,
+    #[serde(default)]
+    pub(crate) union_id: String,
+    #[serde(default)]
+    pub(crate) string_music_id: String,
+    #[serde(default)]
+    pub(crate) music_key_create_time: i64,
+    #[serde(default)]
+    pub(crate) key_expires_in: i64,
+    #[serde(default)]
+    pub(crate) first_login: i64,
+    #[serde(default)]
+    pub(crate) bind_account_type: i64,
+    #[serde(default)]
+    pub(crate) need_refresh_key_in: i64,
     pub(crate) login_type: u64,
     pub(crate) expires_at: Option<i64>,
     #[serde(default)]
@@ -485,8 +503,17 @@ impl TencentLoginToken {
         Self {
             music_id,
             music_key: music_key.into(),
+            open_id: String::new(),
+            access_token: String::new(),
             refresh_token: refresh_token.into(),
             refresh_key: refresh_key.into(),
+            union_id: String::new(),
+            string_music_id: String::new(),
+            music_key_create_time: 0,
+            key_expires_in: 0,
+            first_login: 0,
+            bind_account_type: 0,
+            need_refresh_key_in: 0,
             expires_at,
             login_type,
             encrypted_uin: String::new(),
@@ -495,7 +522,11 @@ impl TencentLoginToken {
 
     /// 返回过期时间戳（秒）。
     pub fn expires_at(&self) -> Option<i64> {
-        self.expires_at
+        if self.music_key_create_time > 0 && self.key_expires_in > 0 {
+            Some(self.music_key_create_time + self.key_expires_in)
+        } else {
+            self.expires_at
+        }
     }
 
     pub fn to_cookie(&self) -> String {

@@ -630,18 +630,54 @@ impl TencentClient {
         &self,
         token: &TencentLoginToken,
     ) -> MusicClientResult<TencentLoginToken> {
+        let param = match token.login_type {
+            1 => json!({
+                "openid": token.open_id,
+                "refresh_token": token.refresh_token,
+                "str_musicid": if token.string_music_id.is_empty() {
+                    token.music_id.to_string()
+                } else {
+                    token.string_music_id.clone()
+                },
+                "musickey": token.music_key,
+                "unionid": token.union_id,
+                "refresh_key": token.refresh_key,
+                "loginMode": 2,
+            }),
+            2 => json!({
+                "openid": token.open_id,
+                "access_token": token.access_token,
+                "refresh_token": token.refresh_token,
+                "expired_in": token.expires_at.unwrap_or_default(),
+                "musicid": token.music_id,
+                "musickey": token.music_key,
+                "refresh_key": token.refresh_key,
+                "loginMode": 2,
+            }),
+            _ => json!({
+                "openid": token.open_id,
+                "access_token": token.access_token,
+                "refresh_token": token.refresh_token,
+                "expired_in": token.expires_at.unwrap_or_default(),
+                "str_musicid": if token.string_music_id.is_empty() {
+                    token.music_id.to_string()
+                } else {
+                    token.string_music_id.clone()
+                },
+                "musicid": token.music_id,
+                "musickey": token.music_key,
+                "unionid": token.union_id,
+                "refresh_key": token.refresh_key,
+                "loginMode": 2,
+            }),
+        };
         let response = self
             .post::<TLoginInfoResponse>(
                 json!({
                     "result": {
                         "module": "music.login.LoginServer",
                         "method": "Login",
-                        "param": {
-                            "refresh_key": token.refresh_key,
-                            "refresh_token": token.refresh_token,
-                            "musickey": token.music_key,
-                            "musicid": token.music_id,
-                        }
+                        "param": param
                     },
                     "comm": {
                         "tmeLoginType": token.login_type

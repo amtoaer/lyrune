@@ -110,7 +110,10 @@ mod platform {
                     data,
                 },
             };
-            let handle = tray.spawn().context("无法注册 Linux 系统托盘图标")?;
+            let handle = tray
+                .assume_sni_available(true)
+                .spawn()
+                .context("无法注册 Linux 系统托盘图标")?;
             Ok(Self { handle })
         }
     }

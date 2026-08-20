@@ -6162,6 +6162,13 @@ impl LyruneView {
     }
 
     fn logout(&mut self, cx: &mut Context<Self>) {
+        if let (Some(client), Some(credential)) =
+            (self.protocol_client.clone(), self.credential_snapshot())
+        {
+            drop(RUNTIME.spawn(async move {
+                let _ = client.logout(&credential).await;
+            }));
+        }
         self.login_generation = self.login_generation.wrapping_add(1);
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home_generation = self.home_generation.wrapping_add(1);

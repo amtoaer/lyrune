@@ -251,6 +251,18 @@ impl ProtocolClient {
         Ok(credential)
     }
 
+    pub async fn logout(&self, credential: &QqCredential) -> Result<()> {
+        self.call_with_credential(
+            "music.login.LoginServer",
+            "Logout",
+            json!({}),
+            credential,
+            Some(json!({ "tmeLoginType": credential.login_type })),
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn user_profile(&self, credential: &CredentialSession) -> Result<UserProfile> {
         let current = credential.ensure_fresh().await?;
         let primary = self

@@ -56,9 +56,9 @@ use crate::settings::{
 };
 use crate::singleflight::SingleFlight;
 use qqmusic_api::integration::{
-    LoginEvent, PlaylistPage, ProtocolClient, QqCredential, Quality, RecommendationKind,
-    SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId,
-    UserProfile, refresh_credential, run_qr_login,
+    CredentialSession, LoginEvent, PlaylistPage, ProtocolClient, QqCredential, Quality,
+    RecommendationKind, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist,
+    UserPlaylistId, UserProfile, refresh_credential, run_qr_login,
 };
 #[cfg(target_os = "linux")]
 use xxhash_rust::xxh3::xxh3_128;
@@ -2147,7 +2147,7 @@ struct PlaylistPageKey {
 async fn request_playlist_page(
     requests: SingleFlight<PlaylistPageKey, PlaylistPage>,
     client: ProtocolClient,
-    credential: QqCredential,
+    credential: Arc<QqCredential>,
     playlist: UserPlaylist,
     offset: u64,
     force: bool,
@@ -2216,7 +2216,7 @@ impl RepeatMode {
 
 pub struct LyruneView {
     account_state: AccountState,
-    credential: Option<QqCredential>,
+    credential: Option<CredentialSession>,
     profile: Option<UserProfile>,
     qr_image: Option<Arc<Image>>,
     library_loading: bool,
@@ -2997,7 +2997,7 @@ impl LyruneView {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(Some(credential)) => {
                     this.account_state = AccountState::SignedIn;
-                    this.credential = Some(credential.clone());
+                    this.credential = Some(CredentialSession::new(credential.clone()));
                     this.main_content = MainContent::Home;
                     this.status = StatusMessage::info("已恢复 QQ 音乐登录，正在加载音乐库…");
                     this.persist_credential(credential.clone(), cx);
@@ -3069,7 +3069,7 @@ impl LyruneView {
             LoginEvent::Succeeded(credential) => {
                 self.account_state = AccountState::SignedIn;
                 self.qr_image = None;
-                self.credential = Some(credential.clone());
+                self.credential = Some(CredentialSession::new(credential.clone()));
                 self.main_content = MainContent::Home;
                 self.status = StatusMessage::info("登录成功，正在加载音乐库…");
                 self.persist_credential(credential.clone(), cx);
@@ -3115,6 +3115,15 @@ impl LyruneView {
         .detach();
     }
 
+    fn credential_snapshot(&self) -> Option<Arc<QqCredential>> {
+        self.credential.as_ref()?.snapshot()
+    }
+
+    fn account_id(&self) -> Option<u64> {
+        self.credential_snapshot()
+            .map(|credential| credential.music_id)
+    }
+
     fn start_cdn_maintenance(&mut self) {
         if let Some(task) = self.cdn_maintenance.take() {
             task.abort();
@@ -3152,10 +3161,7 @@ impl LyruneView {
     }
 
     fn shared_search_resource(&mut self, query: &str) -> SharedSearchResource {
-        let account_id = self
-            .credential
-            .as_ref()
-            .map_or(0, |credential| credential.music_id);
+        let account_id = self.account_id().unwrap_or(0);
         let key = (account_id, query.to_owned());
         if let Some(resource) = self
             .page_resource_cache
@@ -3173,10 +3179,7 @@ impl LyruneView {
     }
 
     fn shared_artist_resource(&mut self, artist_mid: &str) -> SharedArtistResource {
-        let account_id = self
-            .credential
-            .as_ref()
-            .map_or(0, |credential| credential.music_id);
+        let account_id = self.account_id().unwrap_or(0);
         let key = (account_id, artist_mid.to_owned());
         if let Some(resource) = self
             .page_resource_cache
@@ -3199,10 +3202,7 @@ impl LyruneView {
         force_refresh: bool,
         cache_policy: PlaylistCachePolicy,
     ) -> SharedPlaylistResource {
-        let account_id = self
-            .credential
-            .as_ref()
-            .map_or(0, |credential| credential.music_id);
+        let account_id = self.account_id().unwrap_or(0);
         let key = (account_id, playlist.id.clone());
         if !force_refresh
             && let Some(resource) = self
@@ -3400,7 +3400,7 @@ impl LyruneView {
         query: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             lock_resource(&resource).error = Some("请先登录 QQ 音乐".to_owned());
             cx.notify();
             return;
@@ -3469,7 +3469,7 @@ impl LyruneView {
         };
         let category = self.search_category;
         let target_count = self.search_visible_counts.get(category) + SEARCH_PAGE_SIZE;
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -3640,7 +3640,7 @@ impl LyruneView {
         if self.home_loading {
             return;
         }
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             self.home_error = Some("请先登录 QQ 音乐".to_owned());
             cx.notify();
             return;
@@ -3694,7 +3694,7 @@ impl LyruneView {
     }
 
     fn start_home_recommendation(&mut self, kind: RecommendationKind, cx: &mut Context<Self>) {
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             self.status = StatusMessage::error("请先登录 QQ 音乐");
             cx.notify();
             return;
@@ -3787,7 +3787,7 @@ impl LyruneView {
         if !continuation.can_load_more() || (!force && remaining > 2) {
             return;
         }
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -3870,7 +3870,7 @@ impl LyruneView {
     }
 
     fn load_library(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             return;
         };
         if !force_refresh
@@ -4005,11 +4005,7 @@ impl LyruneView {
             return;
         };
 
-        if let Some(account_id) = self
-            .credential
-            .as_ref()
-            .map(|credential| credential.music_id)
-        {
+        if let Some(account_id) = self.account_id() {
             let view = PersistedLibraryView {
                 account_id,
                 playlist_id: playlist.id.clone(),
@@ -4096,7 +4092,7 @@ impl LyruneView {
         let Some(artist) = self.selected_artist.clone() else {
             return;
         };
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -4189,7 +4185,7 @@ impl LyruneView {
         let Some(artist) = self.selected_artist.clone() else {
             return;
         };
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -4448,7 +4444,7 @@ impl LyruneView {
     }
 
     fn load_playlist_page(&mut self, cx: &mut Context<Self>) {
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             return;
         };
         let Some(resource) = self.selected_playlist_resource.clone() else {
@@ -4608,7 +4604,7 @@ impl LyruneView {
         if !has_more {
             return;
         }
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -4732,7 +4728,7 @@ impl LyruneView {
     fn ensure_track_lyrics(
         &mut self,
         client: ProtocolClient,
-        credential: QqCredential,
+        credential: Arc<QqCredential>,
         track: Track,
         cx: &mut Context<Self>,
     ) {
@@ -4893,7 +4889,7 @@ impl LyruneView {
         autoplay: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             self.status = StatusMessage::error("请先登录 QQ 音乐");
             cx.notify();
             return;
@@ -5654,11 +5650,7 @@ impl LyruneView {
     }
 
     fn persist_current_playback(&mut self) {
-        let Some(account_id) = self
-            .credential
-            .as_ref()
-            .map(|credential| credential.music_id)
-        else {
+        let Some(account_id) = self.account_id() else {
             return;
         };
         let Some(playlist_id) = self
@@ -5890,7 +5882,7 @@ impl LyruneView {
         if self.liked_tracks.contains_key(&mid) || self.liked_state_loading.contains(&mid) {
             return;
         }
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             return;
         };
         let liked = self
@@ -5933,11 +5925,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 this.liked_state_loading.remove(&mid);
-                if this
-                    .credential
-                    .as_ref()
-                    .is_none_or(|credential| credential.music_id != account_id)
-                {
+                if this.account_id().is_none_or(|id| id != account_id) {
                     return;
                 }
                 match result {
@@ -5985,7 +5973,7 @@ impl LyruneView {
         if self.liked_toggle_loading.contains(&mid) {
             return;
         }
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.credential_snapshot() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -6021,11 +6009,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 this.liked_toggle_loading.remove(&mid);
-                if this
-                    .credential
-                    .as_ref()
-                    .is_none_or(|credential| credential.music_id != account_id)
-                {
+                if this.account_id().is_none_or(|id| id != account_id) {
                     return;
                 }
                 match result {
@@ -6134,7 +6118,9 @@ impl LyruneView {
             audio.stop();
         }
         self.account_state = AccountState::SignedOut;
-        self.credential = None;
+        if let Some(credential) = self.credential.take() {
+            credential.revoke();
+        }
         self.liked_tracks.clear();
         self.liked_state_loading.clear();
         self.liked_toggle_loading.clear();

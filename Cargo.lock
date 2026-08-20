@@ -4331,6 +4331,7 @@ version = "1.2.0"
 dependencies = [
  "aes",
  "anyhow",
+ "arc-swap",
  "async-channel",
  "async-tungstenite",
  "base64",

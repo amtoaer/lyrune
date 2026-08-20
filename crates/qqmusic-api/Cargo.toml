@@ -17,6 +17,7 @@ exclude = [".idea/*", "AGENTS.md", "Cargo.lock", "target/*", "rustfmt.toml", ".g
 [dependencies]
 aes.workspace = true
 anyhow.workspace = true
+arc-swap.workspace = true
 async-channel.workspace = true
 async-tungstenite.workspace = true
 base64.workspace = true

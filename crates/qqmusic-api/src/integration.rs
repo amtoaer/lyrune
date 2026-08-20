@@ -1,12 +1,15 @@
 mod protocol;
 mod qrc_des;
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
+use arc_swap::ArcSwapOption;
 use async_channel::Sender;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::MusicClient;
@@ -20,6 +23,50 @@ const QR_DATA_PREFIX: &str = "data:image/png;base64,";
 pub enum CredentialError {
     #[error("QQ 音乐凭证已过期，且 Lyrune 旧版本保存的凭据缺少必要字段，请重新登录")]
     IncompleteLegacyCredential,
+}
+
+#[derive(Clone)]
+pub struct CredentialSession {
+    inner: Arc<CredentialSessionInner>,
+}
+
+struct CredentialSessionInner {
+    current: ArcSwapOption<QqCredential>,
+    updates: watch::Sender<u64>,
+}
+
+impl CredentialSession {
+    pub fn new(credential: QqCredential) -> Self {
+        let (updates, _) = watch::channel(0);
+        Self {
+            inner: Arc::new(CredentialSessionInner {
+                current: ArcSwapOption::from(Some(Arc::new(credential))),
+                updates,
+            }),
+        }
+    }
+
+    pub fn snapshot(&self) -> Option<Arc<QqCredential>> {
+        self.inner.current.load_full()
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.inner.updates.subscribe()
+    }
+
+    pub fn revoke(&self) -> Option<Arc<QqCredential>> {
+        let credential = self.inner.current.swap(None);
+        if credential.is_some() {
+            self.notify_update();
+        }
+        credential
+    }
+
+    fn notify_update(&self) {
+        self.inner
+            .updates
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -502,7 +549,7 @@ pub async fn refresh_credential(credential: QqCredential) -> Result<QqCredential
 mod tests {
     use serde_json::json;
 
-    use super::{CredentialError, QqCredential, Quality};
+    use super::{CredentialError, CredentialSession, QqCredential, Quality};
 
     fn credential_from_old_storage(login_type: u64) -> QqCredential {
         serde_json::from_value(json!({
@@ -543,6 +590,19 @@ mod tests {
         qq.open_id = "openid".to_owned();
         qq.access_token = "access-token".to_owned();
         assert!(qq.validate_refresh_fields().is_ok());
+    }
+
+    #[test]
+    fn credential_session_shares_and_revokes_snapshot() {
+        let credential = credential_from_old_storage(2);
+        let session = CredentialSession::new(credential);
+        let clone = session.clone();
+        let snapshot = session.snapshot().expect("active credential snapshot");
+
+        assert_eq!(snapshot.music_id, 123);
+        let revoked = clone.revoke().expect("revoked credential snapshot");
+        assert!(std::sync::Arc::ptr_eq(&snapshot, &revoked));
+        assert!(session.snapshot().is_none());
     }
 
     #[test]

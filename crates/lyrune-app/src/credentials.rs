@@ -42,7 +42,7 @@ impl CredentialStore {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use qqmusic_api::integration::{ProtocolClient, refresh_credential};
+    use qqmusic_api::integration::{CredentialSession, ProtocolClient};
 
     use super::CredentialStore;
 
@@ -60,11 +60,11 @@ mod tests {
         };
 
         let refresh_started = Instant::now();
-        let credential =
-            tokio::time::timeout(Duration::from_secs(30), refresh_credential(credential))
-                .await
-                .expect("credential refresh timed out")
-                .expect("refresh credential");
+        let credential = CredentialSession::new(credential);
+        tokio::time::timeout(Duration::from_secs(30), credential.ensure_fresh())
+            .await
+            .expect("credential refresh timed out")
+            .expect("refresh credential");
         eprintln!("credential restored in {:?}", refresh_started.elapsed());
 
         let liked_started = Instant::now();
@@ -132,11 +132,11 @@ mod tests {
             eprintln!("no stored QQ Music credential in this test process");
             return;
         };
-        let credential =
-            tokio::time::timeout(Duration::from_secs(30), refresh_credential(credential))
-                .await
-                .expect("credential refresh timed out")
-                .expect("refresh credential");
+        let credential = CredentialSession::new(credential);
+        tokio::time::timeout(Duration::from_secs(30), credential.ensure_fresh())
+            .await
+            .expect("credential refresh timed out")
+            .expect("refresh credential");
         let client = ProtocolClient::new().expect("create protocol client");
         let results = tokio::time::timeout(
             Duration::from_secs(30),

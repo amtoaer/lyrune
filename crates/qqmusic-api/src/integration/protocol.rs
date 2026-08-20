@@ -18,9 +18,9 @@ use crate::models::LyricResult;
 use crate::platform::get_search_id;
 
 use super::{
-    PlaybackOption, PlaylistPage, QqCredential, Quality, RadarTrackPage, SearchAlbum, SearchArtist,
-    SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId, UserProfile, new_client_guid,
-    qrc_des,
+    CredentialSession, PlaybackOption, PlaylistPage, QqCredential, Quality, RadarTrackPage,
+    SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId,
+    UserProfile, new_client_guid, qrc_des,
 };
 
 const API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
@@ -251,13 +251,14 @@ impl ProtocolClient {
         Ok(credential)
     }
 
-    pub async fn user_profile(&self, credential: &QqCredential) -> Result<UserProfile> {
+    pub async fn user_profile(&self, credential: &CredentialSession) -> Result<UserProfile> {
+        let current = credential.ensure_fresh().await?;
         let primary = self
-            .call(
+            .call_with_credential(
                 "music.UserInfo.userInfoServer",
                 "GetLoginUserInfo",
                 json!({}),
-                credential,
+                &current,
                 None,
             )
             .await
@@ -280,7 +281,7 @@ impl ProtocolClient {
         let legacy = if primary_is_complete {
             None
         } else {
-            self.fetch_legacy_profile(credential).await.ok()
+            self.fetch_legacy_profile(&current).await.ok()
         };
         let profiles = [primary.as_ref(), legacy.as_ref()];
 
@@ -313,7 +314,7 @@ impl ProtocolClient {
             .or_else(|| {
                 Some(format!(
                     "https://q1.qlogo.cn/g?b=qq&nk={}&s=100",
-                    credential.music_id
+                    current.music_id
                 ))
             });
         let id = profiles
@@ -323,7 +324,7 @@ impl ProtocolClient {
                 find_string_recursively(profile, &["str_musicid", "musicid", "music_id", "uin"])
                     .filter(|value| value != "0")
             })
-            .unwrap_or_else(|| credential.music_id.to_string());
+            .unwrap_or_else(|| current.music_id.to_string());
 
         Ok(UserProfile {
             id,
@@ -332,7 +333,11 @@ impl ProtocolClient {
         })
     }
 
-    pub async fn user_playlists(&self, credential: &QqCredential) -> Result<Vec<UserPlaylist>> {
+    pub async fn user_playlists(
+        &self,
+        credential: &CredentialSession,
+    ) -> Result<Vec<UserPlaylist>> {
+        let current = credential.ensure_fresh().await?;
         let liked_data = self
             .playlist_data(credential, &UserPlaylistId::Liked, 0, 1)
             .await
@@ -342,11 +347,11 @@ impl ProtocolClient {
             integer_field(&liked_data, &["total_song_num", "total"]).unwrap_or_default();
 
         let created_data = self
-            .call(
+            .call_with_credential(
                 "music.musicasset.PlaylistBaseRead",
                 "GetPlaylistByUin",
-                json!({ "uin": credential.music_id.to_string() }),
-                credential,
+                json!({ "uin": current.music_id.to_string() }),
+                &current,
                 None,
             )
             .await
@@ -362,15 +367,15 @@ impl ProtocolClient {
         let mut offset = 0_u64;
         loop {
             let data = self
-                .call(
+                .call_with_credential(
                     "music.musicasset.PlaylistFavRead",
                     "CgiGetPlaylistFavInfo",
                     json!({
-                        "uin": credential.encrypted_uin,
+                        "uin": current.encrypted_uin,
                         "offset": offset,
                         "size": 100,
                     }),
-                    credential,
+                    &current,
                     None,
                 )
                 .await
@@ -400,7 +405,7 @@ impl ProtocolClient {
 
     pub async fn recommended_playlists(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         offset: u64,
         limit: u64,
     ) -> Result<SearchPage<UserPlaylist>> {
@@ -423,7 +428,7 @@ impl ProtocolClient {
 
     pub async fn radar_tracks(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         page: u64,
     ) -> Result<RadarTrackPage> {
         let page = page.max(1);
@@ -453,7 +458,11 @@ impl ProtocolClient {
         })
     }
 
-    pub async fn guess_tracks(&self, credential: &QqCredential, limit: u64) -> Result<Vec<Track>> {
+    pub async fn guess_tracks(
+        &self,
+        credential: &CredentialSession,
+        limit: u64,
+    ) -> Result<Vec<Track>> {
         let data = self
             .call(
                 "music.radioProxy.MbTrackRadioSvr",
@@ -476,7 +485,7 @@ impl ProtocolClient {
 
     pub async fn search(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         query: &str,
         limit: u64,
     ) -> Result<SearchResults> {
@@ -500,7 +509,7 @@ impl ProtocolClient {
 
     pub async fn search_songs(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         query: &str,
         offset: u64,
         limit: u64,
@@ -514,7 +523,7 @@ impl ProtocolClient {
 
     pub async fn search_artists(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         query: &str,
         offset: u64,
         limit: u64,
@@ -528,7 +537,7 @@ impl ProtocolClient {
 
     pub async fn search_albums(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         query: &str,
         offset: u64,
         limit: u64,
@@ -542,7 +551,7 @@ impl ProtocolClient {
 
     pub async fn search_playlists(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         query: &str,
         offset: u64,
         limit: u64,
@@ -556,7 +565,7 @@ impl ProtocolClient {
 
     pub async fn artist_albums(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         artist: &SearchArtist,
         offset: u64,
         limit: u64,
@@ -583,7 +592,7 @@ impl ProtocolClient {
 
     pub async fn playlist_page(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         playlist: &UserPlaylist,
         offset: u64,
         limit: u64,
@@ -659,14 +668,18 @@ impl ProtocolClient {
         })
     }
 
-    pub async fn liked_tracks(&self, credential: &QqCredential, limit: u64) -> Result<Vec<Track>> {
+    pub async fn liked_tracks(
+        &self,
+        credential: &CredentialSession,
+        limit: u64,
+    ) -> Result<Vec<Track>> {
         Ok(self
             .playlist_page(credential, &UserPlaylist::liked(), 0, limit)
             .await?
             .tracks)
     }
 
-    pub async fn track_liked(&self, credential: &QqCredential, mid: &str) -> Result<bool> {
+    pub async fn track_liked(&self, credential: &CredentialSession, mid: &str) -> Result<bool> {
         let data = self
             .call(
                 "music.musicasset.SongFavRead",
@@ -682,7 +695,7 @@ impl ProtocolClient {
 
     pub async fn set_track_liked(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         track: &Track,
         liked: bool,
     ) -> Result<()> {
@@ -721,7 +734,11 @@ impl ProtocolClient {
         Ok(())
     }
 
-    pub async fn lyrics(&self, credential: &QqCredential, track: &Track) -> Result<LyricResult> {
+    pub async fn lyrics(
+        &self,
+        credential: &CredentialSession,
+        track: &Track,
+    ) -> Result<LyricResult> {
         let preferred = self
             .call(
                 "music.musichallSong.PlayLyricInfo",
@@ -770,7 +787,7 @@ impl ProtocolClient {
 
     pub async fn playback_url(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         track: &Track,
         quality: Quality,
     ) -> Result<String> {
@@ -790,7 +807,7 @@ impl ProtocolClient {
 
     pub async fn playback_options(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         track: &Track,
     ) -> Result<Vec<PlaybackOption>> {
         self.playback_options_for(credential, track, &Quality::ALL)
@@ -799,10 +816,11 @@ impl ProtocolClient {
 
     async fn playback_options_for(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         track: &Track,
         qualities: &[Quality],
     ) -> Result<Vec<PlaybackOption>> {
+        let current = credential.ensure_fresh().await?;
         let requests = qualities
             .iter()
             .copied()
@@ -819,18 +837,18 @@ impl ProtocolClient {
         let song_mid = vec![track.mid.clone(); requests.len()];
         let song_type = vec![0; requests.len()];
         let data = self
-            .call(
+            .call_with_credential(
                 "music.vkey.GetVkey",
                 "UrlGetVkey",
                 json!({
                     "filename": filenames,
-                    "guid": credential.client_guid,
+                    "guid": current.client_guid,
                     "songmid": song_mid,
                     "songtype": song_type,
-                    "uin": credential.music_id.to_string(),
+                    "uin": current.music_id.to_string(),
                     "ctx": 0,
                 }),
-                credential,
+                &current,
                 None,
             )
             .await
@@ -928,13 +946,14 @@ impl ProtocolClient {
 
     async fn playlist_data(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         id: &UserPlaylistId,
         offset: u64,
         limit: u64,
     ) -> Result<Value> {
+        let current = credential.ensure_fresh().await?;
         let (diss_id, dir_id, encrypted_uin) = match id {
-            UserPlaylistId::Liked => (0, 201, Some(credential.encrypted_uin.as_str())),
+            UserPlaylistId::Liked => (0, 201, Some(current.encrypted_uin.as_str())),
             UserPlaylistId::Created { tid, .. } => (*tid, 0, None),
             UserPlaylistId::Favorite { diss_id } | UserPlaylistId::Recommended { diss_id } => {
                 (*diss_id, 0, None)
@@ -962,11 +981,11 @@ impl ProtocolClient {
                 .expect("playlist params are always an object")
                 .insert("enc_host_uin".to_owned(), encrypted_uin.into());
         }
-        self.call(
+        self.call_with_credential(
             "music.srfDissInfo.DissInfo",
             "CgiGetDiss",
             param,
-            credential,
+            &current,
             None,
         )
         .await
@@ -974,7 +993,7 @@ impl ProtocolClient {
 
     async fn search_data(
         &self,
-        credential: &QqCredential,
+        credential: &CredentialSession,
         query: &str,
         search_type: u8,
         offset: u64,
@@ -1039,7 +1058,7 @@ impl ProtocolClient {
                 "loginMode": 2,
             }),
         };
-        self.call(
+        self.call_with_credential(
             "music.login.LoginServer",
             "Login",
             param,
@@ -1083,6 +1102,19 @@ impl ProtocolClient {
     }
 
     async fn call(
+        &self,
+        module: &str,
+        method: &str,
+        param: Value,
+        credential: &CredentialSession,
+        comm_overrides: Option<Value>,
+    ) -> Result<Value> {
+        let credential = credential.ensure_fresh().await?;
+        self.call_with_credential(module, method, param, &credential, comm_overrides)
+            .await
+    }
+
+    async fn call_with_credential(
         &self,
         module: &str,
         method: &str,

@@ -1,6 +1,7 @@
 mod protocol;
 mod qrc_des;
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,7 +10,7 @@ use arc_swap::ArcSwapOption;
 use async_channel::Sender;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::MusicClient;
@@ -23,6 +24,8 @@ const QR_DATA_PREFIX: &str = "data:image/png;base64,";
 pub enum CredentialError {
     #[error("QQ 音乐凭证已过期，且 Lyrune 旧版本保存的凭据缺少必要字段，请重新登录")]
     IncompleteLegacyCredential,
+    #[error("QQ 音乐登录凭据已注销")]
+    Revoked,
 }
 
 #[derive(Clone)]
@@ -32,6 +35,7 @@ pub struct CredentialSession {
 
 struct CredentialSessionInner {
     current: ArcSwapOption<QqCredential>,
+    refresh_gate: Mutex<()>,
     updates: watch::Sender<u64>,
 }
 
@@ -41,6 +45,7 @@ impl CredentialSession {
         Self {
             inner: Arc::new(CredentialSessionInner {
                 current: ArcSwapOption::from(Some(Arc::new(credential))),
+                refresh_gate: Mutex::new(()),
                 updates,
             }),
         }
@@ -54,12 +59,54 @@ impl CredentialSession {
         self.inner.updates.subscribe()
     }
 
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     pub fn revoke(&self) -> Option<Arc<QqCredential>> {
         let credential = self.inner.current.swap(None);
         if credential.is_some() {
             self.notify_update();
         }
         credential
+    }
+
+    pub async fn ensure_fresh(&self) -> Result<Arc<QqCredential>> {
+        self.ensure_fresh_with(refresh_credential).await
+    }
+
+    async fn ensure_fresh_with<F, Fut>(&self, refresh: F) -> Result<Arc<QqCredential>>
+    where
+        F: FnOnce(QqCredential) -> Fut,
+        Fut: Future<Output = Result<QqCredential>>,
+    {
+        let credential = self.snapshot().ok_or(CredentialError::Revoked)?;
+        if !credential.is_expiring() {
+            return Ok(credential);
+        }
+
+        let _refresh = self.inner.refresh_gate.lock().await;
+        let credential = self.snapshot().ok_or(CredentialError::Revoked)?;
+        if !credential.is_expiring() {
+            return Ok(credential);
+        }
+        credential.validate_refresh_fields()?;
+
+        let refreshed = Arc::new(refresh(credential.as_ref().clone()).await?);
+        let previous = self
+            .inner
+            .current
+            .compare_and_swap(&credential, Some(refreshed.clone()));
+        if previous
+            .as_ref()
+            .is_some_and(|previous| Arc::ptr_eq(previous, &credential))
+        {
+            self.notify_update();
+            Ok(refreshed)
+        } else {
+            self.snapshot()
+                .ok_or_else(|| CredentialError::Revoked.into())
+        }
     }
 
     fn notify_update(&self) {
@@ -547,6 +594,10 @@ pub async fn refresh_credential(credential: QqCredential) -> Result<QqCredential
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use serde_json::json;
 
     use super::{CredentialError, CredentialSession, QqCredential, Quality};
@@ -563,6 +614,13 @@ mod tests {
             "client_guid": "client-guid"
         }))
         .expect("deserialize old stored credential")
+    }
+
+    fn refreshable_expiring_credential() -> QqCredential {
+        let mut credential = credential_from_old_storage(2);
+        credential.open_id = "open-id".to_owned();
+        credential.access_token = "access-token".to_owned();
+        credential
     }
 
     #[test]
@@ -602,6 +660,85 @@ mod tests {
         assert_eq!(snapshot.music_id, 123);
         let revoked = clone.revoke().expect("revoked credential snapshot");
         assert!(std::sync::Arc::ptr_eq(&snapshot, &revoked));
+        assert!(session.snapshot().is_none());
+    }
+
+    #[tokio::test]
+    async fn credential_session_refreshes_expiring_credential_once() {
+        let session = CredentialSession::new(refreshable_expiring_credential());
+        let clone = session.clone();
+        let mut updates = session.subscribe();
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let first_refreshes = refreshes.clone();
+        let second_refreshes = refreshes.clone();
+
+        let refresh = |refreshes: Arc<AtomicUsize>| {
+            move |mut credential: QqCredential| async move {
+                refreshes.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                credential.expires_at = Some(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64
+                        + 3600,
+                );
+                Ok(credential)
+            }
+        };
+        let (first, second) = tokio::join!(
+            session.ensure_fresh_with(refresh(first_refreshes)),
+            clone.ensure_fresh_with(refresh(second_refreshes)),
+        );
+
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        assert_eq!(refreshes.load(Ordering::Relaxed), 1);
+        assert!(updates.changed().await.is_ok());
+        assert_eq!(*updates.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn credential_session_rejects_incomplete_legacy_refresh_without_requesting() {
+        let session = CredentialSession::new(credential_from_old_storage(2));
+        let result = session
+            .ensure_fresh_with(|_| async { panic!("invalid credential must not be refreshed") })
+            .await;
+        let error = match result {
+            Ok(_) => panic!("old credential should fail before refresh request"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "QQ 音乐凭证已过期，且 Lyrune 旧版本保存的凭据缺少必要字段，请重新登录"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_session_does_not_restore_revoked_credential_after_refresh() {
+        let session = CredentialSession::new(refreshable_expiring_credential());
+        let revoker = session.clone();
+
+        let refresh = session.ensure_fresh_with(|mut credential| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            credential.expires_at = None;
+            Ok(credential)
+        });
+        let revoke = async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            revoker.revoke();
+        };
+        let (result, ()) = tokio::join!(refresh, revoke);
+
+        let error = match result {
+            Ok(_) => panic!("revoked credential must not be restored"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.downcast_ref::<CredentialError>(),
+            Some(CredentialError::Revoked)
+        ));
         assert!(session.snapshot().is_none());
     }
 

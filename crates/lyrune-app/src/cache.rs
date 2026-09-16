@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -13,6 +13,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use bytes::Bytes;
 use directories::ProjectDirs;
 use futures_util::{Stream, StreamExt as _};
+use qmc_decrypt::{DecryptReader, QmcCipher};
 use qqmusic_api::integration::{Quality, Track};
 use reqwest::header::{
     ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderMap, IF_RANGE,
@@ -23,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use stream_download::source::{SourceStream, StreamOutcome};
 use stream_download::storage::StorageProvider;
 use stream_download::{Settings, StreamDownload};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
@@ -45,6 +46,7 @@ const QQ_REFERER: &str = "https://y.qq.com/";
 type CacheKeyLock = Arc<AsyncMutex<()>>;
 type ByteStream = Box<dyn Stream<Item = io::Result<Bytes>> + Unpin + Send + Sync>;
 type StreamingSource = StreamDownload<CacheStorageProvider>;
+type EncryptedSource = DecryptReader<BufReader<File>>;
 
 pub(crate) fn cache_key(bytes: &[u8]) -> String {
     format!("{:032x}", xxh3_128(bytes))
@@ -429,6 +431,69 @@ impl AudioCache {
         quality: Quality,
     ) -> Result<PreparedStream> {
         self.prepare_inner(urls, track, quality, true).await
+    }
+
+    pub async fn prepare_encrypted(
+        &self,
+        urls: Vec<String>,
+        ekey: &str,
+        track: &Track,
+        quality: Quality,
+        format_hint: &'static str,
+    ) -> Result<PreparedStream> {
+        let urls = unique_urls(urls);
+        let first_url = urls.first().context("歌曲没有可用的加密 CDN 下载地址")?;
+        tokio::fs::create_dir_all(self.root.as_ref())
+            .await
+            .context("无法创建音频缓存目录")?;
+        let identity = CacheIdentity::encrypted(track, quality);
+        let key = identity.key();
+        let guard = self.key_lock(&key).lock_owned().await;
+        let paths = CachePaths::new(self.root.as_ref(), &key);
+
+        let mut audio_len = encrypted_audio_len(&paths.media).await.ok();
+        if audio_len.is_none() {
+            let partial = paths.media.with_extension("media.partial");
+            let response = self
+                .client
+                .get(first_url)
+                .header(REFERER, QQ_REFERER)
+                .header(ACCEPT_ENCODING, "identity")
+                .send()
+                .await
+                .context("下载 QQ 音乐加密音频失败")?
+                .error_for_status()
+                .context("QQ 音乐加密音频地址被拒绝")?;
+            let mut file = tokio::fs::File::create(&partial)
+                .await
+                .context("无法创建加密音频缓存")?;
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                file.write_all(&chunk.context("读取 QQ 音乐加密音频失败")?)
+                    .await
+                    .context("写入 QQ 音乐加密音频缓存失败")?;
+            }
+            file.flush().await?;
+            tokio::fs::rename(&partial, &paths.media)
+                .await
+                .context("无法提交 QQ 音乐加密音频缓存")?;
+            audio_len = Some(encrypted_audio_len(&paths.media).await?);
+        }
+        let audio_len = audio_len.context("QQ 音乐加密音频为空")?;
+        let source = File::open(&paths.media).context("无法打开 QQ 音乐加密音频缓存")?;
+        let cipher = QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?;
+        let source = DecryptReader::new(BufReader::new(source), cipher, audio_len);
+        self.record_access(&key, audio_len).await;
+        drop(guard);
+        Ok(PreparedStream {
+            source: CachedAudioSource::Encrypted {
+                source,
+                _lease: self.lease(&key),
+            },
+            content_length: Some(audio_len),
+            format_hint,
+            cancellation: None,
+        })
     }
 
     #[cfg(test)]
@@ -847,6 +912,10 @@ pub(crate) enum CachedAudioSource {
         source: StreamingSource,
         _lease: CacheLease,
     },
+    Encrypted {
+        source: EncryptedSource,
+        _lease: CacheLease,
+    },
 }
 
 impl Read for CachedAudioSource {
@@ -854,6 +923,7 @@ impl Read for CachedAudioSource {
         match self {
             Self::Complete { source, .. } => source.read(buffer),
             Self::Streaming { source, .. } => source.read(buffer),
+            Self::Encrypted { source, .. } => source.read(buffer),
         }
     }
 }
@@ -863,6 +933,7 @@ impl Seek for CachedAudioSource {
         match self {
             Self::Complete { source, .. } => source.seek(position),
             Self::Streaming { source, .. } => source.seek(position),
+            Self::Encrypted { source, .. } => source.seek(position),
         }
     }
 }
@@ -873,6 +944,8 @@ struct CacheIdentity {
     track_mid: String,
     media_mid: String,
     quality: String,
+    #[serde(default)]
+    encoding: String,
 }
 
 impl CacheIdentity {
@@ -882,14 +955,21 @@ impl CacheIdentity {
             track_mid: track.mid.clone(),
             media_mid: track.media_mid.clone().unwrap_or_else(|| track.mid.clone()),
             quality: quality.cache_id().to_owned(),
+            encoding: "plain".to_owned(),
         }
+    }
+
+    fn encrypted(track: &Track, quality: Quality) -> Self {
+        let mut identity = Self::new(track, quality);
+        identity.encoding = "musicex".to_owned();
+        identity
     }
 
     fn key(&self) -> String {
         cache_key(
             format!(
-                "lyrune-audio-v{CACHE_SCHEMA_VERSION}\0{}\0{}\0{}\0{}",
-                self.provider, self.track_mid, self.media_mid, self.quality
+                "lyrune-audio-v{CACHE_SCHEMA_VERSION}\0{}\0{}\0{}\0{}\0{}",
+                self.provider, self.track_mid, self.media_mid, self.quality, self.encoding
             )
             .as_bytes(),
         )
@@ -1053,6 +1133,25 @@ impl CachePaths {
             metadata: root.join(format!("{key}.json")),
         }
     }
+}
+
+async fn encrypted_audio_len(path: &Path) -> Result<u64> {
+    let length = tokio::fs::metadata(path)
+        .await
+        .context("无法读取加密音频缓存大小")?
+        .len();
+    if length < 0xc0 {
+        bail!("QQ 音乐加密音频缺少完整 footer");
+    }
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .context("无法读取加密音频缓存")?;
+    file.seek(SeekFrom::End(-0xc0)).await?;
+    let mut footer = vec![0u8; 0xc0];
+    file.read_exact(&mut footer).await?;
+    Ok(qmc_decrypt::parse_musicex_footer(&footer, length - 0xc0)
+        .map(|info| info.audio_len)
+        .unwrap_or(length))
 }
 
 async fn read_metadata(path: &Path) -> Option<CacheMetadata> {

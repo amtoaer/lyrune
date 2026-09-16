@@ -1,0 +1,7 @@
+[package]
+name = "qmc-decrypt"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64.workspace = true

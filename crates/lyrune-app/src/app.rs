@@ -2151,6 +2151,7 @@ struct PlaybackLocation {
     track_mid: String,
     quality: Quality,
     urls: Vec<String>,
+    encrypted: bool,
 }
 
 struct PlaybackQueue {
@@ -5064,7 +5065,9 @@ impl LyruneView {
             .playback_location
             .as_ref()
             .filter(|location| {
-                location.track_mid == track.mid && location.quality == desired_quality
+                location.track_mid == track.mid
+                    && location.quality == desired_quality
+                    && !location.encrypted
             })
             .map(|location| location.urls.clone());
 
@@ -5120,11 +5123,11 @@ impl LyruneView {
                             } else {
                                 known_qualities.clone()
                             };
-                            (desired_quality, urls, stream, qualities)
+                            (desired_quality, urls, stream, qualities, false)
                         }),
                     None => None,
                 };
-                let (quality, urls, stream, available_qualities) = match reused_stream {
+                let (quality, urls, stream, available_qualities, encrypted) = match reused_stream {
                     Some(reused) => reused,
                     None => {
                         let _ = sender.send(PlaybackLoadEvent::ResolvingOptions).await;
@@ -5147,12 +5150,34 @@ impl LyruneView {
                                 continue;
                             };
                             let urls = option.urls().map(str::to_owned).collect::<Vec<_>>();
-                            match audio_cache
-                                .prepare_with_fallbacks(urls.clone(), &track, quality)
-                                .await
-                            {
+                            let stream_result = if option.encrypted {
+                                let Some(ekey) = option.ekey.as_deref() else {
+                                    available_qualities.retain(|candidate| *candidate != quality);
+                                    last_error = Some(anyhow::anyhow!("QQ 音乐加密音源缺少 ekey"));
+                                    continue;
+                                };
+                                let format_hint = if option.url.contains(".mgg") {
+                                    "ogg"
+                                } else {
+                                    "flac"
+                                };
+                                audio_cache
+                                    .prepare_encrypted(
+                                        urls.clone(),
+                                        ekey,
+                                        &track,
+                                        quality,
+                                        format_hint,
+                                    )
+                                    .await
+                            } else {
+                                audio_cache
+                                    .prepare_with_fallbacks(urls.clone(), &track, quality)
+                                    .await
+                            };
+                            match stream_result {
                                 Ok(stream) => {
-                                    prepared = Some((quality, urls, stream));
+                                    prepared = Some((quality, urls, stream, option.encrypted));
                                     break;
                                 }
                                 Err(error) => {
@@ -5165,12 +5190,12 @@ impl LyruneView {
                                 }
                             }
                         }
-                        let (quality, urls, stream) = prepared.ok_or_else(|| {
+                        let (quality, urls, stream, encrypted) = prepared.ok_or_else(|| {
                             last_error.unwrap_or_else(|| {
                                 anyhow::anyhow!("QQ 音乐没有返回当前账号可播放的音质")
                             })
                         })?;
-                        (quality, urls, stream, available_qualities)
+                        (quality, urls, stream, available_qualities, encrypted)
                     }
                 };
                 let playback =
@@ -5183,6 +5208,7 @@ impl LyruneView {
                         track_mid: track.mid.clone(),
                         quality,
                         urls,
+                        encrypted,
                     },
                     available_qualities,
                 ))

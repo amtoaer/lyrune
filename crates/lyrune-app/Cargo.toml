@@ -16,6 +16,7 @@ gpui-component.workspace = true
 gpui-platform.workspace = true
 image.workspace = true
 keyring.workspace = true
+qmc-decrypt.workspace = true
 qqmusic-api.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true

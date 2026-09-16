@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/lyrune-app", "crates/qqmusic-api"]
+members = ["crates/lyrune-app", "crates/qqmusic-api", "crates/qmc-decrypt"]
 default-members = ["crates/lyrune-app"]
 resolver = "2"
 
@@ -44,6 +44,7 @@ ksni = { version = "0.3.6", features = ["blocking"] }
 md5 = "0.8"
 mpris-server = { version = "0.10.0", default-features = false, features = ["tokio"] }
 qrcode = "0.14.1"
+qmc-decrypt = { path = "crates/qmc-decrypt" }
 quick-xml = "0.41"
 qqmusic-api = { package = "netease-qq-music-api", path = "crates/qqmusic-api" }
 rand = "0.10"

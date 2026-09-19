@@ -80,6 +80,6 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zbus_systemd = { version = "0.26100.0", default-features = false, features = ["login1", "zbus-async-tokio"] }
 
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/amtoaer/zed", rev = "ce62fe124dc4d4cef2b33c9114f982090376b866", version = "=0.2.2" }
-gpui_macros = { git = "https://github.com/amtoaer/zed", rev = "ce62fe124dc4d4cef2b33c9114f982090376b866" }
-gpui_platform = { git = "https://github.com/amtoaer/zed", rev = "ce62fe124dc4d4cef2b33c9114f982090376b866" }
+gpui = { git = "https://github.com/amtoaer/zed", rev = "f029275d696b0a87198e0c6c337712398682fb8a", version = "=0.2.2" }
+gpui_macros = { git = "https://github.com/amtoaer/zed", rev = "f029275d696b0a87198e0c6c337712398682fb8a" }
+gpui_platform = { git = "https://github.com/amtoaer/zed", rev = "f029275d696b0a87198e0c6c337712398682fb8a" }

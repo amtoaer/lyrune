@@ -19,6 +19,9 @@ pub const DEFAULT_IMAGE_CACHE_CAPACITY: usize = 80;
 pub const DEFAULT_NAVIGATION_HISTORY_LIMIT: usize = 10;
 pub const MAX_IMAGE_CACHE_CAPACITY: usize = 512;
 pub const MAX_NAVIGATION_HISTORY_LIMIT: usize = 100;
+pub const DEFAULT_SCALE_PERCENT: u32 = 100;
+pub const MIN_SCALE_PERCENT: u32 = 50;
+pub const MAX_LYRIC_SCALE_PERCENT: u32 = 300;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PersistedPlayback {
@@ -241,6 +244,8 @@ pub struct AppSettings {
     pub ui_font_families: Vec<String>,
     pub monospace_font_families: Vec<String>,
     pub lyric_font_families: Vec<String>,
+    pub lyric_font_scale: u32,
+    pub lyric_line_spacing: u32,
     pub audio_cache_limit_gb: u64,
     pub image_cache_capacity: usize,
     pub navigation_history_limit: usize,
@@ -268,6 +273,8 @@ impl Default for AppSettings {
             ui_font_families: default_ui_font_families(),
             monospace_font_families: default_monospace_font_families(),
             lyric_font_families: default_lyric_font_families(),
+            lyric_font_scale: DEFAULT_SCALE_PERCENT,
+            lyric_line_spacing: DEFAULT_SCALE_PERCENT,
             audio_cache_limit_gb: DEFAULT_AUDIO_CACHE_LIMIT_GB,
             image_cache_capacity: DEFAULT_IMAGE_CACHE_CAPACITY,
             navigation_history_limit: DEFAULT_NAVIGATION_HISTORY_LIMIT,
@@ -298,6 +305,12 @@ impl AppSettings {
         );
         self.lyric_font_families =
             normalize_font_families(self.lyric_font_families, default_lyric_font_families());
+        self.lyric_font_scale = self
+            .lyric_font_scale
+            .clamp(MIN_SCALE_PERCENT, MAX_LYRIC_SCALE_PERCENT);
+        self.lyric_line_spacing = self
+            .lyric_line_spacing
+            .clamp(MIN_SCALE_PERCENT, MAX_LYRIC_SCALE_PERCENT);
         self.audio_cache_limit_gb = self.audio_cache_limit_gb.max(1);
         self.image_cache_capacity = self.image_cache_capacity.clamp(1, MAX_IMAGE_CACHE_CAPACITY);
         self.navigation_history_limit = self
@@ -576,6 +589,8 @@ mod tests {
             default_monospace_font_families()
         );
         assert_eq!(settings.lyric_font_families, [".SystemUIFont"]);
+        assert_eq!(settings.lyric_font_scale, DEFAULT_SCALE_PERCENT);
+        assert_eq!(settings.lyric_line_spacing, DEFAULT_SCALE_PERCENT);
         assert_eq!(settings.audio_cache_limit_gb, DEFAULT_AUDIO_CACHE_LIMIT_GB);
         assert_eq!(settings.image_cache_capacity, 80);
         assert_eq!(
@@ -665,6 +680,8 @@ mod tests {
             ui_font_families: default_ui_font_families(),
             monospace_font_families: default_monospace_font_families(),
             lyric_font_families: default_lyric_font_families(),
+            lyric_font_scale: 1000,
+            lyric_line_spacing: 0,
             audio_cache_limit_gb: 0,
             image_cache_capacity: 0,
             navigation_history_limit: usize::MAX,
@@ -679,6 +696,8 @@ mod tests {
         .normalized();
         assert_eq!(settings.volume, 1.);
         assert_eq!(settings.last_nonzero_volume, 0.01);
+        assert_eq!(settings.lyric_font_scale, MAX_LYRIC_SCALE_PERCENT);
+        assert_eq!(settings.lyric_line_spacing, MIN_SCALE_PERCENT);
         assert_eq!(settings.audio_cache_limit_gb, 1);
         assert_eq!(settings.image_cache_capacity, 1);
         assert_eq!(
@@ -707,6 +726,8 @@ mod tests {
             ui_font_families: vec!["Inter".to_owned(), "Noto Sans CJK SC".to_owned()],
             monospace_font_families: vec!["JetBrains Mono".to_owned()],
             lyric_font_families: vec!["LXGW WenKai".to_owned(), "Noto Sans JP".to_owned()],
+            lyric_font_scale: 150,
+            lyric_line_spacing: 80,
             audio_cache_limit_gb: 24,
             image_cache_capacity: 72,
             navigation_history_limit: 16,
@@ -754,6 +775,8 @@ mod tests {
             expected.monospace_font_families
         );
         assert_eq!(restored.lyric_font_families, expected.lyric_font_families);
+        assert_eq!(restored.lyric_font_scale, expected.lyric_font_scale);
+        assert_eq!(restored.lyric_line_spacing, expected.lyric_line_spacing);
         assert_eq!(restored.audio_cache_limit_gb, expected.audio_cache_limit_gb);
         assert_eq!(restored.image_cache_capacity, expected.image_cache_capacity);
         assert_eq!(

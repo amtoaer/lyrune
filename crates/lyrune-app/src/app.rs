@@ -10,7 +10,7 @@ use futures_util::{
 };
 use gpui::{prelude::*, *};
 use gpui_base::{
-    Slider as BaseSlider, SliderIndicator, SliderThumb, SliderTrack,
+    Slider as BaseSlider, SliderIndicator, SliderTrack,
     motion::{Transition, transition},
 };
 use gpui_component::{
@@ -56,9 +56,10 @@ use crate::mpris::{
 use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::settings::{
     AppSettings, CdnCacheStore, ColorThemeMode, DEFAULT_NAVIGATION_HISTORY_LIMIT, LibraryCache,
-    LyricFrameRate, MAX_IMAGE_CACHE_CAPACITY, MAX_NAVIGATION_HISTORY_LIMIT, PersistedLibraryView,
-    PersistedPlayback, PersistedQueueContinuation, PersistedWindowSize, SettingsStore,
-    TrayIconStyle, WindowDecoration, default_lyric_font_families, default_monospace_font_families,
+    LyricFrameRate, MAX_IMAGE_CACHE_CAPACITY, MAX_LYRIC_SCALE_PERCENT,
+    MAX_NAVIGATION_HISTORY_LIMIT, MIN_SCALE_PERCENT, PersistedLibraryView, PersistedPlayback,
+    PersistedQueueContinuation, PersistedWindowSize, SettingsStore, TrayIconStyle,
+    WindowDecoration, default_lyric_font_families, default_monospace_font_families,
     default_ui_font_families, parse_font_families,
 };
 use crate::singleflight::SingleFlight;
@@ -75,12 +76,14 @@ const ARTIST_PAGE_SIZE: u64 = 5;
 const ARTIST_ALBUM_PAGE_SIZE: u64 = 10;
 const SEARCH_PAGE_SIZE: usize = 20;
 const PROGRESS_TICK: Duration = Duration::from_millis(250);
+const PROGRESS_THUMB_RADIUS: Pixels = px(8.);
 const PLAYBACK_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
 const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const LYRIC_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
 const LYRIC_ROW_HEIGHT: f32 = 104.;
+const LYRIC_ANCHOR_OFFSET: f32 = 38.;
 const LYRIC_EDGE_FADE_DISTANCE: f32 = 48.;
 const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
@@ -233,6 +236,7 @@ struct LyricLayoutCacheSource {
     mid: String,
     compact: bool,
     narrow: bool,
+    scale: u32,
     font: Font,
 }
 
@@ -265,6 +269,8 @@ struct CachedLyricsPanel {
     mid: String,
     compact: bool,
     narrow: bool,
+    scale: u32,
+    row_height: Pixels,
     font: Font,
     render_radius: usize,
     render_start: usize,
@@ -279,6 +285,7 @@ struct PreparedLyricsElement {
     foreground: Hsla,
     position: Duration,
     translation_line_height: Pixels,
+    row_height: Pixels,
 }
 
 struct LyricMotionState {
@@ -407,6 +414,10 @@ fn lyric_frame_is_due(
     true
 }
 
+fn translation_line_height(narrow: bool, scale: f32) -> Pixels {
+    (if narrow { px(18.) } else { px(20.) }) * scale
+}
+
 fn lyric_line_opacity(anchor: usize, index: usize) -> f32 {
     match index.abs_diff(anchor) {
         0 => 1.,
@@ -437,24 +448,27 @@ fn lyric_edge_opacity(
 }
 
 impl PreparedLyricLine {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         line: &LyricLine,
         line_end: Duration,
         style: LyricLayoutStyle,
         compact: bool,
         narrow: bool,
+        scale: f32,
         configured_font: &Font,
         window: &Window,
     ) -> Self {
         let active = style == LyricLayoutStyle::Active;
-        let font_size = match (active, compact) {
-            (true, true) => px(24.),
-            (true, false) => px(28.),
-            (false, true) => px(17.),
-            (false, false) => px(19.),
-        };
-        let ruby_font_size = if narrow { px(11.) } else { px(12.) };
-        let ruby_line_height = if narrow { px(13.) } else { px(15.) };
+        let font_size = scale
+            * match (active, compact) {
+                (true, true) => px(24.),
+                (true, false) => px(28.),
+                (false, true) => px(17.),
+                (false, false) => px(19.),
+            };
+        let ruby_font_size = (if narrow { px(11.) } else { px(12.) }) * scale;
+        let ruby_line_height = (if narrow { px(13.) } else { px(15.) }) * scale;
         let mut font = configured_font.clone();
         font.weight = if active {
             FontWeight::BOLD
@@ -598,9 +612,9 @@ impl PreparedLyricLine {
 }
 
 impl PreparedLyricTranslation {
-    fn new(text: &str, narrow: bool, configured_font: &Font, window: &Window) -> Self {
-        let font_size = if narrow { px(13.) } else { px(14.) };
-        let line_height = if narrow { px(18.) } else { px(20.) };
+    fn new(text: &str, narrow: bool, scale: f32, configured_font: &Font, window: &Window) -> Self {
+        let font_size = (if narrow { px(13.) } else { px(14.) }) * scale;
+        let line_height = translation_line_height(narrow, scale);
         let mut font = configured_font.clone();
         font.weight = FontWeight::MEDIUM;
         let run = TextRun {
@@ -625,6 +639,7 @@ impl LyricLayoutCache {
         mid: &str,
         compact: bool,
         narrow: bool,
+        scale: u32,
         font: &Font,
     ) {
         let lyrics_identity = Arc::as_ptr(lyrics) as usize;
@@ -633,6 +648,7 @@ impl LyricLayoutCache {
                 && source.mid == mid
                 && source.compact == compact
                 && source.narrow == narrow
+                && source.scale == scale
                 && source.font == *font
         });
         if matches {
@@ -644,6 +660,7 @@ impl LyricLayoutCache {
             mid: mid.to_owned(),
             compact,
             narrow,
+            scale,
             font: font.clone(),
         });
         self.rows = (0..lyrics.lines.len())
@@ -665,6 +682,7 @@ impl LyricLayoutCache {
         style: LyricLayoutStyle,
         compact: bool,
         narrow: bool,
+        scale: f32,
         font: &Font,
         window: &Window,
     ) -> Arc<PreparedLyricLine> {
@@ -675,7 +693,7 @@ impl LyricLayoutCache {
         cached
             .get_or_insert_with(|| {
                 Arc::new(PreparedLyricLine::new(
-                    lyric, line_end, style, compact, narrow, font, window,
+                    lyric, line_end, style, compact, narrow, scale, font, window,
                 ))
             })
             .clone()
@@ -686,6 +704,7 @@ impl LyricLayoutCache {
         index: usize,
         lyric: &LyricLine,
         narrow: bool,
+        scale: f32,
         font: &Font,
         window: &Window,
     ) -> Option<Arc<PreparedLyricTranslation>> {
@@ -695,6 +714,7 @@ impl LyricLayoutCache {
                 Arc::new(PreparedLyricTranslation::new(
                     translation,
                     narrow,
+                    scale,
                     font,
                     window,
                 ))
@@ -911,7 +931,7 @@ impl Element for PreparedLyricsElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = px(self.rows.len() as f32 * LYRIC_ROW_HEIGHT).into();
+        style.size.height = (self.row_height * self.rows.len() as f32).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -965,9 +985,9 @@ impl Element for PreparedLyricsElement {
                 let row_bounds = Bounds::new(
                     point(
                         bounds.origin.x,
-                        bounds.origin.y + px(index as f32 * LYRIC_ROW_HEIGHT),
+                        bounds.origin.y + self.row_height * index as f32,
                     ),
-                    size(bounds.size.width, px(LYRIC_ROW_HEIGHT)),
+                    size(bounds.size.width, self.row_height),
                 );
                 if !row_bounds.intersects(&visible_bounds) {
                     continue;
@@ -2250,6 +2270,8 @@ pub struct LyruneView {
     audio_cache_limit_input: Entity<InputState>,
     image_cache_capacity_input: Entity<InputState>,
     navigation_history_limit_input: Entity<InputState>,
+    lyric_font_scale_input: Entity<InputState>,
+    lyric_line_spacing_input: Entity<InputState>,
     settings_scroll_handle: ScrollHandle,
     progress_slider: Entity<SliderState>,
     volume_slider: Entity<SliderState>,
@@ -2431,6 +2453,21 @@ impl LyruneView {
                 .min(1.)
                 .step(1.)
         });
+        let scale_input = |value: u32, window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(value.to_string())
+                    .mask_pattern(MaskPattern::Number {
+                        separator: None,
+                        fraction: None,
+                    })
+                    .validate(|value, _| value.parse::<u32>().is_ok())
+                    .min(MIN_SCALE_PERCENT as f64)
+                    .step(10.)
+            })
+        };
+        let lyric_font_scale_input = scale_input(settings.lyric_font_scale, window, cx);
+        let lyric_line_spacing_input = scale_input(settings.lyric_line_spacing, window, cx);
         let (load_more_sender, mut load_more_receiver) = mpsc::channel(1);
         let (track_event_sender, mut track_event_receiver) = mpsc::unbounded_channel();
         let track_table = cx.new(|cx| {
@@ -2490,6 +2527,24 @@ impl LyruneView {
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
                         this.apply_navigation_history_limit(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &lyric_font_scale_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_scale_settings(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &lyric_line_spacing_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_scale_settings(window, cx);
                     }
                 },
             ),
@@ -2596,6 +2651,8 @@ impl LyruneView {
             audio_cache_limit_input,
             image_cache_capacity_input,
             navigation_history_limit_input,
+            lyric_font_scale_input,
+            lyric_line_spacing_input,
             settings_scroll_handle: ScrollHandle::new(),
             progress_slider,
             volume_slider,
@@ -5665,6 +5722,44 @@ impl LyruneView {
         cx.notify();
     }
 
+    fn apply_scale_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let read = |input: &Entity<InputState>, current: u32, max: u32, cx: &mut Context<Self>| {
+            input
+                .read(cx)
+                .value()
+                .parse::<u32>()
+                .map_or(current, |value| value.clamp(MIN_SCALE_PERCENT, max))
+        };
+        let lyric = read(
+            &self.lyric_font_scale_input,
+            self.settings.lyric_font_scale,
+            MAX_LYRIC_SCALE_PERCENT,
+            cx,
+        );
+        let spacing = read(
+            &self.lyric_line_spacing_input,
+            self.settings.lyric_line_spacing,
+            MAX_LYRIC_SCALE_PERCENT,
+            cx,
+        );
+        for (input, value) in [
+            (&self.lyric_font_scale_input, lyric),
+            (&self.lyric_line_spacing_input, spacing),
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_value(value.to_string(), window, cx)
+            });
+        }
+        if lyric == self.settings.lyric_font_scale && spacing == self.settings.lyric_line_spacing {
+            return;
+        }
+
+        self.settings.lyric_font_scale = lyric;
+        self.settings.lyric_line_spacing = spacing;
+        self.persist_settings();
+        cx.notify();
+    }
+
     fn apply_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ui = parse_font_families(self.ui_font_input.read(cx).value().as_ref());
         let monospace = parse_font_families(self.monospace_font_input.read(cx).value().as_ref());
@@ -6879,6 +6974,28 @@ impl LyruneView {
                                             "最多保留的页面数量（包含当前页），缩小该数值会立即清理最早的历史页面",
                                             &self.navigation_history_limit_input,
                                             "页",
+                                            true,
+                                        )),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_4()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(div().font_medium().child("歌词字号与间距"))
+                                        .child(number_setting(
+                                            "歌词字号缩放",
+                                            "缩放主歌词、翻译与注音的文字大小，行高随之等比例调整",
+                                            &self.lyric_font_scale_input,
+                                            "%",
+                                            false,
+                                        ))
+                                        .child(number_setting(
+                                            "歌词行间距",
+                                            "调整歌词页相邻两行之间的距离",
+                                            &self.lyric_line_spacing_input,
+                                            "%",
                                             true,
                                         )),
                                 )
@@ -8595,8 +8712,13 @@ impl LyruneView {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let monospace_font = self.fonts.monospace.clone();
-        let percentage = self.progress_slider.read(cx).percentage().end;
         let duration = self.current_duration().unwrap_or_default();
+        let percentage =
+            if self.cover_backdrop_visible && self.seek_preview.is_none() && !duration.is_zero() {
+                progress_fraction(self.position, duration)
+            } else {
+                self.progress_slider.read(cx).percentage().end
+            };
         let interactive = has_track && self.playback_started && self.loading_track.is_none();
         let bar_color = theme.slider_bar;
         let thumb_color = theme.slider_thumb;
@@ -8636,31 +8758,55 @@ impl LyruneView {
                     .bg(theme.border)
                     .active(|this| this.bg(bar_color.opacity(0.35)))
                     .child(
-                        div()
-                            .absolute()
-                            .h_full()
-                            .left_0()
-                            .right(relative(1. - percentage))
-                            .bg(bar_color),
-                    )
-                    .when(has_track, |indicator| {
-                        indicator.child(
-                            SliderThumb::new(&self.progress_slider)
-                                .disabled(!interactive)
-                                .absolute()
-                                .top(px(-6.))
-                                .left(relative(percentage))
-                                .ml(-px(8.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .bg(bar_color.opacity(0.5))
-                                .size_4()
-                                .p(px(1.))
-                                .child(div().size_full().rounded_full().bg(thumb_color)),
+                        // Painted as paths because quads and layout snap to device pixels,
+                        // which makes slow progress advance in visible one-pixel steps.
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, _| {
+                                let x = bounds.left() + bounds.size.width * percentage;
+                                if x > bounds.left() {
+                                    let mut fill = PathBuilder::fill();
+                                    fill.add_polygon(
+                                        &[
+                                            bounds.origin,
+                                            point(x, bounds.top()),
+                                            point(x, bounds.bottom()),
+                                            bounds.bottom_left(),
+                                        ],
+                                        true,
+                                    );
+                                    if let Ok(path) = fill.build() {
+                                        window.paint_path(path, bar_color);
+                                    }
+                                }
+                                if has_track {
+                                    let center = point(x, bounds.center().y);
+                                    for (radius, color) in [
+                                        (PROGRESS_THUMB_RADIUS, bar_color.opacity(0.5)),
+                                        (PROGRESS_THUMB_RADIUS - px(1.), thumb_color),
+                                    ] {
+                                        let mut circle = PathBuilder::fill();
+                                        circle.move_to(point(center.x - radius, center.y));
+                                        for to in [center.x + radius, center.x - radius] {
+                                            circle.arc_to(
+                                                point(radius, radius),
+                                                px(0.),
+                                                false,
+                                                true,
+                                                point(to, center.y),
+                                            );
+                                        }
+                                        circle.close();
+                                        if let Ok(path) = circle.build() {
+                                            window.paint_path(path, color);
+                                        }
+                                    }
+                                }
+                            },
                         )
-                    }),
+                        .absolute()
+                        .size_full(),
+                    ),
             );
         let control = BaseSlider::new(&self.progress_slider)
             .disabled(!interactive)
@@ -8817,12 +8963,21 @@ impl LyruneView {
         }
 
         let lyric_font = self.fonts.lyrics.clone();
-        self.lyric_layout_cache
-            .reset_if_needed(&lyrics, mid, compact, narrow, &lyric_font);
+        let scale_percent = self.settings.lyric_font_scale;
+        let scale = scale_percent as f32 / 100.;
+        let row_height =
+            px(LYRIC_ROW_HEIGHT * scale * self.settings.lyric_line_spacing as f32 / 100.);
+        self.lyric_layout_cache.reset_if_needed(
+            &lyrics,
+            mid,
+            compact,
+            narrow,
+            scale_percent,
+            &lyric_font,
+        );
 
-        let render_radius = ((f32::from(window.viewport_size().height) * 0.65 / LYRIC_ROW_HEIGHT)
-            .ceil() as usize)
-            + 2;
+        let render_radius =
+            ((window.viewport_size().height * 0.65 / row_height).ceil() as usize) + 2;
         let anchor = lyrics.active_index(self.position).unwrap_or(0);
         let cache_needs_update = self.lyric_panel_frame_pending
             || self.cached_lyrics_panel.as_ref().is_none_or(|cache| {
@@ -8830,6 +8985,8 @@ impl LyruneView {
                     || cache.mid != mid
                     || cache.compact != compact
                     || cache.narrow != narrow
+                    || cache.scale != scale_percent
+                    || cache.row_height != row_height
                     || cache.font != lyric_font
                     || cache.render_radius != render_radius
             });
@@ -8840,7 +8997,7 @@ impl LyruneView {
                 self.cover_backdrop_visible && self.playback_is_advancing() && !cx.reduce_motion();
             let (scroll_anchor, style_anchor) =
                 self.lyric_motion_anchors(mid, anchor, motion_enabled, now);
-            let scroll_offset = px(scroll_anchor * LYRIC_ROW_HEIGHT);
+            let scroll_offset = row_height * scroll_anchor;
             let render_start = anchor.saturating_sub(render_radius);
             let render_end = (anchor + render_radius + 1).min(lyrics.lines.len());
             let highlight_position = lyric_position_for_frame_rate(
@@ -8877,6 +9034,7 @@ impl LyruneView {
                         LyricLayoutStyle::Normal,
                         compact,
                         narrow,
+                        scale,
                         &lyric_font,
                         window,
                     );
@@ -8887,6 +9045,7 @@ impl LyruneView {
                         LyricLayoutStyle::Active,
                         compact,
                         narrow,
+                        scale,
                         &lyric_font,
                         window,
                     );
@@ -8894,6 +9053,7 @@ impl LyruneView {
                         index,
                         line,
                         narrow,
+                        scale,
                         &lyric_font,
                         window,
                     );
@@ -8913,12 +9073,14 @@ impl LyruneView {
                 mid: mid.to_owned(),
                 compact,
                 narrow,
+                scale: scale_percent,
+                row_height,
                 font: lyric_font.clone(),
                 render_radius,
                 render_start,
                 scroll_offset,
                 highlight_position,
-                translation_line_height: if narrow { px(18.) } else { px(20.) },
+                translation_line_height: translation_line_height(narrow, scale),
                 rows,
             });
             self.lyric_panel_frame_pending = false;
@@ -8933,12 +9095,15 @@ impl LyruneView {
             .top(relative(0.44))
             .left_0()
             .right_0()
-            .mt(px(cached.render_start as f32 * LYRIC_ROW_HEIGHT) - cached.scroll_offset - px(38.))
+            .mt(cached.row_height * cached.render_start as f32
+                - cached.scroll_offset
+                - cached.row_height * (LYRIC_ANCHOR_OFFSET / LYRIC_ROW_HEIGHT))
             .child(PreparedLyricsElement {
                 rows: cached.rows.clone(),
                 foreground,
                 position: cached.highlight_position,
                 translation_line_height: cached.translation_line_height,
+                row_height: cached.row_height,
             })
             .into_any_element()
     }

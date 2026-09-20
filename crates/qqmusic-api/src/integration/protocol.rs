@@ -24,7 +24,11 @@ use super::{
 };
 
 const API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
+const MOBILE_SEARCH_API_URL: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const EVKEY_API_URL: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+const MOBILE_SEARCH_CLIENT_VERSION: u64 = 13_020_508;
+const MOBILE_SEARCH_QIMEI36: &str = "6c9d3cd110abca9b16311cee10001e717614";
+const MOBILE_SEARCH_UID: &str = "3931641530";
 const PROFILE_URL: &str = "https://c6.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg";
 const DEFAULT_STREAM_DOMAIN: &str = "http://dl.stream.qqmusic.qq.com/";
 const CDN_PROBE_BYTES: usize = 64 * 1024;
@@ -527,11 +531,11 @@ impl ProtocolClient {
         offset: u64,
         limit: u64,
     ) -> Result<SearchPage<Track>> {
+        let limit = limit.clamp(1, 50);
         let data = self
-            .search_data(credential, query, 0, offset, limit)
+            .mobile_search_data(credential, query, offset, limit)
             .await?;
-        parse_search_page(&data, "song", offset, parse_track)
-            .context("QQ 音乐单曲搜索结果格式发生了变化")
+        parse_mobile_search_songs(&data, offset, limit).context("QQ 音乐单曲搜索结果格式发生了变化")
     }
 
     pub async fn search_artists(
@@ -730,11 +734,8 @@ impl ProtocolClient {
                 method,
                 json!({
                     "dirId": 201,
-                    "tid": 0,
-                    "bFmtUtf8": true,
                     "v_songInfo": [{
                         "songId": song_id,
-                        "songType": track.song_type,
                     }],
                 }),
                 credential,
@@ -1178,6 +1179,89 @@ impl ProtocolClient {
         .with_context(|| format!("无法搜索 QQ 音乐中的“{}”", query.trim()))
     }
 
+    async fn mobile_search_data(
+        &self,
+        credential: &CredentialSession,
+        query: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Value> {
+        let current = credential.ensure_fresh().await?;
+        let page = offset / limit + 1;
+        let body = json!({
+            "comm": {
+                "ct": "11",
+                "cv": MOBILE_SEARCH_CLIENT_VERSION,
+                "v": MOBILE_SEARCH_CLIENT_VERSION,
+                "QIMEI36": MOBILE_SEARCH_QIMEI36,
+                "tmeAppID": "qqmusic",
+                "format": "json",
+                "inCharset": "utf-8",
+                "outCharset": "utf-8",
+                "uid": MOBILE_SEARCH_UID,
+                "qq": current.music_id.to_string(),
+                "authst": current.music_key.clone(),
+                "tmeLoginType": current.login_type.to_string(),
+            },
+            "req_0": {
+                "module": "music.search.SearchCgiService",
+                "method": "DoSearchForQQMusicMobile",
+                "param": {
+                    "searchid": get_search_id(),
+                    "query": query.trim(),
+                    "search_type": 0,
+                    "num_per_page": limit,
+                    "page_num": page,
+                    "highlight": 1,
+                    "grp": 1,
+                    "selectors": {},
+                    "vec_selectors": [],
+                },
+            },
+        });
+        let response = self
+            .client
+            .post(MOBILE_SEARCH_API_URL)
+            .header(COOKIE, current.cookie())
+            .header(REFERER, "https://y.qq.com/")
+            .header(
+                "User-Agent",
+                format!("QQMusic {MOBILE_SEARCH_CLIENT_VERSION}(android 10)"),
+            )
+            .json(&body)
+            .send()
+            .await
+            .context("QQ 音乐移动端搜索请求失败")?
+            .error_for_status()
+            .context("QQ 音乐移动端搜索请求被拒绝")?
+            .json::<Value>()
+            .await
+            .context("QQ 音乐移动端搜索响应不是有效 JSON")?;
+        let global_code = integer_field(&response, &["code"]).unwrap_or_default();
+        if global_code != 0 {
+            if is_credential_rejection_code(global_code) {
+                credential.revoke();
+                return Err(CredentialError::Rejected { code: global_code }.into());
+            }
+            bail!("QQ 音乐移动端搜索返回错误码 {global_code}");
+        }
+        let request = response
+            .get("req_0")
+            .context("QQ 音乐移动端搜索响应缺少 req_0")?;
+        let request_code = integer_field(request, &["code"]).unwrap_or_default();
+        if request_code != 0 {
+            if is_credential_rejection_code(request_code) {
+                credential.revoke();
+                return Err(CredentialError::Rejected { code: request_code }.into());
+            }
+            bail!("QQ 音乐移动端搜索返回错误码 {request_code}");
+        }
+        request
+            .get("data")
+            .cloned()
+            .context("QQ 音乐移动端搜索响应缺少 data")
+    }
+
     async fn fetch_encrypted_uin(&self, credential: &QqCredential) -> Result<String> {
         let response = self.fetch_legacy_profile(credential).await?;
         find_string_recursively(&response, &["encryptUin", "encrypt_uin"])
@@ -1446,6 +1530,38 @@ fn parse_track(value: &Value) -> Result<Track> {
 fn recommendation_tracks(data: &Value, keys: &[&str]) -> Result<Vec<Track>> {
     let values = find_array_recursively(data, keys).context("推荐结果缺少歌曲列表")?;
     values.iter().map(parse_track).collect()
+}
+
+fn parse_mobile_search_songs(data: &Value, offset: u64, limit: u64) -> Result<SearchPage<Track>> {
+    let items = data
+        .pointer("/body/item_song")
+        .and_then(Value::as_array)
+        .context("搜索结果缺少 item_song")?
+        .iter()
+        .map(parse_mobile_search_track)
+        .collect::<Result<Vec<_>>>()?;
+    let next_page = data
+        .get("meta")
+        .and_then(|meta| integer_field(meta, &["nextpage"]))
+        .filter(|page| *page > 0);
+    let has_more = next_page.is_some() && !items.is_empty();
+    let next_offset = if has_more {
+        (next_page.unwrap() - 1).saturating_mul(limit)
+    } else {
+        offset.saturating_add(items.len() as u64)
+    };
+    Ok(SearchPage {
+        items,
+        has_more,
+        next_offset,
+    })
+}
+
+fn parse_mobile_search_track(value: &Value) -> Result<Track> {
+    let mut track = parse_track(value)?;
+    let song_type = integer_field(value, &["type"]).unwrap_or_default();
+    track.song_type = if song_type == 1 { 0 } else { song_type };
+    Ok(track)
 }
 
 fn parse_search_page<T>(
@@ -2361,27 +2477,48 @@ mod tests {
 
     #[test]
     fn parses_each_qq_music_search_category() {
-        let song_page = parse_search_page(
+        let song_page = parse_mobile_search_songs(
             &json!({
-                "body": { "song": { "list": [{
+                "body": { "item_song": [{
+                    "id": 123,
+                    "type": 1,
                     "mid": "song-mid",
                     "title": "Song",
                     "interval": 180,
                     "singer": [{ "name": "Singer" }],
                     "album": { "name": "Album", "mid": "album-mid" },
                     "file": { "media_mid": "media-mid", "size_flac": 1024 }
-                }] } },
+                }, {
+                    "type": 13,
+                    "mid": "special-mid",
+                    "title": "Special Song"
+                }] },
                 "meta": { "nextpage": 2 }
             }),
-            "song",
             0,
-            parse_track,
+            20,
         )
         .unwrap();
+        assert_eq!(song_page.items[0].song_id, Some(123));
+        assert_eq!(song_page.items[0].song_type, 0);
         assert_eq!(song_page.items[0].mid, "song-mid");
         assert_eq!(song_page.items[0].media_mid.as_deref(), Some("media-mid"));
+        assert_eq!(song_page.items[1].song_type, 13);
         assert!(song_page.has_more);
-        assert_eq!(song_page.next_offset, 1);
+        assert_eq!(song_page.next_offset, 20);
+
+        let last_page = parse_mobile_search_songs(
+            &json!({
+                "body": { "item_song": [] },
+                "meta": { "nextpage": -1 }
+            }),
+            song_page.next_offset,
+            20,
+        )
+        .unwrap();
+        assert!(last_page.items.is_empty());
+        assert!(!last_page.has_more);
+        assert_eq!(last_page.next_offset, 20);
 
         let artist = parse_search_artist(&json!({
             "singerMID": "artist-mid",

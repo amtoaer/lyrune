@@ -8585,6 +8585,7 @@ impl LyruneView {
         let options = self
             .available_qualities
             .iter()
+            .rev()
             .copied()
             .map(|quality| {
                 Button::new(format!("quality-{}", quality.cache_id()))

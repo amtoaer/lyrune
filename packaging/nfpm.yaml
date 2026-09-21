@@ -1,0 +1,67 @@
+name: lyrune
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+release: 1
+maintainer: amtoaer <amtoaer@gmail.com>
+description: Fast native QQ Music desktop client built with Rust and GPUI
+vendor: Lyrune
+homepage: https://github.com/amtoaer/lyrune
+license: LicenseRef-Unknown
+section: sound
+priority: optional
+overrides:
+  deb:
+    depends:
+      - libc6 (>= ${GLIBC_VERSION})
+      - libasound2
+      - libfontconfig1
+      - libgcc-s1
+      - libglib2.0-0
+      - libwayland-client0
+      - libwayland-egl1
+      - libegl1
+      - libxcb1
+      - libxkbcommon0
+      - libxkbcommon-x11-0
+      - libvulkan1
+  rpm:
+    depends:
+      - glibc >= ${GLIBC_VERSION}
+      - alsa-lib
+      - fontconfig
+      - libgcc
+      - glib2
+      - libwayland-client
+      - libwayland-egl
+      - libglvnd-egl
+      - libxcb
+      - libxkbcommon
+      - libxkbcommon-x11
+      - vulkan-loader
+  archlinux:
+    depends:
+      - alsa-lib
+      - fontconfig
+      - gcc-libs
+      - glibc >= ${GLIBC_VERSION}
+      - libxcb
+      - libxkbcommon
+      - libxkbcommon-x11
+      - vulkan-icd-loader
+      - wayland
+contents:
+  - src: ${BINARY_DIR}/lyrune
+    dst: /usr/bin/lyrune
+    file_info:
+      mode: 0755
+  - src: packaging/linux/lyrune.desktop
+    dst: /usr/share/applications/lyrune.desktop
+  - src: packaging/linux/lyrune.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/lyrune.svg
+  - src: ${BINARY_DIR}/README.md
+    dst: /usr/share/doc/lyrune/README.md
+  - src: ${BINARY_DIR}/THIRD_PARTY_NOTICES.md
+    dst: /usr/share/doc/lyrune/THIRD_PARTY_NOTICES.md
+  - src: ${BINARY_DIR}/license-unknown.txt
+    dst: /usr/share/licenses/lyrune/license-unknown.txt

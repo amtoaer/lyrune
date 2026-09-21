@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Lyrune</title>
+  <desc id="desc">A musical note moving forward on three smooth sound trails.</desc>
+
+  <rect x="32" y="32" width="448" height="448" rx="112" fill="#313244"/>
+
+  <g fill="none" stroke-linecap="round" stroke-width="25">
+    <path d="M82 185h108c48 0 58-48 106-48h30" stroke="#89b4fa"/>
+    <path d="M82 248h102c50 0 62-48 112-48h30" stroke="#94e2d5"/>
+    <path d="M82 311h116c45 0 56-48 101-48h27" stroke="#fab387"/>
+  </g>
+
+  <path d="M307 139 421 108v70l-114 31Z" fill="#cdd6f4"/>
+  <path d="M307 165v188" fill="none" stroke="#cdd6f4" stroke-width="34" stroke-linecap="round"/>
+  <ellipse cx="264" cy="361" rx="61" ry="42" transform="rotate(-15 264 361)" fill="#cdd6f4"/>
+
+  <path d="m249 337 38 22-38 22Z" fill="#313244"/>
+  <path d="M383 219h47" fill="none" stroke="#f38ba8" stroke-width="25" stroke-linecap="round"/>
+</svg>

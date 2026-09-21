@@ -16,7 +16,6 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
-  RUST_VERSION: "1.97.0"
 
 jobs:
   validate:
@@ -57,9 +56,11 @@ jobs:
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             asset_arch: amd64
+            nfpm_download_arch: x86_64
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             asset_arch: arm64
+            nfpm_download_arch: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
@@ -87,8 +88,7 @@ jobs:
       - name: Install Rust
         shell: bash
         run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal --target "${{ matrix.target }}"
-          rustup override set "$RUST_VERSION"
+          rustup toolchain install --profile minimal --target "${{ matrix.target }}"
 
       - name: Restore Rust build cache
         uses: actions/cache@v5
@@ -114,7 +114,6 @@ jobs:
         run: |
           set -euo pipefail
           binary="target/$TARGET/release/lyrune"
-          strip --strip-unneeded "$binary"
 
           archive_name="lyrune-v$VERSION-linux-$ASSET_ARCH"
           archive_root="dist/$archive_name"
@@ -122,14 +121,38 @@ jobs:
           install -m755 "$binary" "$archive_root/lyrune"
           install -m644 README.md "$archive_root/README.md"
           install -m644 THIRD_PARTY_NOTICES.md "$archive_root/THIRD_PARTY_NOTICES.md"
-          install -m644 packaging/arch/license-unknown.txt "$archive_root/license-unknown.txt"
+          install -m644 packaging/linux/license-unknown.txt "$archive_root/license-unknown.txt"
           tar -C dist -czf "dist/$archive_name.tar.gz" "$archive_name"
+
+      - name: Install nFPM
+        shell: bash
+        env:
+          NFPM_DOWNLOAD_ARCH: ${{ matrix.nfpm_download_arch }}
+        run: |
+          set -euo pipefail
+          nfpm_dir="$RUNNER_TEMP/nfpm"
+          mkdir -p "$nfpm_dir"
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/nfpm.tar.gz" \
+            "https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_${NFPM_DOWNLOAD_ARCH}.tar.gz"
+          tar -xzf "$RUNNER_TEMP/nfpm.tar.gz" -C "$nfpm_dir"
+          echo "$nfpm_dir" >> "$GITHUB_PATH"
+
+      - name: Build deb, RPM and Arch packages
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+        run: packaging/build-packages.sh "$VERSION" "$ASSET_ARCH" dist
 
       - name: Upload Linux release assets
         uses: actions/upload-artifact@v7
         with:
           name: release-linux-${{ matrix.asset_arch }}
-          path: dist/lyrune-v${{ needs.validate.outputs.version }}-linux-${{ matrix.asset_arch }}.tar.gz
+          path: |
+            dist/lyrune-v${{ needs.validate.outputs.version }}-linux-${{ matrix.asset_arch }}.tar.gz
+            dist/lyrune-v${{ needs.validate.outputs.version }}-linux-${{ matrix.asset_arch }}.deb
+            dist/lyrune-v${{ needs.validate.outputs.version }}-linux-${{ matrix.asset_arch }}.rpm
+            dist/lyrune-v${{ needs.validate.outputs.version }}-linux-${{ matrix.asset_arch }}.pkg.tar.zst
           if-no-files-found: error
           retention-days: 7
 
@@ -226,9 +249,9 @@ jobs:
 
           appdir="AppDir"
           install -Dm755 "$binary" "$appdir/usr/bin/lyrune"
-          install -Dm644 packaging/arch/lyrune.desktop "$appdir/usr/share/applications/lyrune.desktop"
-          install -Dm644 packaging/arch/lyrune.desktop "$appdir/lyrune.desktop"
-          install -Dm644 crates/lyrune-app/assets/lyrune.svg \
+          install -Dm644 packaging/linux/lyrune.desktop "$appdir/usr/share/applications/lyrune.desktop"
+          install -Dm644 packaging/linux/lyrune.desktop "$appdir/lyrune.desktop"
+          install -Dm644 packaging/linux/lyrune.svg \
             "$appdir/usr/share/icons/hicolor/scalable/apps/lyrune.svg"
 
           # libraries loaded at runtime via dlopen, invisible to linuxdeploy's

@@ -6,7 +6,6 @@ resolver = "2"
 [workspace.package]
 version = "1.4.0"
 edition = "2024"
-rust-version = "1.97"
 publish = false
 
 [workspace.dependencies]
@@ -83,3 +82,15 @@ zbus_systemd = { version = "0.26100.0", default-features = false, features = ["l
 gpui = { git = "https://github.com/amtoaer/zed", rev = "f029275d696b0a87198e0c6c337712398682fb8a", version = "=0.2.2" }
 gpui_macros = { git = "https://github.com/amtoaer/zed", rev = "f029275d696b0a87198e0c6c337712398682fb8a" }
 gpui_platform = { git = "https://github.com/amtoaer/zed", rev = "f029275d696b0a87198e0c6c337712398682fb8a" }
+
+[workspace.metadata.release]
+release = false
+tag-message = ""
+tag-prefix = ""
+pre-release-commit-message = "chore: 发布 lyrune {{version}}"
+publish = false
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

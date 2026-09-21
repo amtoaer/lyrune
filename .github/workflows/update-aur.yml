@@ -1,0 +1,112 @@
+name: Update AUR
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  update-aur:
+    name: Update lyrune-bin
+    if: github.repository == 'amtoaer/lyrune' && !github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: aur-lyrune-bin
+      cancel-in-progress: false
+    steps:
+      - name: Generate PKGBUILD
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          staging_dir="$GITHUB_WORKSPACE/aur-staging"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tag must use the form vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+
+          rm -rf "$staging_dir"
+          mkdir -p "$staging_dir"
+          cat > "$staging_dir/PKGBUILD" <<'PKGBUILD'
+          # Maintainer: amtoaer <amtoaer@gmail.com>
+
+          _pkgname=lyrune
+          pkgname=lyrune-bin
+          pkgver=__VERSION__
+          pkgrel=1
+          pkgdesc='Fast native QQ Music desktop client built with Rust and GPUI (prebuilt binary)'
+          arch=('x86_64' 'aarch64')
+          url='https://github.com/amtoaer/lyrune'
+          license=('LicenseRef-Unknown')
+          options=('!debug' '!strip')
+          depends=(
+            'alsa-lib'
+            'fontconfig'
+            'gcc-libs'
+            'glib2'
+            'glibc'
+            'libxcb'
+            'libxkbcommon'
+            'libxkbcommon-x11'
+            'vulkan-driver'
+            'vulkan-icd-loader'
+            'wayland'
+          )
+          optdepends=('org.freedesktop.secrets: persist QQ Music credentials')
+          provides=("${_pkgname}=${pkgver}")
+          conflicts=("${_pkgname}")
+          source=(
+            "${_pkgname}.desktop"
+            "${_pkgname}.svg"
+          )
+          source_x86_64=(
+            "${_pkgname}-v${pkgver}-linux-amd64.tar.gz::${url}/releases/download/v${pkgver}/${_pkgname}-v${pkgver}-linux-amd64.tar.gz"
+          )
+          source_aarch64=(
+            "${_pkgname}-v${pkgver}-linux-arm64.tar.gz::${url}/releases/download/v${pkgver}/${_pkgname}-v${pkgver}-linux-arm64.tar.gz"
+          )
+          sha256sums=('SKIP' 'SKIP')
+          sha256sums_x86_64=('SKIP')
+          sha256sums_aarch64=('SKIP')
+
+          package() {
+            local asset_arch
+            case "${CARCH}" in
+              x86_64) asset_arch=amd64 ;;
+              aarch64) asset_arch=arm64 ;;
+            esac
+
+            local archive_root="${srcdir}/${_pkgname}-v${pkgver}-linux-${asset_arch}"
+            install -Dm755 "${archive_root}/${_pkgname}" \
+              "${pkgdir}/usr/bin/${_pkgname}"
+            install -Dm644 "${srcdir}/${_pkgname}.desktop" \
+              "${pkgdir}/usr/share/applications/${_pkgname}.desktop"
+            install -Dm644 "${srcdir}/${_pkgname}.svg" \
+              "${pkgdir}/usr/share/icons/hicolor/scalable/apps/${_pkgname}.svg"
+            install -Dm644 "${archive_root}/README.md" \
+              "${pkgdir}/usr/share/doc/${_pkgname}/README.md"
+            install -Dm644 "${archive_root}/THIRD_PARTY_NOTICES.md" \
+              "${pkgdir}/usr/share/doc/${_pkgname}/THIRD_PARTY_NOTICES.md"
+            install -Dm644 "${archive_root}/license-unknown.txt" \
+              "${pkgdir}/usr/share/licenses/${pkgname}/license-unknown.txt"
+          }
+          PKGBUILD
+          sed -i "s/__VERSION__/$version/" "$staging_dir/PKGBUILD"
+
+      - name: Publish package to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
+        with:
+          pkgname: lyrune-bin
+          pkgbuild: aur-staging/PKGBUILD
+          updpkgsums: true
+          test: true
+          commit_username: amtoaer
+          commit_email: amtoaer@gmail.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+          commit_message: "chore: 更新 lyrune-bin 至 ${{ github.event.release.tag_name }}"

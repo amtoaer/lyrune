@@ -3,6 +3,12 @@ name: Update AUR
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v1.4.0
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -10,7 +16,7 @@ permissions:
 jobs:
   update-aur:
     name: Update lyrune-bin
-    if: github.repository == 'amtoaer/lyrune' && !github.event.release.prerelease
+    if: github.repository == 'amtoaer/lyrune' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
     runs-on: ubuntu-24.04
     concurrency:
       group: aur-lyrune-bin
@@ -18,7 +24,7 @@ jobs:
     steps:
       - name: Generate PKGBUILD
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
         shell: bash
         run: |
           set -euo pipefail

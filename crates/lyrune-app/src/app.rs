@@ -46,7 +46,8 @@ use crate::icons::{MediaIcon, lyrune_icon, media_icon, media_icon_hsla};
 #[cfg(target_os = "linux")]
 use crate::inhibit::InhibitHandle;
 use crate::library::{
-    PlaylistListDelegate, TrackTableDelegate, TrackTableEvent, format_duration, playlist_cover,
+    PlaylistListDelegate, SearchCard, SearchCardGridDelegate, TrackTableDelegate, TrackTableEvent,
+    format_duration, playlist_cover,
 };
 use crate::lyrics_cache::LyricDiskCache;
 #[cfg(target_os = "linux")]
@@ -2258,6 +2259,7 @@ pub struct LyruneView {
     playlist_list: Entity<ListState<PlaylistListDelegate>>,
     track_table: Entity<TableState<TrackTableDelegate>>,
     search_track_table: Entity<TableState<TrackTableDelegate>>,
+    search_card_grid: Entity<ListState<SearchCardGridDelegate>>,
     search_input: Entity<InputState>,
     ui_font_input: Entity<InputState>,
     monospace_font_input: Entity<InputState>,
@@ -2465,6 +2467,7 @@ impl LyruneView {
         let lyric_line_spacing_input = scale_input(settings.lyric_line_spacing, window, cx);
         let (load_more_sender, mut load_more_receiver) = mpsc::channel(1);
         let (search_load_more_sender, mut search_load_more_receiver) = mpsc::channel(1);
+        let (search_card_load_more_sender, mut search_card_load_more_receiver) = mpsc::channel(1);
         let (track_event_sender, mut track_event_receiver) = mpsc::unbounded_channel();
         let track_table = cx.new(|cx| {
             TableState::new(
@@ -2480,7 +2483,7 @@ impl LyruneView {
             TableState::new(
                 TrackTableDelegate::new_with_header_style(
                     search_load_more_sender,
-                    track_event_sender,
+                    track_event_sender.clone(),
                     px(32.),
                     px(14.),
                 ),
@@ -2490,6 +2493,18 @@ impl LyruneView {
             .col_selectable(false)
             .col_movable(false)
             .sortable(false)
+        });
+        let search_card_grid = cx.new(|cx| {
+            ListState::new(
+                SearchCardGridDelegate::new(
+                    track_event_sender.clone(),
+                    search_card_load_more_sender,
+                ),
+                window,
+                cx,
+            )
+            .searchable(false)
+            .selectable(false)
         });
         let progress_slider = cx.new(|_| progress_slider_state(0.));
         let volume_slider = cx.new(|_| volume_slider_state(settings.volume));
@@ -2624,6 +2639,18 @@ impl LyruneView {
         })
         .detach();
 
+        cx.spawn(async move |this, cx| {
+            while search_card_load_more_receiver.recv().await.is_some() {
+                if this
+                    .update(cx, |this, cx| this.load_more_search(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = track_event_receiver.recv().await {
                 if this
@@ -2635,6 +2662,9 @@ impl LyruneView {
                             this.open_home_playlist(album.into_playlist(), window, cx)
                         }
                         TrackTableEvent::Unlike(track) => this.unlike_track(track, cx),
+                        TrackTableEvent::Playlist(playlist) => {
+                            this.open_home_playlist(playlist, window, cx)
+                        }
                     })
                     .is_err()
                 {
@@ -2677,6 +2707,7 @@ impl LyruneView {
             playlist_list,
             track_table,
             search_track_table,
+            search_card_grid,
             search_input,
             ui_font_input,
             monospace_font_input,
@@ -2785,13 +2816,14 @@ impl LyruneView {
             Some(cx.observe_window_appearance(window, |this, window, cx| {
                 this.apply_theme(window, cx)
             }));
-        self._window_subscription = Some(cx.observe_window_bounds(window, |this, window, _| {
+        self._window_subscription = Some(cx.observe_window_bounds(window, |this, window, cx| {
             let size = window.window_bounds().get_bounds().size;
             let width = f32::from(size.width).round() as u32;
             let height = f32::from(size.height).round() as u32;
             if width > 0 && height > 0 {
                 this.settings.window_size = Some(PersistedWindowSize { width, height });
             }
+            cx.notify();
         }));
         self.sync_progress_slider(window, cx);
         self.start_window_tick(window, cx);
@@ -8397,6 +8429,7 @@ impl LyruneView {
         compact: bool,
         narrow: bool,
         scale_factor: f32,
+        content_width: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -8446,7 +8479,6 @@ impl LyruneView {
             );
         let has_results = results.is_some();
         let mut content = v_flex().w_full();
-        let mut has_more = false;
         let mut is_empty = false;
         if let Some(results) = results {
             match self.search_category {
@@ -8486,50 +8518,109 @@ impl LyruneView {
                     );
                 }
                 SearchCategory::Artists => {
-                    let visible_count = self.search_visible_counts.get(active_category);
-                    let visible = visible_count.min(results.artists.items.len());
-                    has_more = results.artists.items.len() > visible || results.artists.has_more;
                     is_empty = results.artists.items.is_empty();
-                    content = content.child(self.render_search_cards(
-                        SearchCategory::Artists,
-                        results.artists.items[..visible].to_vec(),
-                        Vec::new(),
-                        Vec::new(),
-                        compact,
-                        scale_factor,
-                        cx,
-                    ));
+                    let cover_size = if compact { px(132.) } else { px(148.) };
+                    let card_width = cover_size + px(16.);
+                    let available_width =
+                        (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
+                    let columns = ((f32::from(available_width) + 16.)
+                        / (f32::from(card_width) + 16.))
+                        .floor() as usize;
+                    self.search_card_grid.update(cx, |list, cx| {
+                        if list.delegate_mut().set_cards(
+                            results
+                                .artists
+                                .items
+                                .iter()
+                                .cloned()
+                                .map(SearchCard::Artist)
+                                .collect(),
+                            columns,
+                            card_width,
+                            cover_size + px(62.),
+                            cover_size,
+                            scale_factor,
+                            results.artists.has_more,
+                            search_loading_more,
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                    content = v_flex()
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .child(List::new(&self.search_card_grid).size_full());
                 }
                 SearchCategory::Albums => {
-                    let visible_count = self.search_visible_counts.get(active_category);
-                    let visible = visible_count.min(results.albums.items.len());
-                    has_more = results.albums.items.len() > visible || results.albums.has_more;
                     is_empty = results.albums.items.is_empty();
-                    content = content.child(self.render_search_cards(
-                        SearchCategory::Albums,
-                        Vec::new(),
-                        results.albums.items[..visible].to_vec(),
-                        Vec::new(),
-                        compact,
-                        scale_factor,
-                        cx,
-                    ));
+                    let cover_size = if compact { px(132.) } else { px(148.) };
+                    let card_width = cover_size + px(16.);
+                    let available_width =
+                        (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
+                    let columns = ((f32::from(available_width) + 16.)
+                        / (f32::from(card_width) + 16.))
+                        .floor() as usize;
+                    self.search_card_grid.update(cx, |list, cx| {
+                        if list.delegate_mut().set_cards(
+                            results
+                                .albums
+                                .items
+                                .iter()
+                                .cloned()
+                                .map(SearchCard::Album)
+                                .collect(),
+                            columns,
+                            card_width,
+                            cover_size + px(74.),
+                            cover_size,
+                            scale_factor,
+                            results.albums.has_more,
+                            search_loading_more,
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                    content = v_flex()
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .child(List::new(&self.search_card_grid).size_full());
                 }
                 SearchCategory::Playlists => {
-                    let visible_count = self.search_visible_counts.get(active_category);
-                    let visible = visible_count.min(results.playlists.items.len());
-                    has_more =
-                        results.playlists.items.len() > visible || results.playlists.has_more;
                     is_empty = results.playlists.items.is_empty();
-                    content = content.child(self.render_search_cards(
-                        SearchCategory::Playlists,
-                        Vec::new(),
-                        Vec::new(),
-                        results.playlists.items[..visible].to_vec(),
-                        compact,
-                        scale_factor,
-                        cx,
-                    ));
+                    let cover_size = if compact { px(132.) } else { px(148.) };
+                    let card_width = cover_size + px(16.);
+                    let available_width =
+                        (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
+                    let columns = ((f32::from(available_width) + 16.)
+                        / (f32::from(card_width) + 16.))
+                        .floor() as usize;
+                    self.search_card_grid.update(cx, |list, cx| {
+                        if list.delegate_mut().set_cards(
+                            results
+                                .playlists
+                                .items
+                                .iter()
+                                .cloned()
+                                .map(SearchCard::Playlist)
+                                .collect(),
+                            columns,
+                            card_width,
+                            cover_size + px(74.),
+                            cover_size,
+                            scale_factor,
+                            results.playlists.has_more,
+                            search_loading_more,
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                    content = v_flex()
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .child(List::new(&self.search_card_grid).size_full());
                 }
             }
         }
@@ -8538,17 +8629,20 @@ impl LyruneView {
             && has_results
             && !is_empty
             && search_error.is_none();
-        let card_results_active =
-            active_category != SearchCategory::Songs && !search_loading && has_results && !is_empty;
+        let card_results_active = active_category != SearchCategory::Songs
+            && !search_loading
+            && has_results
+            && !is_empty
+            && search_error.is_none();
+        let virtual_list_active = song_list_active || card_results_active;
 
         let body_content = v_flex()
             .w_full()
-            .max_w(px(1120.))
             .mx_auto()
             .px(if narrow { px(20.) } else { px(32.) })
-            .when(song_list_active, |this| this.h_full().min_h_0())
+            .when(virtual_list_active, |this| this.h_full().min_h_0())
             .when(card_results_active, |this| this.pt(px(24.)))
-            .when(!song_list_active, |this| this.pb_8())
+            .when(!virtual_list_active, |this| this.pb_8())
             .gap_5()
             .when(search_loading, |this| {
                 this.child(
@@ -8614,22 +8708,8 @@ impl LyruneView {
                         .text_color(theme.danger)
                         .child(search_error.clone().unwrap_or_default()),
                 )
-            })
-            .when(has_more && !song_list_active, |this| {
-                this.child(
-                    h_flex().w_full().justify_center().pt_2().child(
-                        Button::new("load-more-search")
-                            .outline()
-                            .h(px(44.))
-                            .px_5()
-                            .label("加载更多")
-                            .loading(search_loading_more)
-                            .disabled(search_loading_more)
-                            .on_click(cx.listener(|this, _, _, cx| this.load_more_search(cx))),
-                    ),
-                )
             });
-        let body = if song_list_active {
+        let body = if virtual_list_active {
             div()
                 .flex_1()
                 .min_h_0()
@@ -8652,7 +8732,6 @@ impl LyruneView {
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(px(1120.))
                     .mx_auto()
                     .px(if narrow { px(20.) } else { px(32.) })
                     .pt(if narrow { px(12.) } else { px(16.) })
@@ -10205,7 +10284,13 @@ impl LyruneView {
         let sidebar = self.render_sidebar(window, cx);
         let page = match self.main_content {
             MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
-            MainContent::Search => self.render_search(compact, narrow, scale_factor, cx),
+            MainContent::Search => self.render_search(
+                compact,
+                narrow,
+                scale_factor,
+                window.viewport_size().width - sidebar_width,
+                cx,
+            ),
             MainContent::Artist => self.render_artist_content(compact, narrow, scale_factor, cx),
             MainContent::Playlist => {
                 self.render_playlist_content(compact, narrow, scale_factor, cx)

@@ -8468,24 +8468,34 @@ impl LyruneView {
             .min_h_0()
             .bg(theme.background)
             .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(1120.))
+                    .mx_auto()
+                    .px(if narrow { px(20.) } else { px(32.) })
+                    .pt(if narrow { px(20.) } else { px(28.) })
+                    .pb_3()
+                    .gap_5()
+                    .flex_shrink_0()
+                    .child(
+                        v_flex().child(
+                            div()
+                                .text_size(if narrow { px(22.) } else { px(24.) })
+                                .font_semibold()
+                                .child(format!("搜索“{}”", self.search_query)),
+                        ),
+                    )
+                    .child(h_flex().gap_1().children(tabs)),
+            )
+            .child(
                 div().flex_1().min_h_0().overflow_y_scrollbar().child(
                     v_flex()
                         .w_full()
                         .max_w(px(1120.))
                         .mx_auto()
                         .px(if narrow { px(20.) } else { px(32.) })
-                        .pt(if narrow { px(20.) } else { px(28.) })
                         .pb_8()
                         .gap_5()
-                        .child(
-                            v_flex().child(
-                                div()
-                                    .text_size(if narrow { px(22.) } else { px(24.) })
-                                    .font_semibold()
-                                    .child(format!("搜索“{}”", self.search_query)),
-                            ),
-                        )
-                        .child(h_flex().gap_1().children(tabs))
                         .when(search_loading, |this| {
                             this.child(
                                 v_flex()

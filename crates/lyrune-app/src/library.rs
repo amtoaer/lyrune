@@ -5,7 +5,7 @@ use crate::icons::{MediaIcon, media_icon_hsla};
 use gpui::{
     AnyElement, App, Context, Image, ImageFormat, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Window, div, img, prelude::FluentBuilder as _, px,
+    Styled as _, TextAlign, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, IndexPath, StyledExt as _, h_flex,
@@ -219,6 +219,8 @@ pub fn playlist_cover(
 
 pub struct TrackTableDelegate {
     columns: Vec<Column>,
+    header_height: Pixels,
+    header_text_padding: Pixels,
     tracks: Vec<Arc<Track>>,
     loading: bool,
     has_more: bool,
@@ -236,8 +238,19 @@ impl TrackTableDelegate {
         load_more_sender: mpsc::Sender<()>,
         event_sender: mpsc::UnboundedSender<TrackTableEvent>,
     ) -> Self {
+        Self::new_with_header_style(load_more_sender, event_sender, px(48.), px(6.))
+    }
+
+    pub fn new_with_header_style(
+        load_more_sender: mpsc::Sender<()>,
+        event_sender: mpsc::UnboundedSender<TrackTableEvent>,
+        header_height: Pixels,
+        header_text_padding: Pixels,
+    ) -> Self {
         Self {
             columns: track_columns(false),
+            header_height,
+            header_text_padding,
             tracks: Vec::new(),
             loading: false,
             has_more: false,
@@ -383,7 +396,7 @@ impl TableDelegate for TrackTableDelegate {
     ) -> Stateful<gpui::Div> {
         div()
             .id("track-table-header")
-            .h(px(48.))
+            .h(self.header_height)
             .mb(px(4.))
             .overflow_hidden()
             .border_b_1()
@@ -394,12 +407,22 @@ impl TableDelegate for TrackTableDelegate {
         &mut self,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let is_duration = self.columns[col_ix].key.as_ref() == "duration";
+        let content = if is_duration {
+            media_icon_hsla(MediaIcon::Clock, cx.theme().muted_foreground, px(18.))
+        } else {
+            self.columns[col_ix].name.clone().into_any_element()
+        };
         div()
             .size_full()
-            .pt(px(6.))
-            .child(self.columns[col_ix].name.clone())
+            .when(self.columns[col_ix].align == TextAlign::Right, |this| {
+                this.flex().justify_end().text_right()
+            })
+            .pt(self.header_text_padding)
+            .when(is_duration, |this| this.pr(px(8.)))
+            .child(content)
     }
 
     fn render_tr(

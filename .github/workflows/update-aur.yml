@@ -61,8 +61,8 @@ jobs:
           provides=("${_pkgname}=${pkgver}")
           conflicts=("${_pkgname}")
           source=(
-            "${_pkgname}.desktop"
-            "${_pkgname}.svg"
+            "${_pkgname}.desktop::https://raw.githubusercontent.com/amtoaer/lyrune/v${pkgver}/packaging/linux/${_pkgname}.desktop"
+            "${_pkgname}.svg::https://raw.githubusercontent.com/amtoaer/lyrune/v${pkgver}/packaging/linux/${_pkgname}.svg"
           )
           source_x86_64=(
             "${_pkgname}-v${pkgver}-linux-amd64.tar.gz::${url}/releases/download/v${pkgver}/${_pkgname}-v${pkgver}-linux-amd64.tar.gz"

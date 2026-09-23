@@ -7338,17 +7338,17 @@ impl LyruneView {
         };
         div()
             .min_h(if narrow {
-                px(190.)
+                px(182.)
             } else if compact {
-                px(214.)
+                px(206.)
             } else {
-                px(246.)
+                px(238.)
             })
             .w_full()
             .flex_shrink_0()
             .px(page_horizontal_padding(narrow))
             .pt_4()
-            .pb_5()
+            .pb_3()
             .child(
                 h_flex()
                     .w_full()
@@ -7543,16 +7543,16 @@ impl LyruneView {
 
         div()
             .min_h(if narrow {
-                px(190.)
+                px(182.)
             } else if compact {
-                px(214.)
+                px(206.)
             } else {
-                px(246.)
+                px(238.)
             })
             .w_full()
             .px(page_horizontal_padding(narrow))
             .pt_4()
-            .pb_5()
+            .pb_3()
             .child(
                 h_flex()
                     .w_full()

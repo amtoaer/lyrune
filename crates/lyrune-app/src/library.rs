@@ -307,6 +307,15 @@ impl ListDelegate for SearchCardGridDelegate {
         self.cards.len().div_ceil(self.columns.max(1))
     }
 
+    fn render_section_header(
+        &mut self,
+        _: usize,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) -> Option<impl IntoElement> {
+        Some(div().w_full().h(px(24.)))
+    }
+
     fn render_item(
         &mut self,
         index: IndexPath,

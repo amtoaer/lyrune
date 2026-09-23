@@ -97,6 +97,10 @@ const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
 const LYRIC_HORIZONTAL_STEP: f32 = 0.5;
 const TRANSLATION_ALIGNMENT_TOLERANCE: Duration = Duration::from_millis(500);
 
+fn page_horizontal_padding(narrow: bool) -> Pixels {
+    if narrow { px(20.) } else { px(24.) }
+}
+
 fn relative_luminance(color: Rgba) -> f32 {
     let linearize = |channel: f32| {
         if channel <= 0.04045 {
@@ -6918,7 +6922,7 @@ impl LyruneView {
                         .w_full()
                         .max_w(px(760.))
                         .gap_6()
-                        .px_6()
+                        .px(page_horizontal_padding(narrow))
                         .pt_8()
                         .pb_8()
                         .child(
@@ -7342,7 +7346,7 @@ impl LyruneView {
             })
             .w_full()
             .flex_shrink_0()
-            .px_6()
+            .px(page_horizontal_padding(narrow))
             .pt_4()
             .pb_5()
             .child(
@@ -7473,18 +7477,23 @@ impl LyruneView {
             .bg(theme.background)
             .child(self.render_playlist_header(compact, narrow, scale_factor, cx))
             .child(
-                div().flex_1().min_h_0().px_5().pb_4().child(
-                    div()
-                        .size_full()
-                        .overflow_hidden()
-                        .bg(theme.background)
-                        .child(
-                            DataTable::new(&self.track_table)
-                                .bordered(false)
-                                .stripe(false)
-                                .with_size(px(64.)),
-                        ),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .px(page_horizontal_padding(narrow))
+                    .pb_4()
+                    .child(
+                        div()
+                            .size_full()
+                            .overflow_hidden()
+                            .bg(theme.background)
+                            .child(
+                                DataTable::new(&self.track_table)
+                                    .bordered(false)
+                                    .stripe(false)
+                                    .with_size(px(64.)),
+                            ),
+                    ),
             )
             .into_any_element()
     }
@@ -7533,7 +7542,7 @@ impl LyruneView {
                 });
 
         div()
-            .h(if narrow {
+            .min_h(if narrow {
                 px(190.)
             } else if compact {
                 px(214.)
@@ -7541,12 +7550,12 @@ impl LyruneView {
                 px(246.)
             })
             .w_full()
-            .px_6()
+            .px(page_horizontal_padding(narrow))
             .pt_4()
             .pb_5()
             .child(
                 h_flex()
-                    .size_full()
+                    .w_full()
                     .items_end()
                     .gap(if narrow {
                         px(16.)
@@ -7578,18 +7587,18 @@ impl LyruneView {
                                 div()
                                     .truncate()
                                     .text_size(if narrow {
-                                        px(34.)
+                                        px(28.)
                                     } else if compact {
-                                        px(40.)
+                                        px(34.)
                                     } else {
-                                        px(52.)
+                                        px(44.)
                                     })
                                     .line_height(if narrow {
-                                        px(45.)
+                                        px(36.)
                                     } else if compact {
-                                        px(52.)
+                                        px(44.)
                                     } else {
-                                        px(68.)
+                                        px(56.)
                                     })
                                     .font_semibold()
                                     .child(artist.name),
@@ -7775,7 +7784,7 @@ impl LyruneView {
                         .child(
                             v_flex()
                                 .w_full()
-                                .px(if narrow { px(20.) } else { px(24.) })
+                                .px(page_horizontal_padding(narrow))
                                 .pb_10()
                                 .gap_10()
                                 .child(
@@ -8066,7 +8075,7 @@ impl LyruneView {
             .child(
                 v_flex()
                     .w_full()
-                    .px(if narrow { px(20.) } else { px(28.) })
+                    .px(page_horizontal_padding(narrow))
                     .pt(if narrow { px(22.) } else { px(32.) })
                     .pb_8()
                     .child(
@@ -8690,7 +8699,7 @@ impl LyruneView {
         let body_content = v_flex()
             .w_full()
             .mx_auto()
-            .px(if narrow { px(20.) } else { px(32.) })
+            .px(page_horizontal_padding(narrow))
             .when(virtual_list_active, |this| this.h_full().min_h_0())
             .when(!virtual_list_active, |this| this.pb_8())
             .gap_5()
@@ -8783,7 +8792,7 @@ impl LyruneView {
                 v_flex()
                     .w_full()
                     .mx_auto()
-                    .px(if narrow { px(20.) } else { px(32.) })
+                    .px(page_horizontal_padding(narrow))
                     .pt_2()
                     .pb_3()
                     .flex_shrink_0()

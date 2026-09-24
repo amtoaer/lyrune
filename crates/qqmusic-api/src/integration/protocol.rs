@@ -24,6 +24,11 @@ use super::{
 };
 
 const API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
+const MOBILE_SEARCH_API_URL: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+const EVKEY_API_URL: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+const MOBILE_SEARCH_CLIENT_VERSION: u64 = 13_020_508;
+const MOBILE_SEARCH_QIMEI36: &str = "6c9d3cd110abca9b16311cee10001e717614";
+const MOBILE_SEARCH_UID: &str = "3931641530";
 const PROFILE_URL: &str = "https://c6.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg";
 const DEFAULT_STREAM_DOMAIN: &str = "http://dl.stream.qqmusic.qq.com/";
 const CDN_PROBE_BYTES: usize = 64 * 1024;
@@ -526,11 +531,11 @@ impl ProtocolClient {
         offset: u64,
         limit: u64,
     ) -> Result<SearchPage<Track>> {
+        let limit = limit.clamp(1, 50);
         let data = self
-            .search_data(credential, query, 0, offset, limit)
+            .mobile_search_data(credential, query, offset, limit)
             .await?;
-        parse_search_page(&data, "song", offset, parse_track)
-            .context("QQ 音乐单曲搜索结果格式发生了变化")
+        parse_mobile_search_songs(&data, offset, limit).context("QQ 音乐单曲搜索结果格式发生了变化")
     }
 
     pub async fn search_artists(
@@ -729,11 +734,8 @@ impl ProtocolClient {
                 method,
                 json!({
                     "dirId": 201,
-                    "tid": 0,
-                    "bFmtUtf8": true,
                     "v_songInfo": [{
                         "songId": song_id,
-                        "songType": track.song_type,
                     }],
                 }),
                 credential,
@@ -830,8 +832,17 @@ impl ProtocolClient {
         credential: &CredentialSession,
         track: &Track,
     ) -> Result<Vec<PlaybackOption>> {
-        self.playback_options_for(credential, track, &Quality::ALL)
-            .await
+        let normal = self
+            .playback_options_for(credential, track, &Quality::ALL)
+            .await;
+        match normal {
+            Ok(options) if !options.is_empty() => Ok(options),
+            Ok(_) => self.encrypted_playback_options(credential, track).await,
+            Err(error) => self
+                .encrypted_playback_options(credential, track)
+                .await
+                .map_err(|_| error),
+        }
     }
 
     async fn playback_options_for(
@@ -855,7 +866,11 @@ impl ProtocolClient {
             .map(|(_, filename)| filename.clone())
             .collect::<Vec<_>>();
         let song_mid = vec![track.mid.clone(); requests.len()];
-        let song_type = vec![0; requests.len()];
+        eprintln!(
+            "请求 QQ 音乐播放地址：{} (mid={}, song_type={})",
+            track.title, track.mid, track.song_type
+        );
+        let song_type = vec![track.song_type; requests.len()];
         let data = self
             .call_with_session(
                 "music.vkey.GetVkey",
@@ -901,6 +916,129 @@ impl ProtocolClient {
                     quality,
                     url,
                     fallback_urls,
+                    encrypted: false,
+                    ekey: None,
+                })
+            })
+            .collect())
+    }
+
+    async fn encrypted_playback_options(
+        &self,
+        credential: &CredentialSession,
+        track: &Track,
+    ) -> Result<Vec<PlaybackOption>> {
+        let current = credential.ensure_fresh().await?;
+        let media_mid = track.media_mid.as_deref().unwrap_or(&track.mid);
+        let candidates = [
+            (Quality::Master, "AIM0", ".mflac"),
+            (Quality::AtmosStereo, "Q0M0", ".mflac"),
+            (Quality::AtmosSurround, "Q0M1", ".mflac"),
+            (Quality::Lossless, "F0M0", ".mflac"),
+            (Quality::Lossless, "O8M1", ".mgg"),
+            (Quality::Lossless, "O8M0", ".mgg"),
+            (Quality::High, "O6M0", ".mgg"),
+            (Quality::Standard, "O4M0", ".mgg"),
+        ];
+        let requests = candidates
+            .into_iter()
+            .filter(|(quality, _, _)| track.metadata_allows_quality(*quality))
+            .collect::<Vec<_>>();
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let filename = requests
+            .iter()
+            .map(|(_, prefix, extension)| format!("{prefix}{media_mid}{extension}"))
+            .collect::<Vec<_>>();
+        let count = filename.len();
+        let body = json!({
+            "comm": {
+                "authst": current.music_key.clone(),
+                "ct": "19",
+                "cv": "1859",
+                "uin": current.music_id.to_string(),
+                "tmeLoginType": "3",
+            },
+            "req_1": {
+                "module": "music.vkey.GetEVkey",
+                "method": "CgiGetEVkey",
+                "param": {
+                    "filename": filename,
+                    "guid": "10000",
+                    "songmid": vec![media_mid; count],
+                    "songtype": vec![1_u8; count],
+                    "uin": current.music_id.to_string(),
+                    "loginflag": 1,
+                    "platform": "27",
+                    "ctx": 1,
+                },
+            },
+        });
+        let response = self
+            .client
+            .post(EVKEY_API_URL)
+            .header(REFERER, "https://y.qq.com/")
+            .header(COOKIE, current.cookie())
+            .json(&body)
+            .send()
+            .await
+            .context("QQ 音乐加密播放地址请求失败")?
+            .error_for_status()
+            .context("QQ 音乐加密播放地址被拒绝")?
+            .json::<Value>()
+            .await
+            .context("QQ 音乐加密播放地址不是有效 JSON")?;
+        let top_code = integer_field(&response, &["code"]).unwrap_or_default();
+        if top_code != 0 {
+            bail!("QQ 音乐加密播放接口返回错误码 {top_code}");
+        }
+        let request = response
+            .get("req_1")
+            .context("QQ 音乐加密播放响应缺少 req_1")?;
+        let request_code = integer_field(request, &["code"]).unwrap_or_default();
+        if request_code != 0 {
+            bail!("QQ 音乐加密播放接口返回错误码 {request_code}");
+        }
+        let entries = request
+            .get("data")
+            .and_then(|data| data.get("midurlinfo"))
+            .and_then(Value::as_array)
+            .context("QQ 音乐加密播放响应缺少 midurlinfo")?;
+        let mut domains = self.cached_cdn_domains().await;
+        append_unique_domains(
+            &mut domains,
+            request
+                .get("data")
+                .map(playback_stream_domains)
+                .unwrap_or_default(),
+        );
+        append_unique_domain(&mut domains, DEFAULT_STREAM_DOMAIN);
+        let mut seen = HashSet::new();
+        Ok(entries
+            .iter()
+            .filter_map(|entry| {
+                if integer_field(entry, &["result"]).is_some_and(|code| code != 0) {
+                    return None;
+                }
+                let purl = string_field(entry, &["purl", "wifiurl"])
+                    .filter(|value| !value.trim().is_empty())?;
+                let filename = string_field(entry, &["filename"]).unwrap_or_default();
+                let quality =
+                    encrypted_path_quality(&filename).or_else(|| encrypted_path_quality(&purl))?;
+                if !seen.insert(quality) {
+                    return None;
+                }
+                let ekey = string_field(entry, &["ekey"]).filter(|value| !value.is_empty())?;
+                let mut urls = playback_urls(&domains, &purl);
+                let url = urls.first()?.clone();
+                let fallback_urls = urls.drain(1..).collect();
+                Some(PlaybackOption {
+                    quality,
+                    url,
+                    fallback_urls,
+                    encrypted: true,
+                    ekey: Some(ekey),
                 })
             })
             .collect())
@@ -1039,6 +1177,89 @@ impl ProtocolClient {
         )
         .await
         .with_context(|| format!("无法搜索 QQ 音乐中的“{}”", query.trim()))
+    }
+
+    async fn mobile_search_data(
+        &self,
+        credential: &CredentialSession,
+        query: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Value> {
+        let current = credential.ensure_fresh().await?;
+        let page = offset / limit + 1;
+        let body = json!({
+            "comm": {
+                "ct": "11",
+                "cv": MOBILE_SEARCH_CLIENT_VERSION,
+                "v": MOBILE_SEARCH_CLIENT_VERSION,
+                "QIMEI36": MOBILE_SEARCH_QIMEI36,
+                "tmeAppID": "qqmusic",
+                "format": "json",
+                "inCharset": "utf-8",
+                "outCharset": "utf-8",
+                "uid": MOBILE_SEARCH_UID,
+                "qq": current.music_id.to_string(),
+                "authst": current.music_key.clone(),
+                "tmeLoginType": current.login_type.to_string(),
+            },
+            "req_0": {
+                "module": "music.search.SearchCgiService",
+                "method": "DoSearchForQQMusicMobile",
+                "param": {
+                    "searchid": get_search_id(),
+                    "query": query.trim(),
+                    "search_type": 0,
+                    "num_per_page": limit,
+                    "page_num": page,
+                    "highlight": 1,
+                    "grp": 1,
+                    "selectors": {},
+                    "vec_selectors": [],
+                },
+            },
+        });
+        let response = self
+            .client
+            .post(MOBILE_SEARCH_API_URL)
+            .header(COOKIE, current.cookie())
+            .header(REFERER, "https://y.qq.com/")
+            .header(
+                "User-Agent",
+                format!("QQMusic {MOBILE_SEARCH_CLIENT_VERSION}(android 10)"),
+            )
+            .json(&body)
+            .send()
+            .await
+            .context("QQ 音乐移动端搜索请求失败")?
+            .error_for_status()
+            .context("QQ 音乐移动端搜索请求被拒绝")?
+            .json::<Value>()
+            .await
+            .context("QQ 音乐移动端搜索响应不是有效 JSON")?;
+        let global_code = integer_field(&response, &["code"]).unwrap_or_default();
+        if global_code != 0 {
+            if is_credential_rejection_code(global_code) {
+                credential.revoke();
+                return Err(CredentialError::Rejected { code: global_code }.into());
+            }
+            bail!("QQ 音乐移动端搜索返回错误码 {global_code}");
+        }
+        let request = response
+            .get("req_0")
+            .context("QQ 音乐移动端搜索响应缺少 req_0")?;
+        let request_code = integer_field(request, &["code"]).unwrap_or_default();
+        if request_code != 0 {
+            if is_credential_rejection_code(request_code) {
+                credential.revoke();
+                return Err(CredentialError::Rejected { code: request_code }.into());
+            }
+            bail!("QQ 音乐移动端搜索返回错误码 {request_code}");
+        }
+        request
+            .get("data")
+            .cloned()
+            .context("QQ 音乐移动端搜索响应缺少 data")
     }
 
     async fn fetch_encrypted_uin(&self, credential: &QqCredential) -> Result<String> {
@@ -1309,6 +1530,38 @@ fn parse_track(value: &Value) -> Result<Track> {
 fn recommendation_tracks(data: &Value, keys: &[&str]) -> Result<Vec<Track>> {
     let values = find_array_recursively(data, keys).context("推荐结果缺少歌曲列表")?;
     values.iter().map(parse_track).collect()
+}
+
+fn parse_mobile_search_songs(data: &Value, offset: u64, limit: u64) -> Result<SearchPage<Track>> {
+    let items = data
+        .pointer("/body/item_song")
+        .and_then(Value::as_array)
+        .context("搜索结果缺少 item_song")?
+        .iter()
+        .map(parse_mobile_search_track)
+        .collect::<Result<Vec<_>>>()?;
+    let next_page = data
+        .get("meta")
+        .and_then(|meta| integer_field(meta, &["nextpage"]))
+        .filter(|page| *page > 0);
+    let has_more = next_page.is_some() && !items.is_empty();
+    let next_offset = if has_more {
+        (next_page.unwrap() - 1).saturating_mul(limit)
+    } else {
+        offset.saturating_add(items.len() as u64)
+    };
+    Ok(SearchPage {
+        items,
+        has_more,
+        next_offset,
+    })
+}
+
+fn parse_mobile_search_track(value: &Value) -> Result<Track> {
+    let mut track = parse_track(value)?;
+    let song_type = integer_field(value, &["type"]).unwrap_or_default();
+    track.song_type = if song_type == 1 { 0 } else { song_type };
+    Ok(track)
 }
 
 fn parse_search_page<T>(
@@ -1628,6 +1881,29 @@ fn playback_path_matches_quality(path: &str, quality: Quality) -> bool {
         .unwrap_or_default();
     let (prefix, extension) = quality.file_parts();
     filename.starts_with(prefix) && filename.ends_with(extension)
+}
+
+fn encrypted_path_quality(path: &str) -> Option<Quality> {
+    let filename = path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    [
+        ("AIM0", Quality::Master),
+        ("Q0M0", Quality::AtmosStereo),
+        ("Q0M1", Quality::AtmosSurround),
+        ("F0M0", Quality::Lossless),
+        ("O8M1", Quality::Lossless),
+        ("O8M0", Quality::Lossless),
+        ("O6M0", Quality::High),
+        ("O4M0", Quality::Standard),
+    ]
+    .into_iter()
+    .find_map(|(prefix, quality)| filename.starts_with(prefix).then_some(quality))
 }
 
 fn playback_entry_succeeded(entry: &Value) -> bool {
@@ -2201,27 +2477,48 @@ mod tests {
 
     #[test]
     fn parses_each_qq_music_search_category() {
-        let song_page = parse_search_page(
+        let song_page = parse_mobile_search_songs(
             &json!({
-                "body": { "song": { "list": [{
+                "body": { "item_song": [{
+                    "id": 123,
+                    "type": 1,
                     "mid": "song-mid",
                     "title": "Song",
                     "interval": 180,
                     "singer": [{ "name": "Singer" }],
                     "album": { "name": "Album", "mid": "album-mid" },
                     "file": { "media_mid": "media-mid", "size_flac": 1024 }
-                }] } },
+                }, {
+                    "type": 13,
+                    "mid": "special-mid",
+                    "title": "Special Song"
+                }] },
                 "meta": { "nextpage": 2 }
             }),
-            "song",
             0,
-            parse_track,
+            20,
         )
         .unwrap();
+        assert_eq!(song_page.items[0].song_id, Some(123));
+        assert_eq!(song_page.items[0].song_type, 0);
         assert_eq!(song_page.items[0].mid, "song-mid");
         assert_eq!(song_page.items[0].media_mid.as_deref(), Some("media-mid"));
+        assert_eq!(song_page.items[1].song_type, 13);
         assert!(song_page.has_more);
-        assert_eq!(song_page.next_offset, 1);
+        assert_eq!(song_page.next_offset, 20);
+
+        let last_page = parse_mobile_search_songs(
+            &json!({
+                "body": { "item_song": [] },
+                "meta": { "nextpage": -1 }
+            }),
+            song_page.next_offset,
+            20,
+        )
+        .unwrap();
+        assert!(last_page.items.is_empty());
+        assert!(!last_page.has_more);
+        assert_eq!(last_page.next_offset, 20);
 
         let artist = parse_search_artist(&json!({
             "singerMID": "artist-mid",

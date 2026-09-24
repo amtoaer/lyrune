@@ -494,6 +494,8 @@ pub struct PlaybackOption {
     pub quality: Quality,
     pub url: String,
     pub fallback_urls: Vec<String>,
+    pub encrypted: bool,
+    pub ekey: Option<String>,
 }
 
 impl PlaybackOption {

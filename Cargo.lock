@@ -4015,6 +4015,7 @@ dependencies = [
  "ksni",
  "mpris-server",
  "netease-qq-music-api",
+ "qmc-decrypt",
  "quick-xml",
  "reqwest",
  "resvg 0.46.0",
@@ -5520,6 +5521,13 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qmc-decrypt"
+version = "1.4.0"
+dependencies = [
+ "base64",
+]
 
 [[package]]
 name = "qoi"

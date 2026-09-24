@@ -90,6 +90,18 @@ tag-prefix = ""
 pre-release-commit-message = "chore: 发布 lyrune {{version}}"
 publish = false
 
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."gpui"]
+opt-level = 2
+
+[profile.dev.package."gpui-component"]
+opt-level = 2
+
+[profile.dev.package."gpui-base"]
+opt-level = 2
+
 [profile.release]
 strip = true
 lto = "thin"

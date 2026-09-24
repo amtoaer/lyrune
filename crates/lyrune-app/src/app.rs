@@ -46,7 +46,8 @@ use crate::icons::{MediaIcon, lyrune_icon, media_icon, media_icon_hsla};
 #[cfg(target_os = "linux")]
 use crate::inhibit::InhibitHandle;
 use crate::library::{
-    PlaylistListDelegate, TrackTableDelegate, TrackTableEvent, format_duration, playlist_cover,
+    PlaylistListDelegate, SearchCard, SearchCardGridDelegate, TrackTableDelegate, TrackTableEvent,
+    format_duration, playlist_cover,
 };
 use crate::lyrics_cache::LyricDiskCache;
 #[cfg(target_os = "linux")]
@@ -95,6 +96,10 @@ const LYRIC_DARK_TEXT_LUMINANCE: f32 = 0.25;
 const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
 const LYRIC_HORIZONTAL_STEP: f32 = 0.5;
 const TRANSLATION_ALIGNMENT_TOLERANCE: Duration = Duration::from_millis(500);
+
+fn page_horizontal_padding(narrow: bool) -> Pixels {
+    if narrow { px(20.) } else { px(24.) }
+}
 
 fn relative_luminance(color: Rgba) -> f32 {
     let linearize = |channel: f32| {
@@ -1934,12 +1939,6 @@ impl PageResourceCache {
     }
 }
 
-#[derive(Clone, Copy)]
-enum SongRowSource {
-    Search,
-    Artist,
-}
-
 fn insert_track_after_current(
     tracks: &mut Vec<Arc<Track>>,
     current_index: Option<usize>,
@@ -2002,6 +2001,7 @@ enum NavigationPage {
         query: String,
         category: SearchCategory,
         visible_counts: SearchVisibleCounts,
+        scroll_offsets: [Pixels; 4],
         resource: Option<SharedSearchResource>,
     },
     Artist {
@@ -2256,6 +2256,8 @@ pub struct LyruneView {
     search_resource: Option<SharedSearchResource>,
     search_visible_counts: SearchVisibleCounts,
     search_category: SearchCategory,
+    search_scroll_offsets: [Pixels; 4],
+    pending_search_scroll: bool,
     selected_artist: Option<SearchArtist>,
     artist_resource: Option<SharedArtistResource>,
     artist_visible_song_count: usize,
@@ -2263,6 +2265,8 @@ pub struct LyruneView {
 
     playlist_list: Entity<ListState<PlaylistListDelegate>>,
     track_table: Entity<TableState<TrackTableDelegate>>,
+    search_track_table: Entity<TableState<TrackTableDelegate>>,
+    search_card_grid: Entity<ListState<SearchCardGridDelegate>>,
     search_input: Entity<InputState>,
     ui_font_input: Entity<InputState>,
     monospace_font_input: Entity<InputState>,
@@ -2469,10 +2473,12 @@ impl LyruneView {
         let lyric_font_scale_input = scale_input(settings.lyric_font_scale, window, cx);
         let lyric_line_spacing_input = scale_input(settings.lyric_line_spacing, window, cx);
         let (load_more_sender, mut load_more_receiver) = mpsc::channel(1);
+        let (search_load_more_sender, mut search_load_more_receiver) = mpsc::channel(1);
+        let (search_card_load_more_sender, mut search_card_load_more_receiver) = mpsc::channel(1);
         let (track_event_sender, mut track_event_receiver) = mpsc::unbounded_channel();
         let track_table = cx.new(|cx| {
             TableState::new(
-                TrackTableDelegate::new(load_more_sender, track_event_sender),
+                TrackTableDelegate::new(load_more_sender, track_event_sender.clone()),
                 window,
                 cx,
             )
@@ -2480,18 +2486,54 @@ impl LyruneView {
             .col_movable(false)
             .sortable(false)
         });
+        let search_track_table = cx.new(|cx| {
+            TableState::new(
+                TrackTableDelegate::new_with_header_style(
+                    search_load_more_sender,
+                    track_event_sender.clone(),
+                    px(32.),
+                    px(14.),
+                ),
+                window,
+                cx,
+            )
+            .col_selectable(false)
+            .col_movable(false)
+            .sortable(false)
+        });
+        let search_card_grid = cx.new(|cx| {
+            ListState::new(
+                SearchCardGridDelegate::new(
+                    track_event_sender.clone(),
+                    search_card_load_more_sender,
+                ),
+                window,
+                cx,
+            )
+            .searchable(false)
+            .selectable(false)
+        });
         let progress_slider = cx.new(|_| progress_slider_state(0.));
         let volume_slider = cx.new(|_| volume_slider_state(settings.volume));
         let image_cache = CachedImageCache::new(settings.image_cache_capacity, cx);
         let subscriptions = vec![
-            cx.subscribe(&playlist_list, |this, _, event: &ListEvent, cx| {
-                if let ListEvent::Select(index) | ListEvent::Confirm(index) = event {
-                    this.select_playlist(index.row, cx);
-                }
-            }),
+            cx.subscribe_in(
+                &playlist_list,
+                window,
+                |this, _, event: &ListEvent, window, cx| {
+                    if let ListEvent::Select(index) | ListEvent::Confirm(index) = event {
+                        this.select_playlist(index.row, window, cx);
+                    }
+                },
+            ),
             cx.subscribe(&track_table, |this, _, event: &TableEvent, cx| {
                 if let TableEvent::DoubleClickedRow(index) = event {
                     this.select_track(*index, cx);
+                }
+            }),
+            cx.subscribe(&search_track_table, |this, _, event: &TableEvent, cx| {
+                if let TableEvent::DoubleClickedRow(index) = event {
+                    this.select_search_track(*index, cx);
                 }
             }),
             cx.subscribe_in(
@@ -2592,6 +2634,30 @@ impl LyruneView {
         })
         .detach();
 
+        cx.spawn(async move |this, cx| {
+            while search_load_more_receiver.recv().await.is_some() {
+                if this
+                    .update(cx, |this, cx| this.load_more_search(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(async move |this, cx| {
+            while search_card_load_more_receiver.recv().await.is_some() {
+                if this
+                    .update(cx, |this, cx| this.load_more_search(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = track_event_receiver.recv().await {
                 if this
@@ -2603,6 +2669,9 @@ impl LyruneView {
                             this.open_home_playlist(album.into_playlist(), window, cx)
                         }
                         TrackTableEvent::Unlike(track) => this.unlike_track(track, cx),
+                        TrackTableEvent::Playlist(playlist) => {
+                            this.open_home_playlist(playlist, window, cx)
+                        }
                     })
                     .is_err()
                 {
@@ -2638,12 +2707,16 @@ impl LyruneView {
             search_resource: None,
             search_visible_counts: SearchVisibleCounts::default(),
             search_category: SearchCategory::Songs,
+            search_scroll_offsets: [px(0.); 4],
+            pending_search_scroll: false,
             selected_artist: None,
             artist_resource: None,
             artist_visible_song_count: ARTIST_PAGE_SIZE as usize,
             artist_visible_album_count: ARTIST_ALBUM_PAGE_SIZE as usize,
             playlist_list,
             track_table,
+            search_track_table,
+            search_card_grid,
             search_input,
             ui_font_input,
             monospace_font_input,
@@ -2752,13 +2825,14 @@ impl LyruneView {
             Some(cx.observe_window_appearance(window, |this, window, cx| {
                 this.apply_theme(window, cx)
             }));
-        self._window_subscription = Some(cx.observe_window_bounds(window, |this, window, _| {
+        self._window_subscription = Some(cx.observe_window_bounds(window, |this, window, cx| {
             let size = window.window_bounds().get_bounds().size;
             let width = f32::from(size.width).round() as u32;
             let height = f32::from(size.height).round() as u32;
             if width > 0 && height > 0 {
                 this.settings.window_size = Some(PersistedWindowSize { width, height });
             }
+            cx.notify();
         }));
         self.sync_progress_slider(window, cx);
         self.start_window_tick(window, cx);
@@ -3403,6 +3477,26 @@ impl LyruneView {
         self.page_resource_cache.prune();
     }
 
+    fn current_search_scroll_offsets(&self, cx: &App) -> [Pixels; 4] {
+        let mut offsets = self.search_scroll_offsets;
+        if !self.pending_search_scroll {
+            offsets[self.search_category.index()] = match self.search_category {
+                SearchCategory::Songs => {
+                    self.search_track_table
+                        .read(cx)
+                        .vertical_scroll_handle
+                        .0
+                        .borrow()
+                        .base_handle
+                        .offset()
+                        .y
+                }
+                _ => self.search_card_grid.read(cx).scroll_handle().offset().y,
+            };
+        }
+        offsets
+    }
+
     fn current_navigation_page(&self, cx: &App) -> Option<NavigationPage> {
         match self.main_content {
             MainContent::Home => Some(NavigationPage::Home),
@@ -3411,6 +3505,7 @@ impl LyruneView {
                 query: self.search_query.clone(),
                 category: self.search_category,
                 visible_counts: self.search_visible_counts,
+                scroll_offsets: self.current_search_scroll_offsets(cx),
                 resource: self.search_resource.clone(),
             }),
             MainContent::Artist => {
@@ -3451,6 +3546,13 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !matches!(&page, NavigationPage::Search { .. })
+            && !self.search_input.read(cx).value().is_empty()
+        {
+            self.search_input.update(cx, |input, cx| {
+                input.set_value(String::new(), window, cx);
+            });
+        }
         match page {
             NavigationPage::Home => {
                 self.main_content = MainContent::Home;
@@ -3479,11 +3581,14 @@ impl LyruneView {
                 query,
                 category,
                 visible_counts,
+                scroll_offsets,
                 resource,
             } => {
                 self.main_content = MainContent::Search;
                 self.search_category = category;
                 self.search_visible_counts = visible_counts;
+                self.search_scroll_offsets = scroll_offsets;
+                self.pending_search_scroll = true;
                 self.artist_resource = None;
                 self.selected_playlist_resource = None;
                 self.playlist_list.update(cx, |list, cx| {
@@ -3537,17 +3642,36 @@ impl LyruneView {
         self.prune_page_resources();
     }
 
+    fn record_navigation(
+        &mut self,
+        current: Option<NavigationPage>,
+        target: &NavigationPage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let leaving_search = current
+            .as_ref()
+            .is_some_and(|page| matches!(page, NavigationPage::Search { .. }))
+            && !matches!(target, NavigationPage::Search { .. });
+        self.navigation_history.record(current, target);
+        if leaving_search {
+            self.search_input.update(cx, |input, cx| {
+                input.set_value(String::new(), window, cx);
+            });
+        }
+    }
+
     fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target = NavigationPage::Home;
         let current = self.current_navigation_page(cx);
-        self.navigation_history.record(current, &target);
+        self.record_navigation(current, &target, window, cx);
         self.apply_navigation_page(target, window, cx);
     }
 
     fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let target = NavigationPage::Settings;
         let current = self.current_navigation_page(cx);
-        self.navigation_history.record(current, &target);
+        self.record_navigation(current, &target, window, cx);
         self.account_menu_open = false;
         self.apply_navigation_page(target, window, cx);
     }
@@ -3563,10 +3687,11 @@ impl LyruneView {
             query,
             category: SearchCategory::Songs,
             visible_counts: SearchVisibleCounts::default(),
+            scroll_offsets: [px(0.); 4],
             resource: Some(resource),
         };
         let current = self.current_navigation_page(cx);
-        self.navigation_history.record(current, &target);
+        self.record_navigation(current, &target, window, cx);
         self.apply_navigation_page(target, window, cx);
     }
 
@@ -4131,7 +4256,13 @@ impl LyruneView {
             cx.notify();
         });
         if count > 0 && self.main_content == MainContent::Playlist {
-            self.select_playlist_with_refresh(viewed_index.unwrap_or(0), force_refresh, false, cx);
+            self.select_playlist_with_refresh(
+                viewed_index.unwrap_or(0),
+                force_refresh,
+                false,
+                None,
+                cx,
+            );
         } else if count == 0 {
             cx.notify();
         }
@@ -4140,8 +4271,8 @@ impl LyruneView {
         }
     }
 
-    fn select_playlist(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.select_playlist_with_refresh(index, false, true, cx);
+    fn select_playlist(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_playlist_with_refresh(index, false, true, Some(window), cx);
     }
 
     fn select_playlist_with_refresh(
@@ -4149,6 +4280,7 @@ impl LyruneView {
         index: usize,
         force_refresh: bool,
         record_navigation: bool,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         let playlist = self
@@ -4185,7 +4317,11 @@ impl LyruneView {
                 resource: Some(resource.clone()),
             };
             let current = self.current_navigation_page(cx);
-            self.navigation_history.record(current, &target);
+            if let Some(window) = window {
+                self.record_navigation(current, &target, window, cx);
+            } else {
+                self.navigation_history.record(current, &target);
+            }
         }
         self.open_playlist(
             playlist,
@@ -4212,7 +4348,7 @@ impl LyruneView {
             resource: Some(resource),
         };
         let current = self.current_navigation_page(cx);
-        self.navigation_history.record(current, &target);
+        self.record_navigation(current, &target, window, cx);
         self.apply_navigation_page(target, window, cx);
     }
 
@@ -4475,7 +4611,7 @@ impl LyruneView {
             resource: Some(resource.clone()),
         };
         let current = self.current_navigation_page(cx);
-        self.navigation_history.record(current, &target);
+        self.record_navigation(current, &target, window, cx);
         self.playlist_list.update(cx, |list, cx| {
             list.set_selected_index(None, window, cx);
         });
@@ -6786,7 +6922,7 @@ impl LyruneView {
                         .w_full()
                         .max_w(px(760.))
                         .gap_6()
-                        .px_6()
+                        .px(page_horizontal_padding(narrow))
                         .pt_8()
                         .pb_8()
                         .child(
@@ -7202,17 +7338,17 @@ impl LyruneView {
         };
         div()
             .min_h(if narrow {
-                px(190.)
+                px(182.)
             } else if compact {
-                px(214.)
+                px(206.)
             } else {
-                px(246.)
+                px(238.)
             })
             .w_full()
             .flex_shrink_0()
-            .px_6()
+            .px(page_horizontal_padding(narrow))
             .pt_4()
-            .pb_5()
+            .pb_3()
             .child(
                 h_flex()
                     .w_full()
@@ -7341,18 +7477,23 @@ impl LyruneView {
             .bg(theme.background)
             .child(self.render_playlist_header(compact, narrow, scale_factor, cx))
             .child(
-                div().flex_1().min_h_0().px_5().pb_4().child(
-                    div()
-                        .size_full()
-                        .overflow_hidden()
-                        .bg(theme.background)
-                        .child(
-                            DataTable::new(&self.track_table)
-                                .bordered(false)
-                                .stripe(false)
-                                .with_size(px(64.)),
-                        ),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .px(page_horizontal_padding(narrow))
+                    .pb_4()
+                    .child(
+                        div()
+                            .size_full()
+                            .overflow_hidden()
+                            .bg(theme.background)
+                            .child(
+                                DataTable::new(&self.track_table)
+                                    .bordered(false)
+                                    .stripe(false)
+                                    .with_size(px(64.)),
+                            ),
+                    ),
             )
             .into_any_element()
     }
@@ -7401,20 +7542,20 @@ impl LyruneView {
                 });
 
         div()
-            .h(if narrow {
-                px(190.)
+            .min_h(if narrow {
+                px(182.)
             } else if compact {
-                px(214.)
+                px(206.)
             } else {
-                px(246.)
+                px(238.)
             })
             .w_full()
-            .px_6()
+            .px(page_horizontal_padding(narrow))
             .pt_4()
-            .pb_5()
+            .pb_3()
             .child(
                 h_flex()
-                    .size_full()
+                    .w_full()
                     .items_end()
                     .gap(if narrow {
                         px(16.)
@@ -7446,18 +7587,18 @@ impl LyruneView {
                                 div()
                                     .truncate()
                                     .text_size(if narrow {
-                                        px(34.)
+                                        px(28.)
                                     } else if compact {
-                                        px(40.)
+                                        px(34.)
                                     } else {
-                                        px(52.)
+                                        px(44.)
                                     })
                                     .line_height(if narrow {
-                                        px(45.)
+                                        px(36.)
                                     } else if compact {
-                                        px(52.)
+                                        px(44.)
                                     } else {
-                                        px(68.)
+                                        px(56.)
                                     })
                                     .font_semibold()
                                     .child(artist.name),
@@ -7570,13 +7711,7 @@ impl LyruneView {
                 .into_any_element()
         } else if let Some(songs) = songs.filter(|page| !page.items.is_empty()) {
             let visible = self.artist_visible_song_count.min(songs.items.len());
-            self.render_song_rows(
-                songs.items[..visible].to_vec(),
-                narrow,
-                SongRowSource::Artist,
-                scale_factor,
-                cx,
-            )
+            self.render_song_rows(songs.items[..visible].to_vec(), narrow, scale_factor, cx)
         } else {
             h_flex()
                 .h(px(72.))
@@ -7649,7 +7784,7 @@ impl LyruneView {
                         .child(
                             v_flex()
                                 .w_full()
-                                .px(if narrow { px(20.) } else { px(24.) })
+                                .px(page_horizontal_padding(narrow))
                                 .pb_10()
                                 .gap_10()
                                 .child(
@@ -7940,7 +8075,7 @@ impl LyruneView {
             .child(
                 v_flex()
                     .w_full()
-                    .px(if narrow { px(20.) } else { px(28.) })
+                    .px(page_horizontal_padding(narrow))
                     .pt(if narrow { px(22.) } else { px(32.) })
                     .pb_8()
                     .child(
@@ -8023,21 +8158,10 @@ impl LyruneView {
         }
     }
 
-    fn render_search_songs(
-        &mut self,
-        songs: Vec<Arc<Track>>,
-        narrow: bool,
-        scale_factor: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.render_song_rows(songs, narrow, SongRowSource::Search, scale_factor, cx)
-    }
-
     fn render_song_rows(
         &mut self,
         songs: Vec<Arc<Track>>,
         narrow: bool,
-        source: SongRowSource,
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -8067,108 +8191,100 @@ impl LyruneView {
                     scale_factor,
                     cx,
                 );
-                Button::new(format!(
-                    "{}-song-{}-{}",
-                    match source {
-                        SongRowSource::Search => "search",
-                        SongRowSource::Artist => "artist",
-                    },
-                    track.mid,
-                    index
-                ))
-                .ghost()
-                .w_full()
-                .h(px(68.))
-                .px_3()
-                .rounded(px(10.))
-                .selected(is_current)
-                .tooltip(format!("播放 {title}"))
-                .child(
-                    h_flex()
-                        .size_full()
-                        .gap_3()
-                        .child(
-                            div()
-                                .w(px(28.))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when_else(
-                                    is_loading,
-                                    |this| {
-                                        this.child(
-                                            Spinner::new().with_size(px(17.)).color(theme.primary),
-                                        )
-                                    },
-                                    |this| {
-                                        this.child(media_icon_hsla(
-                                            if is_current && is_playing {
-                                                MediaIcon::Pause
-                                            } else {
-                                                MediaIcon::Play
-                                            },
-                                            if is_current {
+                Button::new(format!("artist-song-{}-{}", track.mid, index))
+                    .ghost()
+                    .w_full()
+                    .h(px(68.))
+                    .px_3()
+                    .rounded(px(10.))
+                    .selected(is_current)
+                    .child(
+                        h_flex()
+                            .size_full()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .w(px(28.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when_else(
+                                        is_loading,
+                                        |this| {
+                                            this.child(
+                                                Spinner::new()
+                                                    .with_size(px(17.))
+                                                    .color(theme.primary),
+                                            )
+                                        },
+                                        |this| {
+                                            this.child(media_icon_hsla(
+                                                if is_current && is_playing {
+                                                    MediaIcon::Pause
+                                                } else {
+                                                    MediaIcon::Play
+                                                },
+                                                if is_current {
+                                                    theme.primary
+                                                } else {
+                                                    theme.muted_foreground
+                                                },
+                                                px(17.),
+                                            ))
+                                        },
+                                    ),
+                            )
+                            .child(cover)
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .font_medium()
+                                            .text_color(if is_current {
                                                 theme.primary
                                             } else {
-                                                theme.muted_foreground
-                                            },
-                                            px(17.),
-                                        ))
-                                    },
-                                ),
-                        )
-                        .child(cover)
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .flex_1()
-                                .gap_0p5()
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .font_medium()
-                                        .text_color(if is_current {
-                                            theme.primary
-                                        } else {
-                                            theme.foreground
-                                        })
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(artists),
-                                ),
-                        )
-                        .when(!narrow, |row| {
-                            row.child(
-                                div()
-                                    .w(px(300.))
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(theme.secondary_foreground)
-                                    .child(album),
+                                                theme.foreground
+                                            })
+                                            .child(title),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(artists),
+                                    ),
                             )
-                        })
-                        .child(
-                            div()
-                                .w(px(52.))
-                                .flex_shrink_0()
-                                .text_right()
-                                .font(monospace_font.clone())
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(duration),
-                        ),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| match source {
-                    SongRowSource::Search => this.select_search_track(index, cx),
-                    SongRowSource::Artist => this.select_artist_track(index, cx),
-                }))
+                            .when(!narrow, |row| {
+                                row.child(
+                                    div()
+                                        .w(px(300.))
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(theme.secondary_foreground)
+                                        .child(album),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .w(px(52.))
+                                    .flex_shrink_0()
+                                    .text_right()
+                                    .font(monospace_font.clone())
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(duration),
+                            ),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.select_artist_track(index, cx)),
+                    )
             })
             .collect::<Vec<_>>();
         v_flex().w_full().gap_1().children(rows).into_any_element()
@@ -8352,6 +8468,7 @@ impl LyruneView {
         compact: bool,
         narrow: bool,
         scale_factor: f32,
+        content_width: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -8359,18 +8476,19 @@ impl LyruneView {
         let tabs = SearchCategory::ALL
             .into_iter()
             .map(|category| {
+                let selected = active_category == category;
                 Button::new(format!("search-category-{}", category.label()))
                     .ghost()
-                    .h(px(40.))
+                    .h(px(36.))
                     .px_3()
-                    .rounded(px(9.))
-                    .selected(active_category == category)
+                    .rounded(px(999.))
+                    .selected(selected)
                     .child(
                         h_flex()
                             .gap_2()
                             .child(media_icon_hsla(
                                 category.icon(),
-                                if active_category == category {
+                                if selected {
                                     theme.primary
                                 } else {
                                     theme.secondary_foreground
@@ -8380,7 +8498,9 @@ impl LyruneView {
                             .child(category.label()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.search_scroll_offsets = this.current_search_scroll_offsets(cx);
                         this.search_category = category;
+                        this.pending_search_scroll = true;
                         cx.notify();
                     }))
             })
@@ -8401,180 +8521,284 @@ impl LyruneView {
             );
         let has_results = results.is_some();
         let mut content = v_flex().w_full();
-        let mut has_more = false;
         let mut is_empty = false;
         if let Some(results) = results {
-            let visible_count = self.search_visible_counts.get(active_category);
             match self.search_category {
                 SearchCategory::Songs => {
-                    let visible = visible_count.min(results.songs.items.len());
-                    has_more = results.songs.items.len() > visible || results.songs.has_more;
                     is_empty = results.songs.items.is_empty();
-                    content = content.child(self.render_search_songs(
-                        results.songs.items[..visible].to_vec(),
-                        narrow,
-                        scale_factor,
-                        cx,
-                    ));
+                    let playing_mid = self.current_track_data().map(|track| track.mid.as_str());
+                    let loading_mid = self
+                        .loading_track
+                        .and_then(|index| self.playback_queue.as_ref()?.tracks.get(index))
+                        .map(|track| track.mid.as_str());
+                    let playing_index = results
+                        .songs
+                        .items
+                        .iter()
+                        .position(|track| Some(track.mid.as_str()) == playing_mid);
+                    let loading_index = results
+                        .songs
+                        .items
+                        .iter()
+                        .position(|track| Some(track.mid.as_str()) == loading_mid);
+                    let playback_active = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
+                    self.search_track_table.update(cx, |table, cx| {
+                        let delegate = table.delegate_mut();
+                        delegate.set_tracks(
+                            results.songs.items.clone(),
+                            results.songs.has_more,
+                            search_loading_more,
+                        );
+                        delegate.set_playback_state(playing_index, loading_index, playback_active);
+                        cx.notify();
+                    });
+                    content = v_flex().w_full().flex_1().min_h_0().child(
+                        DataTable::new(&self.search_track_table)
+                            .bordered(false)
+                            .stripe(false)
+                            .with_size(px(64.)),
+                    );
                 }
                 SearchCategory::Artists => {
-                    let visible = visible_count.min(results.artists.items.len());
-                    has_more = results.artists.items.len() > visible || results.artists.has_more;
                     is_empty = results.artists.items.is_empty();
-                    content = content.child(self.render_search_cards(
-                        SearchCategory::Artists,
-                        results.artists.items[..visible].to_vec(),
-                        Vec::new(),
-                        Vec::new(),
-                        compact,
-                        scale_factor,
-                        cx,
-                    ));
+                    let cover_size = if compact { px(132.) } else { px(148.) };
+                    let card_width = cover_size + px(16.);
+                    let available_width =
+                        (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
+                    let columns = ((f32::from(available_width) + 16.)
+                        / (f32::from(card_width) + 16.))
+                        .floor() as usize;
+                    self.search_card_grid.update(cx, |list, cx| {
+                        if list.delegate_mut().set_cards(
+                            results
+                                .artists
+                                .items
+                                .iter()
+                                .cloned()
+                                .map(SearchCard::Artist)
+                                .collect(),
+                            columns,
+                            card_width,
+                            cover_size + px(62.),
+                            cover_size,
+                            scale_factor,
+                            results.artists.has_more,
+                            search_loading_more,
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                    content = v_flex().w_full().flex_1().min_h_0().child(
+                        List::new(&self.search_card_grid)
+                            .size_full()
+                            .scrollbar_visible(false),
+                    );
                 }
                 SearchCategory::Albums => {
-                    let visible = visible_count.min(results.albums.items.len());
-                    has_more = results.albums.items.len() > visible || results.albums.has_more;
                     is_empty = results.albums.items.is_empty();
-                    content = content.child(self.render_search_cards(
-                        SearchCategory::Albums,
-                        Vec::new(),
-                        results.albums.items[..visible].to_vec(),
-                        Vec::new(),
-                        compact,
-                        scale_factor,
-                        cx,
-                    ));
+                    let cover_size = if compact { px(132.) } else { px(148.) };
+                    let card_width = cover_size + px(16.);
+                    let available_width =
+                        (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
+                    let columns = ((f32::from(available_width) + 16.)
+                        / (f32::from(card_width) + 16.))
+                        .floor() as usize;
+                    self.search_card_grid.update(cx, |list, cx| {
+                        if list.delegate_mut().set_cards(
+                            results
+                                .albums
+                                .items
+                                .iter()
+                                .cloned()
+                                .map(SearchCard::Album)
+                                .collect(),
+                            columns,
+                            card_width,
+                            cover_size + px(74.),
+                            cover_size,
+                            scale_factor,
+                            results.albums.has_more,
+                            search_loading_more,
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                    content = v_flex().w_full().flex_1().min_h_0().child(
+                        List::new(&self.search_card_grid)
+                            .size_full()
+                            .scrollbar_visible(false),
+                    );
                 }
                 SearchCategory::Playlists => {
-                    let visible = visible_count.min(results.playlists.items.len());
-                    has_more =
-                        results.playlists.items.len() > visible || results.playlists.has_more;
                     is_empty = results.playlists.items.is_empty();
-                    content = content.child(self.render_search_cards(
-                        SearchCategory::Playlists,
-                        Vec::new(),
-                        Vec::new(),
-                        results.playlists.items[..visible].to_vec(),
-                        compact,
-                        scale_factor,
-                        cx,
-                    ));
+                    let cover_size = if compact { px(132.) } else { px(148.) };
+                    let card_width = cover_size + px(16.);
+                    let available_width =
+                        (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
+                    let columns = ((f32::from(available_width) + 16.)
+                        / (f32::from(card_width) + 16.))
+                        .floor() as usize;
+                    self.search_card_grid.update(cx, |list, cx| {
+                        if list.delegate_mut().set_cards(
+                            results
+                                .playlists
+                                .items
+                                .iter()
+                                .cloned()
+                                .map(SearchCard::Playlist)
+                                .collect(),
+                            columns,
+                            card_width,
+                            cover_size + px(74.),
+                            cover_size,
+                            scale_factor,
+                            results.playlists.has_more,
+                            search_loading_more,
+                        ) {
+                            cx.notify();
+                        }
+                    });
+                    content = v_flex().w_full().flex_1().min_h_0().child(
+                        List::new(&self.search_card_grid)
+                            .size_full()
+                            .scrollbar_visible(false),
+                    );
                 }
             }
         }
+        let song_list_active = active_category == SearchCategory::Songs
+            && !search_loading
+            && has_results
+            && !is_empty
+            && search_error.is_none();
+        let card_results_active = active_category != SearchCategory::Songs
+            && !search_loading
+            && has_results
+            && !is_empty
+            && search_error.is_none();
+        let virtual_list_active = song_list_active || card_results_active;
+
+        if virtual_list_active && self.pending_search_scroll {
+            let offset = point(px(0.), self.search_scroll_offsets[active_category.index()]);
+            if song_list_active {
+                self.search_track_table.update(cx, |table, cx| {
+                    let scroll = &mut *table.vertical_scroll_handle.0.borrow_mut();
+                    scroll.deferred_scroll_to_item = None;
+                    scroll.base_handle.set_offset(offset);
+                    cx.notify();
+                });
+            } else {
+                self.search_card_grid.update(cx, |list, cx| {
+                    list.scroll_handle().set_offset(offset);
+                    cx.notify();
+                });
+            }
+            self.pending_search_scroll = false;
+        }
+
+        let body_content = v_flex()
+            .w_full()
+            .mx_auto()
+            .px(page_horizontal_padding(narrow))
+            .when(virtual_list_active, |this| this.h_full().min_h_0())
+            .when(!virtual_list_active, |this| this.pb_8())
+            .gap_5()
+            .when(search_loading, |this| {
+                this.child(
+                    v_flex()
+                        .h(px(260.))
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .text_color(theme.muted_foreground)
+                        .child(Spinner::new().with_size(px(24.)).color(theme.primary))
+                        .child("正在搜索…"),
+                )
+            })
+            .when(
+                !search_loading && !has_results && search_error.is_some(),
+                |this| {
+                    this.child(
+                        v_flex()
+                            .h(px(260.))
+                            .items_center()
+                            .justify_center()
+                            .gap_4()
+                            .text_color(theme.muted_foreground)
+                            .child(search_error.clone().unwrap_or_default())
+                            .child(
+                                Button::new("retry-search")
+                                    .outline()
+                                    .h(px(44.))
+                                    .px_4()
+                                    .label("重新搜索")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let Some(resource) = this.search_resource.clone() else {
+                                            return;
+                                        };
+                                        this.start_search(resource, this.search_query.clone(), cx)
+                                    })),
+                            ),
+                    )
+                },
+            )
+            .when(!search_loading && has_results && is_empty, |this| {
+                this.child(
+                    div()
+                        .h(px(220.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("没有找到相关{}", self.search_category.label())),
+                )
+            })
+            .when(!search_loading && has_results && !is_empty, |this| {
+                this.child(content)
+            })
+            .when(has_results && search_error.is_some(), |this| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(9.))
+                        .bg(theme.danger.opacity(0.1))
+                        .text_sm()
+                        .text_color(theme.danger)
+                        .child(search_error.clone().unwrap_or_default()),
+                )
+            });
+        let body = if virtual_list_active {
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(body_content)
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .child(body_content)
+                .into_any_element()
+        };
 
         v_flex()
             .flex_1()
             .min_h_0()
             .bg(theme.background)
             .child(
-                div().flex_1().min_h_0().overflow_y_scrollbar().child(
-                    v_flex()
-                        .w_full()
-                        .max_w(px(1120.))
-                        .mx_auto()
-                        .px(if narrow { px(20.) } else { px(32.) })
-                        .pt(if narrow { px(20.) } else { px(28.) })
-                        .pb_8()
-                        .gap_5()
-                        .child(
-                            v_flex().child(
-                                div()
-                                    .text_size(if narrow { px(22.) } else { px(24.) })
-                                    .font_semibold()
-                                    .child(format!("搜索“{}”", self.search_query)),
-                            ),
-                        )
-                        .child(h_flex().gap_1().children(tabs))
-                        .when(search_loading, |this| {
-                            this.child(
-                                v_flex()
-                                    .h(px(260.))
-                                    .items_center()
-                                    .justify_center()
-                                    .gap_3()
-                                    .text_color(theme.muted_foreground)
-                                    .child(Spinner::new().with_size(px(24.)).color(theme.primary))
-                                    .child("正在搜索…"),
-                            )
-                        })
-                        .when(
-                            !search_loading && !has_results && search_error.is_some(),
-                            |this| {
-                                this.child(
-                                    v_flex()
-                                        .h(px(260.))
-                                        .items_center()
-                                        .justify_center()
-                                        .gap_4()
-                                        .text_color(theme.muted_foreground)
-                                        .child(search_error.clone().unwrap_or_default())
-                                        .child(
-                                            Button::new("retry-search")
-                                                .outline()
-                                                .h(px(44.))
-                                                .px_4()
-                                                .label("重新搜索")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    let Some(resource) =
-                                                        this.search_resource.clone()
-                                                    else {
-                                                        return;
-                                                    };
-                                                    this.start_search(
-                                                        resource,
-                                                        this.search_query.clone(),
-                                                        cx,
-                                                    )
-                                                })),
-                                        ),
-                                )
-                            },
-                        )
-                        .when(!search_loading && has_results && is_empty, |this| {
-                            this.child(
-                                div()
-                                    .h(px(220.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("没有找到相关{}", self.search_category.label())),
-                            )
-                        })
-                        .when(!search_loading && has_results && !is_empty, |this| {
-                            this.child(content)
-                        })
-                        .when(has_results && search_error.is_some(), |this| {
-                            this.child(
-                                div()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded(px(9.))
-                                    .bg(theme.danger.opacity(0.1))
-                                    .text_sm()
-                                    .text_color(theme.danger)
-                                    .child(search_error.clone().unwrap_or_default()),
-                            )
-                        })
-                        .when(has_more, |this| {
-                            this.child(
-                                h_flex().w_full().justify_center().pt_2().child(
-                                    Button::new("load-more-search")
-                                        .outline()
-                                        .h(px(44.))
-                                        .px_5()
-                                        .label("加载更多")
-                                        .loading(search_loading_more)
-                                        .disabled(search_loading_more)
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.load_more_search(cx)),
-                                        ),
-                                ),
-                            )
-                        }),
-                ),
+                v_flex()
+                    .w_full()
+                    .mx_auto()
+                    .px(page_horizontal_padding(narrow))
+                    .pt_2()
+                    .pb_3()
+                    .flex_shrink_0()
+                    .child(h_flex().gap_1().children(tabs)),
             )
+            .child(body)
             .into_any_element()
     }
 
@@ -10119,7 +10343,13 @@ impl LyruneView {
         let sidebar = self.render_sidebar(window, cx);
         let page = match self.main_content {
             MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
-            MainContent::Search => self.render_search(compact, narrow, scale_factor, cx),
+            MainContent::Search => self.render_search(
+                compact,
+                narrow,
+                scale_factor,
+                window.viewport_size().width - sidebar_width,
+                cx,
+            ),
             MainContent::Artist => self.render_artist_content(compact, narrow, scale_factor, cx),
             MainContent::Playlist => {
                 self.render_playlist_content(compact, narrow, scale_factor, cx)
@@ -10887,6 +11117,7 @@ mod tests {
             query: "resource lifetime".to_owned(),
             category: SearchCategory::Songs,
             visible_counts: SearchVisibleCounts::default(),
+            scroll_offsets: [px(0.); 4],
             resource: Some(resource.clone()),
         };
         drop(resource);
@@ -10979,12 +11210,14 @@ mod tests {
             query: "周杰伦".to_owned(),
             category: SearchCategory::Songs,
             visible_counts: SearchVisibleCounts::default(),
+            scroll_offsets: [px(0.); 4],
             resource: None,
         };
         let albums = NavigationPage::Search {
             query: "周杰伦".to_owned(),
             category: SearchCategory::Albums,
             visible_counts,
+            scroll_offsets: [px(-120.), px(-360.), px(-720.), px(-180.)],
             resource: None,
         };
         assert!(songs.same_destination(&albums));
@@ -10999,8 +11232,43 @@ mod tests {
                 query,
                 category: SearchCategory::Albums,
                 visible_counts,
+                scroll_offsets,
                 ..
-            } if query == "周杰伦" && visible_counts.albums == 60
+            } if query == "周杰伦"
+                && visible_counts.albums == 60
+                && scroll_offsets == [px(-120.), px(-360.), px(-720.), px(-180.)]
+        ));
+    }
+
+    #[test]
+    fn search_history_keeps_scroll_offsets_between_queries() {
+        let previous = NavigationPage::Search {
+            query: "milet".to_owned(),
+            category: SearchCategory::Playlists,
+            visible_counts: SearchVisibleCounts::default(),
+            scroll_offsets: [px(-128.), px(-480.), px(-256.), px(-64.)],
+            resource: None,
+        };
+        let next = NavigationPage::Search {
+            query: "许嵩".to_owned(),
+            category: SearchCategory::Songs,
+            visible_counts: SearchVisibleCounts::default(),
+            scroll_offsets: [px(0.); 4],
+            resource: None,
+        };
+        let mut history = NavigationHistory::default();
+        history.record(Some(previous), &next);
+        let restored = history.go_back(Some(next)).expect("previous search");
+        assert!(matches!(
+            &restored,
+            NavigationPage::Search { category: SearchCategory::Playlists, scroll_offsets, .. }
+                if *scroll_offsets == [px(-128.), px(-480.), px(-256.), px(-64.)]
+        ));
+        let restored = history.go_forward(Some(restored)).expect("new search");
+        assert!(matches!(
+            restored,
+            NavigationPage::Search { query, scroll_offsets, .. }
+                if query == "许嵩" && scroll_offsets == [px(0.); 4]
         ));
     }
 

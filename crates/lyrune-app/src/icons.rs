@@ -67,6 +67,7 @@ pub enum MediaIcon {
     Music,
     Artist,
     Album,
+    Clock,
     Playlist,
     Radar,
     Headphones,
@@ -109,6 +110,7 @@ impl MediaIcon {
             Self::Album => {
                 r#"<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2"/><path d="M12 3v7"/>"#
             }
+            Self::Clock => r#"<circle cx="12" cy="12" r="9"/><path d="M12 7v5h4"/>"#,
             Self::Playlist => {
                 r#"<path d="M4 6h10M4 10h10M4 14h7"/><path d="M17 5v10.5a2.5 2.5 0 1 1-2-2.45V7l5-1"/>"#
             }

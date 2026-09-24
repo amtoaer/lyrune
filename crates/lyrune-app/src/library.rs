@@ -5,11 +5,14 @@ use crate::icons::{MediaIcon, media_icon_hsla};
 use gpui::{
     AnyElement, App, Context, Image, ImageFormat, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Window, div, img, prelude::FluentBuilder as _, px,
+    Styled as _, TextAlign, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, IndexPath, StyledExt as _, h_flex,
+    ActiveTheme as _, IndexPath, Sizable as _, StyledExt as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     list::{ListDelegate, ListItem, ListState},
+    spinner::Spinner,
     table::{Column, TableDelegate, TableState},
     v_flex,
 };
@@ -22,6 +25,358 @@ pub enum TrackTableEvent {
     Artist(SearchArtist),
     Album(SearchAlbum),
     Unlike(Track),
+    Playlist(UserPlaylist),
+}
+
+pub enum SearchCard {
+    Artist(Arc<SearchArtist>),
+    Album(Arc<SearchAlbum>),
+    Playlist(Arc<UserPlaylist>),
+}
+
+pub struct SearchCardGridDelegate {
+    cards: Vec<SearchCard>,
+    columns: usize,
+    card_width: Pixels,
+    card_height: Pixels,
+    cover_size: Pixels,
+    scale_factor: f32,
+    has_more: bool,
+    loading_more: bool,
+    event_sender: mpsc::UnboundedSender<TrackTableEvent>,
+    load_more_sender: mpsc::Sender<()>,
+}
+
+impl SearchCardGridDelegate {
+    pub fn new(
+        event_sender: mpsc::UnboundedSender<TrackTableEvent>,
+        load_more_sender: mpsc::Sender<()>,
+    ) -> Self {
+        Self {
+            cards: Vec::new(),
+            columns: 1,
+            card_width: px(0.),
+            card_height: px(0.),
+            cover_size: px(0.),
+            scale_factor: 1.,
+            has_more: false,
+            loading_more: false,
+            event_sender,
+            load_more_sender,
+        }
+    }
+
+    pub fn set_cards(
+        &mut self,
+        cards: Vec<SearchCard>,
+        columns: usize,
+        card_width: Pixels,
+        card_height: Pixels,
+        cover_size: Pixels,
+        scale_factor: f32,
+        has_more: bool,
+        loading_more: bool,
+    ) -> bool {
+        let cards_changed = self.cards.len() != cards.len()
+            || self
+                .cards
+                .iter()
+                .zip(&cards)
+                .any(|(current, next)| match (current, next) {
+                    (SearchCard::Artist(current), SearchCard::Artist(next)) => {
+                        !Arc::ptr_eq(current, next)
+                    }
+                    (SearchCard::Album(current), SearchCard::Album(next)) => {
+                        !Arc::ptr_eq(current, next)
+                    }
+                    (SearchCard::Playlist(current), SearchCard::Playlist(next)) => {
+                        !Arc::ptr_eq(current, next)
+                    }
+                    _ => true,
+                });
+        let changed = cards_changed
+            || self.columns != columns
+            || self.card_width != card_width
+            || self.card_height != card_height
+            || self.cover_size != cover_size
+            || self.scale_factor != scale_factor
+            || self.has_more != has_more
+            || self.loading_more != loading_more;
+        self.cards = cards;
+        self.columns = columns.max(1);
+        self.card_width = card_width;
+        self.card_height = card_height;
+        self.cover_size = cover_size;
+        self.scale_factor = scale_factor;
+        self.has_more = has_more;
+        self.loading_more = loading_more;
+        changed
+    }
+
+    fn render_cover(
+        &self,
+        url: Option<String>,
+        icon: MediaIcon,
+        radius: Pixels,
+        window: &Window,
+        cx: &Context<ListState<Self>>,
+    ) -> AnyElement {
+        match url {
+            Some(url) => img(cached_image_source(
+                url,
+                self.cover_size,
+                window.scale_factor(),
+            ))
+            .size(self.cover_size)
+            .flex_shrink_0()
+            .rounded(radius)
+            .into_any_element(),
+            None => div()
+                .size(self.cover_size)
+                .flex_shrink_0()
+                .rounded(radius)
+                .bg(cx.theme().muted)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(media_icon_hsla(
+                    icon,
+                    cx.theme().muted_foreground,
+                    self.cover_size * 0.38,
+                ))
+                .into_any_element(),
+        }
+    }
+
+    fn render_card(
+        &self,
+        card: &SearchCard,
+        index: usize,
+        window: &Window,
+        cx: &Context<ListState<Self>>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let event_sender = self.event_sender.clone();
+        match card {
+            SearchCard::Artist(artist) => {
+                let artist = artist.clone();
+                let title = artist.name.clone();
+                let cover = self.render_cover(
+                    artist.cover_url.clone(),
+                    MediaIcon::Artist,
+                    px(999.),
+                    window,
+                    cx,
+                );
+                Button::new(format!("search-artist-{index}"))
+                    .ghost()
+                    .w(self.card_width)
+                    .h(self.card_height)
+                    .p_2()
+                    .rounded(px(12.))
+                    .tooltip(title.clone())
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .items_center()
+                            .gap_3()
+                            .child(cover)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .text_center()
+                                    .font_medium()
+                                    .text_color(theme.foreground)
+                                    .child(title),
+                            ),
+                    )
+                    .on_click(move |_, _, cx| {
+                        let _ = event_sender.send(TrackTableEvent::Artist(artist.as_ref().clone()));
+                        cx.stop_propagation();
+                    })
+                    .into_any_element()
+            }
+            SearchCard::Album(album) => {
+                let album = album.clone();
+                let title = album.title.clone();
+                let subtitle = album.artist.clone();
+                let cover = self.render_cover(
+                    album.cover_url.clone(),
+                    MediaIcon::Album,
+                    px(12.),
+                    window,
+                    cx,
+                );
+                Button::new(format!("search-album-{index}"))
+                    .ghost()
+                    .w(self.card_width)
+                    .h(self.card_height)
+                    .p_2()
+                    .rounded(px(12.))
+                    .tooltip(title.clone())
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .items_start()
+                            .gap_2()
+                            .child(cover)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .font_medium()
+                                    .text_color(theme.foreground)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(subtitle),
+                            ),
+                    )
+                    .on_click(move |_, _, cx| {
+                        let _ = event_sender.send(TrackTableEvent::Album(album.as_ref().clone()));
+                        cx.stop_propagation();
+                    })
+                    .into_any_element()
+            }
+            SearchCard::Playlist(playlist) => {
+                let playlist = playlist.clone();
+                let title = playlist.title.clone();
+                let subtitle = if playlist.owner.is_empty() {
+                    "QQ 音乐歌单".to_owned()
+                } else {
+                    playlist.owner.clone()
+                };
+                let cover = self.render_cover(
+                    playlist.cover_url.clone(),
+                    MediaIcon::Playlist,
+                    px(12.),
+                    window,
+                    cx,
+                );
+                Button::new(format!("search-playlist-{index}"))
+                    .ghost()
+                    .w(self.card_width)
+                    .h(self.card_height)
+                    .p_2()
+                    .rounded(px(12.))
+                    .tooltip(title.clone())
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .items_start()
+                            .gap_2()
+                            .child(cover)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .font_medium()
+                                    .text_color(theme.foreground)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(subtitle),
+                            ),
+                    )
+                    .on_click(move |_, _, cx| {
+                        let _ =
+                            event_sender.send(TrackTableEvent::Playlist(playlist.as_ref().clone()));
+                        cx.stop_propagation();
+                    })
+                    .into_any_element()
+            }
+        }
+    }
+}
+
+impl ListDelegate for SearchCardGridDelegate {
+    type Item = ListItem;
+
+    fn items_count(&self, _: usize, _: &App) -> usize {
+        self.cards.len().div_ceil(self.columns.max(1))
+    }
+
+    fn render_section_header(
+        &mut self,
+        _: usize,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) -> Option<impl IntoElement> {
+        Some(div().w_full().h(px(24.)))
+    }
+
+    fn render_item(
+        &mut self,
+        index: IndexPath,
+        window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<Self::Item> {
+        let start = index.row * self.columns.max(1);
+        let cards = self.cards[start..self.cards.len().min(start + self.columns)]
+            .iter()
+            .enumerate()
+            .map(|(offset, card)| {
+                self.render_card(card, start + offset, window, cx)
+                    .into_any_element()
+            });
+        Some(
+            ListItem::new(("search-card-row", index.row))
+                .disabled(true)
+                .h(self.card_height + px(16.))
+                .p_0()
+                .child(h_flex().w_full().items_start().gap_4().children(cards)),
+        )
+    }
+
+    fn set_selected_index(
+        &mut self,
+        _: Option<IndexPath>,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) {
+    }
+
+    fn has_more(&self, _: &App) -> bool {
+        self.has_more && !self.loading_more
+    }
+
+    fn load_more_threshold(&self) -> usize {
+        2
+    }
+
+    fn load_more(&mut self, _: &mut Window, _: &mut Context<ListState<Self>>) {
+        if self.has_more && !self.loading_more && self.load_more_sender.try_send(()).is_ok() {
+            self.loading_more = true;
+        }
+    }
+
+    fn render_section_footer(
+        &mut self,
+        _: usize,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) -> Option<impl IntoElement> {
+        Some(
+            h_flex()
+                .w_full()
+                .h(px(52.))
+                .justify_center()
+                .when(self.loading_more, |this| {
+                    this.child(Spinner::new().with_size(px(18.)))
+                }),
+        )
+    }
 }
 
 pub struct PlaylistListDelegate {
@@ -219,6 +574,8 @@ pub fn playlist_cover(
 
 pub struct TrackTableDelegate {
     columns: Vec<Column>,
+    header_height: Pixels,
+    header_text_padding: Pixels,
     tracks: Vec<Arc<Track>>,
     loading: bool,
     has_more: bool,
@@ -236,8 +593,19 @@ impl TrackTableDelegate {
         load_more_sender: mpsc::Sender<()>,
         event_sender: mpsc::UnboundedSender<TrackTableEvent>,
     ) -> Self {
+        Self::new_with_header_style(load_more_sender, event_sender, px(32.), px(14.))
+    }
+
+    pub fn new_with_header_style(
+        load_more_sender: mpsc::Sender<()>,
+        event_sender: mpsc::UnboundedSender<TrackTableEvent>,
+        header_height: Pixels,
+        header_text_padding: Pixels,
+    ) -> Self {
         Self {
             columns: track_columns(false),
+            header_height,
+            header_text_padding,
             tracks: Vec::new(),
             loading: false,
             has_more: false,
@@ -383,7 +751,7 @@ impl TableDelegate for TrackTableDelegate {
     ) -> Stateful<gpui::Div> {
         div()
             .id("track-table-header")
-            .h(px(48.))
+            .h(self.header_height)
             .mb(px(4.))
             .overflow_hidden()
             .border_b_1()
@@ -394,12 +762,22 @@ impl TableDelegate for TrackTableDelegate {
         &mut self,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let is_duration = self.columns[col_ix].key.as_ref() == "duration";
+        let content = if is_duration {
+            media_icon_hsla(MediaIcon::Clock, cx.theme().muted_foreground, px(18.))
+        } else {
+            self.columns[col_ix].name.clone().into_any_element()
+        };
         div()
             .size_full()
-            .pt(px(6.))
-            .child(self.columns[col_ix].name.clone())
+            .when(self.columns[col_ix].align == TextAlign::Right, |this| {
+                this.flex().justify_end().text_right()
+            })
+            .pt(self.header_text_padding)
+            .when(is_duration, |this| this.pr(px(8.)))
+            .child(content)
     }
 
     fn render_tr(

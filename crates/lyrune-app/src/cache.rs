@@ -49,6 +49,40 @@ type StreamingSource = StreamDownload<CacheStorageProvider>;
 type EncryptedSource = DecryptReader<BufReader<File>>;
 type EncryptedStreamingSource = DecryptReader<StreamingSource>;
 
+#[derive(Clone, Copy)]
+enum EncryptedFormat {
+    Flac,
+    Ogg,
+}
+
+impl EncryptedFormat {
+    fn from_url(url: &str) -> Self {
+        if url
+            .split('?')
+            .next()
+            .is_some_and(|path| path.ends_with(".mgg"))
+        {
+            Self::Ogg
+        } else {
+            Self::Flac
+        }
+    }
+
+    const fn hint(self) -> &'static str {
+        match self {
+            Self::Flac => "flac",
+            Self::Ogg => "ogg",
+        }
+    }
+
+    const fn magic(self) -> [u8; 4] {
+        match self {
+            Self::Flac => *b"fLaC",
+            Self::Ogg => *b"OggS",
+        }
+    }
+}
+
 #[derive(Debug)]
 struct EncryptedCacheMismatch;
 
@@ -451,20 +485,23 @@ impl AudioCache {
         ekey: &str,
         track: &Track,
         quality: Quality,
-        format_hint: &'static str,
     ) -> Result<PreparedStream> {
         let source_variant = urls
             .iter()
             .find(|url| !url.trim().is_empty())
             .map_or_else(|| "unknown".to_owned(), |url| encrypted_source_variant(url));
+        let format = urls
+            .iter()
+            .find(|url| !url.trim().is_empty())
+            .map_or(EncryptedFormat::Flac, |url| EncryptedFormat::from_url(url));
         match self
-            .prepare_encrypted_once(urls.clone(), ekey, track, quality, format_hint)
+            .prepare_encrypted_once(urls.clone(), ekey, track, quality, format)
             .await
         {
             Err(error) if error.downcast_ref::<EncryptedCacheMismatch>().is_some() => {
                 self.invalidate_encrypted_cache(track, quality, &source_variant)
                     .await?;
-                self.prepare_encrypted_once(urls, ekey, track, quality, format_hint)
+                self.prepare_encrypted_once(urls, ekey, track, quality, format)
                     .await
             }
             result => result,
@@ -477,7 +514,7 @@ impl AudioCache {
         ekey: &str,
         track: &Track,
         quality: Quality,
-        format_hint: &'static str,
+        format: EncryptedFormat,
     ) -> Result<PreparedStream> {
         let urls = unique_urls(urls);
         let first_url = urls.first().context("歌曲没有可用的加密 CDN 下载地址")?;
@@ -489,7 +526,6 @@ impl AudioCache {
         let key = identity.key();
         let guard = self.key_lock(&key).lock_owned().await;
         let paths = CachePaths::new(self.root.as_ref(), &key);
-        let cipher = QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?;
         let mut metadata = read_metadata(&paths.metadata).await;
         let mut existing_length = file_length(&paths.media).await.unwrap_or_default();
         if metadata
@@ -527,20 +563,13 @@ impl AudioCache {
             .as_ref()
             .is_some_and(|metadata| metadata.complete && expected_length == Some(existing_length))
         {
-            let probe_file =
-                File::open(&paths.media).context("无法打开 QQ 音乐加密缓存进行验证")?;
-            let mut probe = DecryptReader::new(
-                BufReader::new(probe_file),
-                QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?,
+            let source = open_validated_encrypted_file(
+                &paths.media,
+                ekey,
                 expected_length.context("QQ 音乐加密音频缺少长度")?,
+                format,
             );
-            validate_decrypted_source(&mut probe, format_hint)?;
-            let source = File::open(&paths.media).context("无法打开已缓存的 QQ 音乐加密音频")?;
-            let source = DecryptReader::new(
-                BufReader::new(source),
-                cipher,
-                expected_length.context("QQ 音乐加密音频缺少长度")?,
-            );
+            let source = source?;
             self.record_access(&key, existing_length).await;
             drop(guard);
             return Ok(PreparedStream {
@@ -549,7 +578,7 @@ impl AudioCache {
                     _lease: self.lease(&key),
                 },
                 content_length: expected_length,
-                format_hint,
+                format_hint: format.hint(),
                 cancellation: None,
             });
         }
@@ -612,7 +641,7 @@ impl AudioCache {
                 }),
             complete: false,
         };
-        let (mut download, cancellation) = self
+        let (download, cancellation) = self
             .start_stream_download(
                 urls,
                 response,
@@ -628,23 +657,19 @@ impl AudioCache {
             )
             .await
             .context("无法初始化 QQ 音乐加密流")?;
-        let probe_cipher = QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?;
+        let cipher = QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?;
         let download = tokio::task::spawn_blocking(move || {
-            let mut probe = DecryptReader::new(&mut download, probe_cipher, content_length);
-            validate_decrypted_source(&mut probe, format_hint)?;
-            drop(probe);
-            Ok::<_, anyhow::Error>(download)
+            validate_decrypted_source(DecryptReader::new(download, cipher, content_length), format)
         })
         .await
         .context("QQ 音乐加密流解密探测任务异常退出")??;
-        let source = DecryptReader::new(download, cipher, content_length);
         Ok(PreparedStream {
             source: CachedAudioSource::EncryptedStreaming {
-                source,
+                source: download,
                 _lease: self.lease(&key),
             },
             content_length: Some(content_length),
-            format_hint,
+            format_hint: format.hint(),
             cancellation: Some(cancellation),
         })
     }
@@ -1142,6 +1167,8 @@ struct CacheIdentity {
     quality: String,
     #[serde(default)]
     encoding: String,
+    #[serde(default)]
+    source_variant: String,
 }
 
 impl CacheIdentity {
@@ -1152,23 +1179,27 @@ impl CacheIdentity {
             media_mid: track.media_mid.clone().unwrap_or_else(|| track.mid.clone()),
             quality: quality.cache_id().to_owned(),
             encoding: "plain".to_owned(),
+            source_variant: String::new(),
         }
     }
 
     fn encrypted(track: &Track, quality: Quality, source_variant: &str) -> Self {
         let mut identity = Self::new(track, quality);
-        identity.encoding = format!("musicex:{source_variant}");
+        identity.encoding = "musicex".to_owned();
+        identity.source_variant = source_variant.to_owned();
         identity
     }
 
     fn key(&self) -> String {
-        cache_key(
-            format!(
-                "lyrune-audio-v{CACHE_SCHEMA_VERSION}\0{}\0{}\0{}\0{}\0{}",
-                self.provider, self.track_mid, self.media_mid, self.quality, self.encoding
-            )
-            .as_bytes(),
-        )
+        let mut identity = format!(
+            "lyrune-audio-v{CACHE_SCHEMA_VERSION}\0{}\0{}\0{}\0{}\0{}",
+            self.provider, self.track_mid, self.media_mid, self.quality, self.encoding
+        );
+        if !self.source_variant.is_empty() {
+            identity.push('\0');
+            identity.push_str(&self.source_variant);
+        }
+        cache_key(identity.as_bytes())
     }
 }
 
@@ -1343,10 +1374,24 @@ impl CachePaths {
     }
 }
 
+fn open_validated_encrypted_file(
+    path: &Path,
+    ekey: &str,
+    length: u64,
+    format: EncryptedFormat,
+) -> Result<EncryptedSource> {
+    let file = File::open(path).context("无法打开 QQ 音乐加密缓存进行验证")?;
+    let cipher = QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?;
+    validate_decrypted_source(
+        DecryptReader::new(BufReader::new(file), cipher, length),
+        format,
+    )
+}
+
 fn validate_decrypted_source<R: Read + Seek>(
-    source: &mut DecryptReader<R>,
-    format_hint: &str,
-) -> Result<()> {
+    mut source: DecryptReader<R>,
+    format: EncryptedFormat,
+) -> Result<DecryptReader<R>> {
     let mut signature = [0_u8; 4];
     source
         .read_exact(&mut signature)
@@ -1354,15 +1399,11 @@ fn validate_decrypted_source<R: Read + Seek>(
     source
         .seek(SeekFrom::Start(0))
         .context("重置 QQ 音乐加密音频解密流失败")?;
-    let expected = if format_hint == "ogg" {
-        *b"OggS"
-    } else {
-        *b"fLaC"
-    };
+    let expected = format.magic();
     if signature != expected {
         return Err(anyhow::Error::new(EncryptedCacheMismatch));
     }
-    Ok(())
+    Ok(source)
 }
 
 async fn read_metadata(path: &Path) -> Option<CacheMetadata> {

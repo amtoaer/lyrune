@@ -2161,13 +2161,8 @@ async fn prepare_playback_option(
     let urls = option.urls().map(str::to_owned).collect::<Vec<_>>();
     if option.encrypted {
         let ekey = option.ekey.as_deref().context("QQ 音乐加密音源缺少 ekey")?;
-        let format_hint = if option.url.contains(".mgg") {
-            "ogg"
-        } else {
-            "flac"
-        };
         audio_cache
-            .prepare_encrypted(urls, ekey, track, option.quality, format_hint)
+            .prepare_encrypted(urls, ekey, track, option.quality)
             .await
     } else {
         audio_cache

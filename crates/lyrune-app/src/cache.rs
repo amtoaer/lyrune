@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -13,6 +13,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use bytes::Bytes;
 use directories::ProjectDirs;
 use futures_util::{Stream, StreamExt as _};
+use qmc_decrypt::{DecryptReader, QmcCipher};
 use qqmusic_api::integration::{Quality, Track};
 use reqwest::header::{
     ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderMap, IF_RANGE,
@@ -45,6 +46,53 @@ const QQ_REFERER: &str = "https://y.qq.com/";
 type CacheKeyLock = Arc<AsyncMutex<()>>;
 type ByteStream = Box<dyn Stream<Item = io::Result<Bytes>> + Unpin + Send + Sync>;
 type StreamingSource = StreamDownload<CacheStorageProvider>;
+type EncryptedSource = DecryptReader<BufReader<File>>;
+type EncryptedStreamingSource = DecryptReader<StreamingSource>;
+
+#[derive(Clone, Copy)]
+enum EncryptedFormat {
+    Flac,
+    Ogg,
+}
+
+impl EncryptedFormat {
+    fn from_url(url: &str) -> Self {
+        if url
+            .split('?')
+            .next()
+            .is_some_and(|path| path.ends_with(".mgg"))
+        {
+            Self::Ogg
+        } else {
+            Self::Flac
+        }
+    }
+
+    const fn hint(self) -> &'static str {
+        match self {
+            Self::Flac => "flac",
+            Self::Ogg => "ogg",
+        }
+    }
+
+    const fn magic(self) -> [u8; 4] {
+        match self {
+            Self::Flac => *b"fLaC",
+            Self::Ogg => *b"OggS",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct EncryptedCacheMismatch;
+
+impl std::fmt::Display for EncryptedCacheMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("QQ 音乐加密缓存与当前 ekey 不匹配")
+    }
+}
+
+impl std::error::Error for EncryptedCacheMismatch {}
 
 pub(crate) fn cache_key(bytes: &[u8]) -> String {
     format!("{:032x}", xxh3_128(bytes))
@@ -431,6 +479,216 @@ impl AudioCache {
         self.prepare_inner(urls, track, quality, true).await
     }
 
+    pub async fn prepare_encrypted(
+        &self,
+        urls: Vec<String>,
+        ekey: &str,
+        track: &Track,
+        quality: Quality,
+    ) -> Result<PreparedStream> {
+        let source_variant = urls
+            .iter()
+            .find(|url| !url.trim().is_empty())
+            .map_or_else(|| "unknown".to_owned(), |url| encrypted_source_variant(url));
+        let format = urls
+            .iter()
+            .find(|url| !url.trim().is_empty())
+            .map_or(EncryptedFormat::Flac, |url| EncryptedFormat::from_url(url));
+        match self
+            .prepare_encrypted_once(urls.clone(), ekey, track, quality, format)
+            .await
+        {
+            Err(error) if error.downcast_ref::<EncryptedCacheMismatch>().is_some() => {
+                self.invalidate_encrypted_cache(track, quality, &source_variant)
+                    .await?;
+                self.prepare_encrypted_once(urls, ekey, track, quality, format)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    async fn prepare_encrypted_once(
+        &self,
+        urls: Vec<String>,
+        ekey: &str,
+        track: &Track,
+        quality: Quality,
+        format: EncryptedFormat,
+    ) -> Result<PreparedStream> {
+        let urls = unique_urls(urls);
+        let first_url = urls.first().context("歌曲没有可用的加密 CDN 下载地址")?;
+        let source_variant = encrypted_source_variant(first_url);
+        tokio::fs::create_dir_all(self.root.as_ref())
+            .await
+            .context("无法创建音频缓存目录")?;
+        let identity = CacheIdentity::encrypted(track, quality, &source_variant);
+        let key = identity.key();
+        let guard = self.key_lock(&key).lock_owned().await;
+        let paths = CachePaths::new(self.root.as_ref(), &key);
+        let mut metadata = read_metadata(&paths.metadata).await;
+        let mut existing_length = file_length(&paths.media).await.unwrap_or_default();
+        if metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.identity != identity)
+            || (existing_length > 0 && metadata.is_none())
+        {
+            reset_media(&paths.media).await?;
+            metadata = None;
+            existing_length = 0;
+        }
+
+        let remote = self.inspect_remote(first_url).await.ok();
+        if let (Some(cached_metadata), Some(remote)) = (&metadata, &remote)
+            && cached_metadata.conflicts_with(remote)
+        {
+            reset_media(&paths.media).await?;
+            metadata = None;
+            existing_length = 0;
+        }
+        let expected_length = remote
+            .as_ref()
+            .and_then(|remote| remote.content_length)
+            .or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.content_length)
+            });
+        if expected_length.is_some_and(|expected| existing_length > expected) {
+            reset_media(&paths.media).await?;
+            metadata = None;
+            existing_length = 0;
+        }
+        if metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.complete && expected_length == Some(existing_length))
+        {
+            let source = open_validated_encrypted_file(
+                &paths.media,
+                ekey,
+                expected_length.context("QQ 音乐加密音频缺少长度")?,
+                format,
+            );
+            let source = source?;
+            self.record_access(&key, existing_length).await;
+            drop(guard);
+            return Ok(PreparedStream {
+                source: CachedAudioSource::Encrypted {
+                    source,
+                    _lease: self.lease(&key),
+                },
+                content_length: expected_length,
+                format_hint: format.hint(),
+                cancellation: None,
+            });
+        }
+
+        let validator = metadata
+            .as_ref()
+            .and_then(CacheMetadata::if_range_validator)
+            .map(str::to_owned);
+        let (response, resume_from, active_url) = self
+            .open_stream_response(&urls, &paths.media, existing_length, validator.as_deref())
+            .await
+            .context("打开 QQ 音乐加密流失败")?;
+        if existing_length > 0 && resume_from == 0 {
+            metadata = None;
+        }
+        let response_remote = RemoteMetadata::from_response(&response, resume_from);
+        let content_length = response_remote
+            .content_length
+            .or(expected_length)
+            .or_else(|| {
+                response
+                    .content_length()
+                    .map(|remaining| resume_from.saturating_add(remaining))
+            })
+            .context("QQ 音乐加密流缺少内容长度")?;
+        if content_length == 0 {
+            bail!("QQ 音乐返回了空的加密音频流");
+        }
+        let metadata = CacheMetadata {
+            schema_version: CACHE_SCHEMA_VERSION,
+            identity,
+            content_length: Some(content_length),
+            etag: response_remote
+                .etag
+                .or_else(|| remote.as_ref().and_then(|remote| remote.etag.clone()))
+                .or_else(|| metadata.as_ref().and_then(|metadata| metadata.etag.clone())),
+            last_modified: response_remote
+                .last_modified
+                .or_else(|| {
+                    remote
+                        .as_ref()
+                        .and_then(|remote| remote.last_modified.clone())
+                })
+                .or_else(|| {
+                    metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.last_modified.clone())
+                }),
+            content_type: response_remote
+                .content_type
+                .or_else(|| {
+                    remote
+                        .as_ref()
+                        .and_then(|remote| remote.content_type.clone())
+                })
+                .or_else(|| {
+                    metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.content_type.clone())
+                }),
+            complete: false,
+        };
+        let (download, cancellation) = self
+            .start_stream_download(
+                urls,
+                response,
+                resume_from,
+                active_url,
+                paths,
+                key.clone(),
+                existing_length,
+                metadata,
+                track.duration_seconds,
+                quality,
+                guard,
+            )
+            .await
+            .context("无法初始化 QQ 音乐加密流")?;
+        let cipher = QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?;
+        let download = tokio::task::spawn_blocking(move || {
+            validate_decrypted_source(DecryptReader::new(download, cipher, content_length), format)
+        })
+        .await
+        .context("QQ 音乐加密流解密探测任务异常退出")??;
+        Ok(PreparedStream {
+            source: CachedAudioSource::EncryptedStreaming {
+                source: download,
+                _lease: self.lease(&key),
+            },
+            content_length: Some(content_length),
+            format_hint: format.hint(),
+            cancellation: Some(cancellation),
+        })
+    }
+
+    async fn invalidate_encrypted_cache(
+        &self,
+        track: &Track,
+        quality: Quality,
+        source_variant: &str,
+    ) -> Result<()> {
+        let key = CacheIdentity::encrypted(track, quality, source_variant).key();
+        let _guard = self.key_lock(&key).lock_owned().await;
+        let paths = CachePaths::new(self.root.as_ref(), &key);
+        reset_media(&paths.media).await?;
+        let _ = tokio::fs::remove_file(&paths.metadata).await;
+        self.record_access(&key, 0).await;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub async fn prepare_for_seek(
         &self,
@@ -440,15 +698,6 @@ impl AudioCache {
     ) -> Result<PreparedStream> {
         self.prepare_inner(vec![url.to_owned()], track, quality, false)
             .await
-    }
-
-    pub async fn prepare_for_seek_with_fallbacks(
-        &self,
-        urls: Vec<String>,
-        track: &Track,
-        quality: Quality,
-    ) -> Result<PreparedStream> {
-        self.prepare_inner(urls, track, quality, false).await
     }
 
     async fn prepare_inner(
@@ -602,8 +851,51 @@ impl AudioCache {
                 }),
             complete: false,
         };
-        write_metadata(&paths.metadata, &metadata).await?;
+        let content_length = metadata.content_length;
+        let (download, cancellation) = self
+            .start_stream_download(
+                urls,
+                response,
+                resume_from,
+                active_url,
+                paths,
+                key.clone(),
+                existing_length,
+                metadata,
+                track.duration_seconds,
+                quality,
+                guard,
+            )
+            .await
+            .context("无法初始化歌曲流")?;
 
+        Ok(PreparedStream {
+            source: CachedAudioSource::Streaming {
+                source: download,
+                _lease: self.lease(&key),
+            },
+            content_length,
+            format_hint: quality_format_hint(quality),
+            cancellation: Some(cancellation),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_stream_download(
+        &self,
+        urls: Vec<String>,
+        response: Response,
+        resume_from: u64,
+        active_url: usize,
+        paths: CachePaths,
+        key: String,
+        existing_length: u64,
+        metadata: CacheMetadata,
+        track_duration: u64,
+        quality: Quality,
+        guard: OwnedMutexGuard<()>,
+    ) -> Result<(StreamingSource, CancellationToken)> {
+        write_metadata(&paths.metadata, &metadata).await?;
         let local_stream: ByteStream = if resume_from > 0 {
             let local = tokio::fs::File::open(&paths.media)
                 .await
@@ -617,6 +909,7 @@ impl AudioCache {
             .map(|chunk| chunk.map_err(|error| io::Error::other(error.to_string())));
         let stream: ByteStream = Box::new(local_stream.chain(network_stream));
         self.begin_cache_write(&key, existing_length).await;
+        let content_length = metadata.content_length;
         let source = ResumeSource {
             stream,
             client: self.client.clone(),
@@ -633,11 +926,7 @@ impl AudioCache {
             _guard: guard,
         };
         let settings = Settings::default()
-            .prefetch_bytes(prefetch_bytes(
-                content_length,
-                track.duration_seconds,
-                quality,
-            ))
+            .prefetch_bytes(prefetch_bytes(content_length, track_duration, quality))
             .retry_timeout(Duration::from_secs(5));
         let download = match StreamDownload::from_stream(
             source,
@@ -652,20 +941,11 @@ impl AudioCache {
             Err(error) => {
                 let size_bytes = file_length(&paths.media).await.unwrap_or_default();
                 self.finish_cache_write(&key, size_bytes).await;
-                return Err(anyhow!("无法初始化歌曲流：{error}"));
+                return Err(anyhow!("{error}"));
             }
         };
-        let cancellation = Some(download.cancellation_token());
-
-        Ok(PreparedStream {
-            source: CachedAudioSource::Streaming {
-                source: download,
-                _lease: self.lease(&key),
-            },
-            content_length,
-            format_hint: quality_format_hint(quality),
-            cancellation,
-        })
+        let cancellation = download.cancellation_token();
+        Ok((download, cancellation))
     }
 
     fn key_lock(&self, key: &str) -> CacheKeyLock {
@@ -847,6 +1127,14 @@ pub(crate) enum CachedAudioSource {
         source: StreamingSource,
         _lease: CacheLease,
     },
+    Encrypted {
+        source: EncryptedSource,
+        _lease: CacheLease,
+    },
+    EncryptedStreaming {
+        source: EncryptedStreamingSource,
+        _lease: CacheLease,
+    },
 }
 
 impl Read for CachedAudioSource {
@@ -854,6 +1142,8 @@ impl Read for CachedAudioSource {
         match self {
             Self::Complete { source, .. } => source.read(buffer),
             Self::Streaming { source, .. } => source.read(buffer),
+            Self::Encrypted { source, .. } => source.read(buffer),
+            Self::EncryptedStreaming { source, .. } => source.read(buffer),
         }
     }
 }
@@ -863,6 +1153,8 @@ impl Seek for CachedAudioSource {
         match self {
             Self::Complete { source, .. } => source.seek(position),
             Self::Streaming { source, .. } => source.seek(position),
+            Self::Encrypted { source, .. } => source.seek(position),
+            Self::EncryptedStreaming { source, .. } => source.seek(position),
         }
     }
 }
@@ -873,6 +1165,10 @@ struct CacheIdentity {
     track_mid: String,
     media_mid: String,
     quality: String,
+    #[serde(default)]
+    encoding: String,
+    #[serde(default)]
+    source_variant: String,
 }
 
 impl CacheIdentity {
@@ -882,17 +1178,28 @@ impl CacheIdentity {
             track_mid: track.mid.clone(),
             media_mid: track.media_mid.clone().unwrap_or_else(|| track.mid.clone()),
             quality: quality.cache_id().to_owned(),
+            encoding: "plain".to_owned(),
+            source_variant: String::new(),
         }
     }
 
+    fn encrypted(track: &Track, quality: Quality, source_variant: &str) -> Self {
+        let mut identity = Self::new(track, quality);
+        identity.encoding = "musicex".to_owned();
+        identity.source_variant = source_variant.to_owned();
+        identity
+    }
+
     fn key(&self) -> String {
-        cache_key(
-            format!(
-                "lyrune-audio-v{CACHE_SCHEMA_VERSION}\0{}\0{}\0{}\0{}",
-                self.provider, self.track_mid, self.media_mid, self.quality
-            )
-            .as_bytes(),
-        )
+        let mut identity = format!(
+            "lyrune-audio-v{CACHE_SCHEMA_VERSION}\0{}\0{}\0{}\0{}\0{}",
+            self.provider, self.track_mid, self.media_mid, self.quality, self.encoding
+        );
+        if !self.source_variant.is_empty() {
+            identity.push('\0');
+            identity.push_str(&self.source_variant);
+        }
+        cache_key(identity.as_bytes())
     }
 }
 
@@ -1004,6 +1311,18 @@ fn unique_urls(urls: Vec<String>) -> Vec<String> {
     unique
 }
 
+fn encrypted_source_variant(url: &str) -> String {
+    url.split('?')
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|filename| !filename.is_empty())
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
 fn header_string(headers: &HeaderMap, name: reqwest::header::HeaderName) -> Option<String> {
     headers
         .get(name)
@@ -1053,6 +1372,38 @@ impl CachePaths {
             metadata: root.join(format!("{key}.json")),
         }
     }
+}
+
+fn open_validated_encrypted_file(
+    path: &Path,
+    ekey: &str,
+    length: u64,
+    format: EncryptedFormat,
+) -> Result<EncryptedSource> {
+    let file = File::open(path).context("无法打开 QQ 音乐加密缓存进行验证")?;
+    let cipher = QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?;
+    validate_decrypted_source(
+        DecryptReader::new(BufReader::new(file), cipher, length),
+        format,
+    )
+}
+
+fn validate_decrypted_source<R: Read + Seek>(
+    mut source: DecryptReader<R>,
+    format: EncryptedFormat,
+) -> Result<DecryptReader<R>> {
+    let mut signature = [0_u8; 4];
+    source
+        .read_exact(&mut signature)
+        .context("读取 QQ 音乐加密音频解密头失败")?;
+    source
+        .seek(SeekFrom::Start(0))
+        .context("重置 QQ 音乐加密音频解密流失败")?;
+    let expected = format.magic();
+    if signature != expected {
+        return Err(anyhow::Error::new(EncryptedCacheMismatch));
+    }
+    Ok(source)
 }
 
 async fn read_metadata(path: &Path) -> Option<CacheMetadata> {

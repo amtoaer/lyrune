@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use wana_kana::{ConvertJapanese as _, IsJapaneseStr as _};
 
-use crate::cache::{AudioCache, audio_cache_limit_bytes};
+use crate::cache::{AudioCache, PreparedStream, audio_cache_limit_bytes};
 use crate::credentials::CredentialStore;
 use crate::design::{self, AppFonts, ColorTheme};
 use crate::http::{
@@ -65,9 +65,9 @@ use crate::settings::{
 };
 use crate::singleflight::SingleFlight;
 use qqmusic_api::integration::{
-    CredentialSession, LoginEvent, PlaylistPage, ProtocolClient, QqCredential, Quality,
-    RecommendationKind, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist,
-    UserPlaylistId, UserProfile, run_qr_login,
+    CredentialSession, LoginEvent, PlaybackOption, PlaylistPage, ProtocolClient, QqCredential,
+    Quality, RecommendationKind, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track,
+    UserPlaylist, UserPlaylistId, UserProfile, run_qr_login,
 };
 #[cfg(target_os = "linux")]
 use xxhash_rust::xxh3::xxh3_128;
@@ -2150,7 +2150,25 @@ enum RepeatMode {
 struct PlaybackLocation {
     track_mid: String,
     quality: Quality,
-    urls: Vec<String>,
+    options: Vec<PlaybackOption>,
+}
+
+async fn prepare_playback_option(
+    audio_cache: &AudioCache,
+    option: &PlaybackOption,
+    track: &Track,
+) -> anyhow::Result<PreparedStream> {
+    let urls = option.urls().map(str::to_owned).collect::<Vec<_>>();
+    if option.encrypted {
+        let ekey = option.ekey.as_deref().context("QQ 音乐加密音源缺少 ekey")?;
+        audio_cache
+            .prepare_encrypted(urls, ekey, track, option.quality)
+            .await
+    } else {
+        audio_cache
+            .prepare_with_fallbacks(urls, track, option.quality)
+            .await
+    }
 }
 
 struct PlaybackQueue {
@@ -5196,13 +5214,11 @@ impl LyruneView {
             self.quality_menu_open = false;
             Vec::new()
         };
-        let reused_urls = self
+        let reused_options = self
             .playback_location
             .as_ref()
-            .filter(|location| {
-                location.track_mid == track.mid && location.quality == desired_quality
-            })
-            .map(|location| location.urls.clone());
+            .filter(|location| location.track_mid == track.mid)
+            .map(|location| location.options.clone());
 
         audio.stop();
         if !same_track {
@@ -5221,7 +5237,7 @@ impl LyruneView {
         self.loading_track = Some(index);
         self.ensure_track_like_state(track.mid.clone(), cx);
         self.loading_autoplay = autoplay;
-        self.resolving_qualities = reused_urls.is_none() && known_qualities.is_empty();
+        self.resolving_qualities = reused_options.is_none() && known_qualities.is_empty();
         self.playback_started = false;
         self.wake_playback_ticks();
         self.position = resume_at;
@@ -5245,22 +5261,28 @@ impl LyruneView {
         let (sender, mut receiver) = mpsc::channel(1);
         drop(RUNTIME.spawn(async move {
             let result = async {
-                let reused_stream = match reused_urls {
-                    Some(urls) => audio_cache
-                        .prepare_for_seek_with_fallbacks(urls.clone(), &track, desired_quality)
-                        .await
-                        .ok()
-                        .map(|stream| {
-                            let qualities = if known_qualities.is_empty() {
-                                vec![desired_quality]
-                            } else {
-                                known_qualities.clone()
-                            };
-                            (desired_quality, urls, stream, qualities)
-                        }),
+                let reused_stream = match reused_options {
+                    Some(options) => match options
+                        .iter()
+                        .find(|option| option.quality == desired_quality)
+                        .cloned()
+                    {
+                        Some(option) => prepare_playback_option(&audio_cache, &option, &track)
+                            .await
+                            .ok()
+                            .map(|stream| {
+                                (
+                                    desired_quality,
+                                    stream,
+                                    options.iter().map(|option| option.quality).collect(),
+                                    options,
+                                )
+                            }),
+                        None => None,
+                    },
                     None => None,
                 };
-                let (quality, urls, stream, available_qualities) = match reused_stream {
+                let (quality, stream, available_qualities, options) = match reused_stream {
                     Some(reused) => reused,
                     None => {
                         let _ = sender.send(PlaybackLoadEvent::ResolvingOptions).await;
@@ -5282,13 +5304,11 @@ impl LyruneView {
                             else {
                                 continue;
                             };
-                            let urls = option.urls().map(str::to_owned).collect::<Vec<_>>();
-                            match audio_cache
-                                .prepare_with_fallbacks(urls.clone(), &track, quality)
-                                .await
-                            {
+                            let stream_result =
+                                prepare_playback_option(&audio_cache, option, &track).await;
+                            match stream_result {
                                 Ok(stream) => {
-                                    prepared = Some((quality, urls, stream));
+                                    prepared = Some((quality, stream, options.clone()));
                                     break;
                                 }
                                 Err(error) => {
@@ -5301,12 +5321,12 @@ impl LyruneView {
                                 }
                             }
                         }
-                        let (quality, urls, stream) = prepared.ok_or_else(|| {
+                        let (quality, stream, options) = prepared.ok_or_else(|| {
                             last_error.unwrap_or_else(|| {
                                 anyhow::anyhow!("QQ 音乐没有返回当前账号可播放的音质")
                             })
                         })?;
-                        (quality, urls, stream, available_qualities)
+                        (quality, stream, available_qualities, options)
                     }
                 };
                 let playback =
@@ -5318,7 +5338,7 @@ impl LyruneView {
                     PlaybackLocation {
                         track_mid: track.mid.clone(),
                         quality,
-                        urls,
+                        options,
                     },
                     available_qualities,
                 ))

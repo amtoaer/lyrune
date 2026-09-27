@@ -866,10 +866,6 @@ impl ProtocolClient {
             .map(|(_, filename)| filename.clone())
             .collect::<Vec<_>>();
         let song_mid = vec![track.mid.clone(); requests.len()];
-        eprintln!(
-            "请求 QQ 音乐播放地址：{} (mid={}, song_type={})",
-            track.title, track.mid, track.song_type
-        );
         let song_type = vec![track.song_type; requests.len()];
         let data = self
             .call_with_session(

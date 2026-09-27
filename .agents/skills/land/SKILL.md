@@ -30,11 +30,10 @@ changes on a dedicated topic branch and synchronize that branch to the
 2. If the current branch is already the dedicated landing branch created by
    this skill, reuse it. This makes repeated Land actions in the same worktree
    use the same branch.
-3. Otherwise create a dedicated branch using the repository's `AGENTS.md`
-   branch naming convention, with a short, lowercase, hyphenated topic inferred
-   from the current change. If no repository convention is present, use
-   `codex/land/<topic>`. Do not use a generic branch name when the change has a
-   clear topic.
+3. Otherwise create a dedicated branch named `${type}/${description}`, using a
+   conventional type such as `feat`, `fix`, `refactor`, or `chore` and a short,
+   lowercase, hyphenated description inferred from the current change. Do not
+   use a generic branch name when the change has a clear topic.
 4. Never reuse or reset an unrelated existing branch. If the intended branch
    cannot be determined safely, stop and ask the user.
 

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use stream_download::source::{SourceStream, StreamOutcome};
 use stream_download::storage::StorageProvider;
 use stream_download::{Settings, StreamDownload};
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
@@ -497,33 +497,6 @@ impl AudioCache {
             .is_some_and(|metadata| metadata.identity != identity)
             || (existing_length > 0 && metadata.is_none())
         {
-            if existing_length > 0
-                && metadata.is_none()
-                && let Ok(audio_len) = encrypted_audio_len(&paths.media).await
-            {
-                let probe_file =
-                    File::open(&paths.media).context("无法打开 QQ 音乐加密缓存进行验证")?;
-                let mut probe = DecryptReader::new(
-                    BufReader::new(probe_file),
-                    QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?,
-                    audio_len,
-                );
-                validate_decrypted_source(&mut probe, format_hint)?;
-                let source =
-                    File::open(&paths.media).context("无法打开已缓存的 QQ 音乐加密音频")?;
-                let source = DecryptReader::new(BufReader::new(source), cipher, audio_len);
-                self.record_access(&key, existing_length).await;
-                drop(guard);
-                return Ok(PreparedStream {
-                    source: CachedAudioSource::Encrypted {
-                        source,
-                        _lease: self.lease(&key),
-                    },
-                    content_length: Some(audio_len),
-                    format_hint,
-                    cancellation: None,
-                });
-            }
             reset_media(&paths.media).await?;
             metadata = None;
             existing_length = 0;
@@ -639,59 +612,23 @@ impl AudioCache {
                 }),
             complete: false,
         };
-        write_metadata(&paths.metadata, &metadata).await?;
-        let local_stream: ByteStream = if resume_from > 0 {
-            let local = tokio::fs::File::open(&paths.media)
-                .await
-                .context("无法读取部分 QQ 音乐加密缓存")?;
-            Box::new(ReaderStream::new(local.take(resume_from)))
-        } else {
-            Box::new(futures_util::stream::empty())
-        };
-        let network_stream = response
-            .bytes_stream()
-            .map(|chunk| chunk.map_err(|error| io::Error::other(error.to_string())));
-        let stream: ByteStream = Box::new(local_stream.chain(network_stream));
-        self.begin_cache_write(&key, existing_length).await;
-        let source = ResumeSource {
-            stream,
-            client: self.client.clone(),
-            urls,
-            active_url,
-            validator: metadata.if_range_validator().map(str::to_owned),
-            content_length: Some(content_length),
-            media_path: paths.media.clone(),
-            metadata_path: paths.metadata.clone(),
-            metadata,
-            random_accessed: false,
-            cache: self.clone(),
-            cache_key: key.clone(),
-            _guard: guard,
-        };
-        let settings = Settings::default()
-            .prefetch_bytes(prefetch_bytes(
-                Some(content_length),
+        let (mut download, cancellation) = self
+            .start_stream_download(
+                urls,
+                response,
+                resume_from,
+                active_url,
+                paths,
+                key.clone(),
+                existing_length,
+                metadata,
                 track.duration_seconds,
                 quality,
-            ))
-            .retry_timeout(Duration::from_secs(5));
+                guard,
+            )
+            .await
+            .context("无法初始化 QQ 音乐加密流")?;
         let probe_cipher = QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?;
-        let mut download = match StreamDownload::from_stream(
-            source,
-            CacheStorageProvider {
-                path: paths.media.clone(),
-            },
-            settings,
-        )
-        .await
-        {
-            Ok(download) => download,
-            Err(error) => {
-                let size_bytes = file_length(&paths.media).await.unwrap_or_default();
-                self.finish_cache_write(&key, size_bytes).await;
-                return Err(anyhow!("无法初始化 QQ 音乐加密流：{error}"));
-            }
-        };
         let download = tokio::task::spawn_blocking(move || {
             let mut probe = DecryptReader::new(&mut download, probe_cipher, content_length);
             validate_decrypted_source(&mut probe, format_hint)?;
@@ -700,7 +637,6 @@ impl AudioCache {
         })
         .await
         .context("QQ 音乐加密流解密探测任务异常退出")??;
-        let cancellation = Some(download.cancellation_token());
         let source = DecryptReader::new(download, cipher, content_length);
         Ok(PreparedStream {
             source: CachedAudioSource::EncryptedStreaming {
@@ -709,7 +645,7 @@ impl AudioCache {
             },
             content_length: Some(content_length),
             format_hint,
-            cancellation,
+            cancellation: Some(cancellation),
         })
     }
 
@@ -890,8 +826,51 @@ impl AudioCache {
                 }),
             complete: false,
         };
-        write_metadata(&paths.metadata, &metadata).await?;
+        let content_length = metadata.content_length;
+        let (download, cancellation) = self
+            .start_stream_download(
+                urls,
+                response,
+                resume_from,
+                active_url,
+                paths,
+                key.clone(),
+                existing_length,
+                metadata,
+                track.duration_seconds,
+                quality,
+                guard,
+            )
+            .await
+            .context("无法初始化歌曲流")?;
 
+        Ok(PreparedStream {
+            source: CachedAudioSource::Streaming {
+                source: download,
+                _lease: self.lease(&key),
+            },
+            content_length,
+            format_hint: quality_format_hint(quality),
+            cancellation: Some(cancellation),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_stream_download(
+        &self,
+        urls: Vec<String>,
+        response: Response,
+        resume_from: u64,
+        active_url: usize,
+        paths: CachePaths,
+        key: String,
+        existing_length: u64,
+        metadata: CacheMetadata,
+        track_duration: u64,
+        quality: Quality,
+        guard: OwnedMutexGuard<()>,
+    ) -> Result<(StreamingSource, CancellationToken)> {
+        write_metadata(&paths.metadata, &metadata).await?;
         let local_stream: ByteStream = if resume_from > 0 {
             let local = tokio::fs::File::open(&paths.media)
                 .await
@@ -905,6 +884,7 @@ impl AudioCache {
             .map(|chunk| chunk.map_err(|error| io::Error::other(error.to_string())));
         let stream: ByteStream = Box::new(local_stream.chain(network_stream));
         self.begin_cache_write(&key, existing_length).await;
+        let content_length = metadata.content_length;
         let source = ResumeSource {
             stream,
             client: self.client.clone(),
@@ -921,11 +901,7 @@ impl AudioCache {
             _guard: guard,
         };
         let settings = Settings::default()
-            .prefetch_bytes(prefetch_bytes(
-                content_length,
-                track.duration_seconds,
-                quality,
-            ))
+            .prefetch_bytes(prefetch_bytes(content_length, track_duration, quality))
             .retry_timeout(Duration::from_secs(5));
         let download = match StreamDownload::from_stream(
             source,
@@ -940,20 +916,11 @@ impl AudioCache {
             Err(error) => {
                 let size_bytes = file_length(&paths.media).await.unwrap_or_default();
                 self.finish_cache_write(&key, size_bytes).await;
-                return Err(anyhow!("无法初始化歌曲流：{error}"));
+                return Err(anyhow!("{error}"));
             }
         };
-        let cancellation = Some(download.cancellation_token());
-
-        Ok(PreparedStream {
-            source: CachedAudioSource::Streaming {
-                source: download,
-                _lease: self.lease(&key),
-            },
-            content_length,
-            format_hint: quality_format_hint(quality),
-            cancellation,
-        })
+        let cancellation = download.cancellation_token();
+        Ok((download, cancellation))
     }
 
     fn key_lock(&self, key: &str) -> CacheKeyLock {
@@ -1374,25 +1341,6 @@ impl CachePaths {
             metadata: root.join(format!("{key}.json")),
         }
     }
-}
-
-async fn encrypted_audio_len(path: &Path) -> Result<u64> {
-    let length = tokio::fs::metadata(path)
-        .await
-        .context("无法读取加密音频缓存大小")?
-        .len();
-    if length < 0xc0 {
-        bail!("QQ 音乐加密音频缺少完整 footer");
-    }
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .context("无法读取加密音频缓存")?;
-    file.seek(SeekFrom::End(-0xc0)).await?;
-    let mut footer = vec![0u8; 0xc0];
-    file.read_exact(&mut footer).await?;
-    Ok(qmc_decrypt::parse_musicex_footer(&footer, length - 0xc0)
-        .map(|info| info.audio_len)
-        .unwrap_or(length))
 }
 
 fn validate_decrypted_source<R: Read + Seek>(

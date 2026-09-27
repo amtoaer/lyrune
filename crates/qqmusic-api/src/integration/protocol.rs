@@ -734,6 +734,7 @@ impl ProtocolClient {
                 method,
                 json!({
                     "dirId": 201,
+                    "bFmtUtf8": true,
                     "v_songInfo": [{
                         "songId": song_id,
                     }],

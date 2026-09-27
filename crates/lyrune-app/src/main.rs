@@ -15,6 +15,7 @@ mod settings;
 mod single_instance;
 mod singleflight;
 mod tray;
+mod update;
 
 use std::cell::RefCell;
 use std::rc::Rc;

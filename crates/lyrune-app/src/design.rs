@@ -158,6 +158,12 @@ impl ColorTheme {
                 ring: "#8839ef",
                 emotion: "#ea76cb",
                 emotion_foreground: "#eff1f5",
+                info: "#1e66f5",
+                info_foreground: "#eff1f5",
+                success: "#40a02b",
+                success_foreground: "#eff1f5",
+                warning: "#df8e1d",
+                warning_foreground: "#4c4f69",
                 scrollbar_thumb: "#bcc0cc",
             },
             Self::CatppuccinMocha => Palette {
@@ -181,6 +187,12 @@ impl ColorTheme {
                 ring: "#cba6f7",
                 emotion: "#f5c2e7",
                 emotion_foreground: "#1e1e2e",
+                info: "#89b4fa",
+                info_foreground: "#1e1e2e",
+                success: "#a6e3a1",
+                success_foreground: "#1e1e2e",
+                warning: "#f9e2af",
+                warning_foreground: "#1e1e2e",
                 scrollbar_thumb: "#45475a",
             },
             Self::AyuLight => Palette {
@@ -204,6 +216,12 @@ impl ColorTheme {
                 ring: "#f29718",
                 emotion: "#e65050",
                 emotion_foreground: "#ffffff",
+                info: "#22a4e6",
+                info_foreground: "#ffffff",
+                success: "#86b300",
+                success_foreground: "#ffffff",
+                warning: "#f29718",
+                warning_foreground: "#ffffff",
                 scrollbar_thumb: "#c5c5c8",
             },
             Self::AyuDark => Palette {
@@ -227,6 +245,12 @@ impl ColorTheme {
                 ring: "#ffb454",
                 emotion: "#f07178",
                 emotion_foreground: "#0d1016",
+                info: "#5ac1fe",
+                info_foreground: "#0d1016",
+                success: "#aad94c",
+                success_foreground: "#0d1016",
+                warning: "#ffb454",
+                warning_foreground: "#0d1016",
                 scrollbar_thumb: "#bfbdb64c",
             },
             Self::EverforestLight => Palette {
@@ -250,6 +274,12 @@ impl ColorTheme {
                 ring: "#3a94c5",
                 emotion: "#f85552",
                 emotion_foreground: "#fdf6e3",
+                info: "#3a94c5",
+                info_foreground: "#fdf6e3",
+                success: "#8da101",
+                success_foreground: "#fdf6e3",
+                warning: "#dfa000",
+                warning_foreground: "#5c6a72",
                 scrollbar_thumb: "#bdc3af",
             },
             Self::EverforestDark => Palette {
@@ -273,6 +303,12 @@ impl ColorTheme {
                 ring: "#7fbbb3",
                 emotion: "#e67e80",
                 emotion_foreground: "#262e34",
+                info: "#7fbbb3",
+                info_foreground: "#262e34",
+                success: "#a7c080",
+                success_foreground: "#262e34",
+                warning: "#dbbc7f",
+                warning_foreground: "#262e34",
                 scrollbar_thumb: "#485156",
             },
             Self::RosePineDawn => Palette {
@@ -296,6 +332,12 @@ impl ColorTheme {
                 ring: "#56949f",
                 emotion: "#b4637a",
                 emotion_foreground: "#faf4ed",
+                info: "#56949f",
+                info_foreground: "#faf4ed",
+                success: "#286983",
+                success_foreground: "#faf4ed",
+                warning: "#ea9d34",
+                warning_foreground: "#575279",
                 scrollbar_thumb: "#cecacd",
             },
             Self::RosePineMoon => Palette {
@@ -319,6 +361,12 @@ impl ColorTheme {
                 ring: "#9ccfd8",
                 emotion: "#eb6f92",
                 emotion_foreground: "#232136",
+                info: "#9ccfd8",
+                info_foreground: "#232136",
+                success: "#31748f",
+                success_foreground: "#232136",
+                warning: "#f6c177",
+                warning_foreground: "#232136",
                 scrollbar_thumb: "#56526e",
             },
             Self::KanagawaLotus => Palette {
@@ -342,6 +390,12 @@ impl ColorTheme {
                 ring: "#766b90",
                 emotion: "#b35b79",
                 emotion_foreground: "#f2ecbc",
+                info: "#4d699b",
+                info_foreground: "#f2ecbc",
+                success: "#6f894e",
+                success_foreground: "#f2ecbc",
+                warning: "#cc6d00",
+                warning_foreground: "#545464",
                 scrollbar_thumb: "#a09cac",
             },
             Self::KanagawaWave => Palette {
@@ -365,6 +419,12 @@ impl ColorTheme {
                 ring: "#957fb8",
                 emotion: "#d27e99",
                 emotion_foreground: "#1f1f28",
+                info: "#7e9cd8",
+                info_foreground: "#1f1f28",
+                success: "#98bb6c",
+                success_foreground: "#1f1f28",
+                warning: "#e6c384",
+                warning_foreground: "#1f1f28",
                 scrollbar_thumb: "#54546d",
             },
             Self::AyuMirage => Palette {
@@ -388,6 +448,12 @@ impl ColorTheme {
                 ring: "#80cbc4",
                 emotion: "#f28779",
                 emotion_foreground: "#1f2430",
+                info: "#80cbc4",
+                info_foreground: "#1f2430",
+                success: "#bae67e",
+                success_foreground: "#1f2430",
+                warning: "#ffcc66",
+                warning_foreground: "#1f2430",
                 scrollbar_thumb: "#4b5568",
             },
             Self::OneDark => Palette {
@@ -411,6 +477,12 @@ impl ColorTheme {
                 ring: "#c678dd",
                 emotion: "#e06c75",
                 emotion_foreground: "#282c34",
+                info: "#61afef",
+                info_foreground: "#282c34",
+                success: "#98c379",
+                success_foreground: "#282c34",
+                warning: "#e5c07b",
+                warning_foreground: "#282c34",
                 scrollbar_thumb: "#4b5263",
             },
             Self::OneLight => Palette {
@@ -434,6 +506,12 @@ impl ColorTheme {
                 ring: "#a626a4",
                 emotion: "#e45649",
                 emotion_foreground: "#ffffff",
+                info: "#4078f2",
+                info_foreground: "#ffffff",
+                success: "#50a14f",
+                success_foreground: "#ffffff",
+                warning: "#c18401",
+                warning_foreground: "#383a42",
                 scrollbar_thumb: "#c8c8c9",
             },
             Self::GruvboxLight => Palette {
@@ -457,6 +535,12 @@ impl ColorTheme {
                 ring: "#427b58",
                 emotion: "#9d0006",
                 emotion_foreground: "#fbf1c7",
+                info: "#458588",
+                info_foreground: "#fbf1c7",
+                success: "#98971a",
+                success_foreground: "#fbf1c7",
+                warning: "#d79921",
+                warning_foreground: "#282828",
                 scrollbar_thumb: "#bdae93",
             },
             Self::GruvboxDark => Palette {
@@ -480,6 +564,12 @@ impl ColorTheme {
                 ring: "#83a598",
                 emotion: "#fb4934",
                 emotion_foreground: "#282828",
+                info: "#83a598",
+                info_foreground: "#282828",
+                success: "#b8bb26",
+                success_foreground: "#282828",
+                warning: "#fabd2f",
+                warning_foreground: "#282828",
                 scrollbar_thumb: "#665c54",
             },
             Self::DraculaLight => Palette {
@@ -503,6 +593,12 @@ impl ColorTheme {
                 ring: "#ff79c6",
                 emotion: "#d12f1b",
                 emotion_foreground: "#ffffff",
+                info: "#036a96",
+                info_foreground: "#1f1f1f",
+                success: "#14710a",
+                success_foreground: "#1f1f1f",
+                warning: "#846e15",
+                warning_foreground: "#1f1f1f",
                 scrollbar_thumb: "#b8b8ad",
             },
             Self::DraculaDark => Palette {
@@ -526,6 +622,12 @@ impl ColorTheme {
                 ring: "#ff79c6",
                 emotion: "#ff5555",
                 emotion_foreground: "#282a36",
+                info: "#8be9fd",
+                info_foreground: "#282a36",
+                success: "#50fa7b",
+                success_foreground: "#282a36",
+                warning: "#ffb86c",
+                warning_foreground: "#282a36",
                 scrollbar_thumb: "#6272a4",
             },
         }
@@ -553,6 +655,12 @@ pub struct Palette {
     pub ring: &'static str,
     pub emotion: &'static str,
     pub emotion_foreground: &'static str,
+    pub info: &'static str,
+    pub info_foreground: &'static str,
+    pub success: &'static str,
+    pub success_foreground: &'static str,
+    pub warning: &'static str,
+    pub warning_foreground: &'static str,
     pub scrollbar_thumb: &'static str,
 }
 
@@ -592,7 +700,6 @@ pub(crate) fn apply(
     Theme::global_mut(cx).list.active_highlight = false;
     let notification = &mut Theme::global_mut(cx).notification;
     notification.placement = Anchor::BottomCenter;
-    notification.max_items = 1;
 }
 
 fn theme_config(
@@ -628,6 +735,18 @@ fn theme_config(
     colors.danger_foreground = Some(palette.emotion_foreground.into());
     colors.danger_hover = Some(palette.emotion.into());
     colors.danger_active = Some(palette.emotion.into());
+    colors.info = Some(palette.info.into());
+    colors.info_foreground = Some(palette.info_foreground.into());
+    colors.info_hover = Some(palette.info.into());
+    colors.info_active = Some(palette.info.into());
+    colors.success = Some(palette.success.into());
+    colors.success_foreground = Some(palette.success_foreground.into());
+    colors.success_hover = Some(palette.success.into());
+    colors.success_active = Some(palette.success.into());
+    colors.warning = Some(palette.warning.into());
+    colors.warning_foreground = Some(palette.warning_foreground.into());
+    colors.warning_hover = Some(palette.warning.into());
+    colors.warning_active = Some(palette.warning.into());
     colors.button = Some(palette.surface.into());
     colors.button_foreground = Some(palette.foreground.into());
     colors.button_hover = Some(palette.hover.into());

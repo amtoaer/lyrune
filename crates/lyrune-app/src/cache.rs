@@ -497,31 +497,32 @@ impl AudioCache {
             .is_some_and(|metadata| metadata.identity != identity)
             || (existing_length > 0 && metadata.is_none())
         {
-            if existing_length > 0 && metadata.is_none() {
-                if let Ok(audio_len) = encrypted_audio_len(&paths.media).await {
-                    let probe_file =
-                        File::open(&paths.media).context("无法打开 QQ 音乐加密缓存进行验证")?;
-                    let mut probe = DecryptReader::new(
-                        BufReader::new(probe_file),
-                        QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?,
-                        audio_len,
-                    );
-                    validate_decrypted_source(&mut probe, format_hint)?;
-                    let source =
-                        File::open(&paths.media).context("无法打开已缓存的 QQ 音乐加密音频")?;
-                    let source = DecryptReader::new(BufReader::new(source), cipher, audio_len);
-                    self.record_access(&key, existing_length).await;
-                    drop(guard);
-                    return Ok(PreparedStream {
-                        source: CachedAudioSource::Encrypted {
-                            source,
-                            _lease: self.lease(&key),
-                        },
-                        content_length: Some(audio_len),
-                        format_hint,
-                        cancellation: None,
-                    });
-                }
+            if existing_length > 0
+                && metadata.is_none()
+                && let Ok(audio_len) = encrypted_audio_len(&paths.media).await
+            {
+                let probe_file =
+                    File::open(&paths.media).context("无法打开 QQ 音乐加密缓存进行验证")?;
+                let mut probe = DecryptReader::new(
+                    BufReader::new(probe_file),
+                    QmcCipher::from_ekey(ekey).map_err(|_| anyhow!("QQ 音乐 ekey 无效"))?,
+                    audio_len,
+                );
+                validate_decrypted_source(&mut probe, format_hint)?;
+                let source =
+                    File::open(&paths.media).context("无法打开已缓存的 QQ 音乐加密音频")?;
+                let source = DecryptReader::new(BufReader::new(source), cipher, audio_len);
+                self.record_access(&key, existing_length).await;
+                drop(guard);
+                return Ok(PreparedStream {
+                    source: CachedAudioSource::Encrypted {
+                        source,
+                        _lease: self.lease(&key),
+                    },
+                    content_length: Some(audio_len),
+                    format_hint,
+                    cancellation: None,
+                });
             }
             reset_media(&paths.media).await?;
             metadata = None;

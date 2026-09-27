@@ -59,9 +59,13 @@ pub fn parse_musicex_footer(footer: &[u8], audio_len: u64) -> Result<MusicEx, Er
 }
 
 fn decode_utf16(field: &[u8]) -> Result<String, Error> {
-    let units = field
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+    let (chunks, remainder) = field.as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(Error::InvalidFooter("odd utf16 length"));
+    }
+    let units = chunks
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk))
         .collect::<Vec<_>>();
     let end = units
         .iter()
@@ -115,7 +119,7 @@ fn simple_key(salt: u8, length: usize) -> Vec<u8> {
 fn decrypt_tea(input: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, Error> {
     const SALT: usize = 2;
     const ZERO: usize = 7;
-    if input.len() < 16 || input.len() % 8 != 0 {
+    if input.len() < 16 || !input.len().is_multiple_of(8) {
         return Err(Error::InvalidEkey);
     }
     let mut block = [0u8; 8];
@@ -231,11 +235,7 @@ impl QmcCipher {
             Cipher::Map(masks) => {
                 for (index, byte) in data.iter_mut().enumerate() {
                     let position = offset + index as u64;
-                    let position = if position > 0x7fff {
-                        position % 0x7fff
-                    } else {
-                        position
-                    };
+                    let position = position % masks.len() as u64;
                     *byte ^= masks[position as usize];
                 }
             }
@@ -283,8 +283,8 @@ impl Rc4 {
         let mut position = offset as usize;
         if position < 128 {
             let length = data.len().min(128 - position);
-            for index in 0..length {
-                data[index] ^= self.key[self.skip(position + index)];
+            for (index, byte) in data.iter_mut().take(length).enumerate() {
+                *byte ^= self.key[self.skip(position + index)];
             }
             data = &mut data[length..];
             position += length;

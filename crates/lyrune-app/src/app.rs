@@ -36,7 +36,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use wana_kana::{ConvertJapanese as _, IsJapaneseStr as _};
 
-use crate::cache::{AudioCache, audio_cache_limit_bytes};
+use crate::cache::{AudioCache, PreparedStream, audio_cache_limit_bytes};
 use crate::credentials::CredentialStore;
 use crate::design::{self, AppFonts, ColorTheme};
 use crate::http::{
@@ -2151,6 +2151,29 @@ struct PlaybackLocation {
     track_mid: String,
     quality: Quality,
     options: Vec<PlaybackOption>,
+}
+
+async fn prepare_playback_option(
+    audio_cache: &AudioCache,
+    option: &PlaybackOption,
+    track: &Track,
+) -> anyhow::Result<PreparedStream> {
+    let urls = option.urls().map(str::to_owned).collect::<Vec<_>>();
+    if option.encrypted {
+        let ekey = option.ekey.as_deref().context("QQ 音乐加密音源缺少 ekey")?;
+        let format_hint = if option.url.contains(".mgg") {
+            "ogg"
+        } else {
+            "flac"
+        };
+        audio_cache
+            .prepare_encrypted(urls, ekey, track, option.quality, format_hint)
+            .await
+    } else {
+        audio_cache
+            .prepare_with_fallbacks(urls, track, option.quality)
+            .await
+    }
 }
 
 struct PlaybackQueue {
@@ -5249,40 +5272,17 @@ impl LyruneView {
                         .find(|option| option.quality == desired_quality)
                         .cloned()
                     {
-                        Some(option) => {
-                            let urls = option.urls().map(str::to_owned).collect::<Vec<_>>();
-                            let stream_result = if option.encrypted {
-                                let Some(ekey) = option.ekey.as_deref() else {
-                                    return Err(anyhow::anyhow!("QQ 音乐加密音源缺少 ekey"));
-                                };
-                                let format_hint = if option.url.contains(".mgg") {
-                                    "ogg"
-                                } else {
-                                    "flac"
-                                };
-                                audio_cache
-                                    .prepare_encrypted(
-                                        urls.clone(),
-                                        ekey,
-                                        &track,
-                                        desired_quality,
-                                        format_hint,
-                                    )
-                                    .await
-                            } else {
-                                audio_cache
-                                    .prepare_with_fallbacks(urls.clone(), &track, desired_quality)
-                                    .await
-                            };
-                            stream_result.ok().map(|stream| {
+                        Some(option) => prepare_playback_option(&audio_cache, &option, &track)
+                            .await
+                            .ok()
+                            .map(|stream| {
                                 (
                                     desired_quality,
                                     stream,
                                     options.iter().map(|option| option.quality).collect(),
                                     options,
                                 )
-                            })
-                        }
+                            }),
                         None => None,
                     },
                     None => None,
@@ -5309,32 +5309,8 @@ impl LyruneView {
                             else {
                                 continue;
                             };
-                            let urls = option.urls().map(str::to_owned).collect::<Vec<_>>();
-                            let stream_result = if option.encrypted {
-                                let Some(ekey) = option.ekey.as_deref() else {
-                                    available_qualities.retain(|candidate| *candidate != quality);
-                                    last_error = Some(anyhow::anyhow!("QQ 音乐加密音源缺少 ekey"));
-                                    continue;
-                                };
-                                let format_hint = if option.url.contains(".mgg") {
-                                    "ogg"
-                                } else {
-                                    "flac"
-                                };
-                                audio_cache
-                                    .prepare_encrypted(
-                                        urls.clone(),
-                                        ekey,
-                                        &track,
-                                        quality,
-                                        format_hint,
-                                    )
-                                    .await
-                            } else {
-                                audio_cache
-                                    .prepare_with_fallbacks(urls.clone(), &track, quality)
-                                    .await
-                            };
+                            let stream_result =
+                                prepare_playback_option(&audio_cache, option, &track).await;
                             match stream_result {
                                 Ok(stream) => {
                                     prepared = Some((quality, stream, options.clone()));

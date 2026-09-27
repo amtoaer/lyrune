@@ -5388,11 +5388,13 @@ impl LyruneView {
                                         }
                                         Err(error) => {
                                             this.notify_error(format!("播放失败：{error:#}"), cx);
+                                            this.play_next(false, cx);
                                         }
                                     }
                                 }
                                 Err(error) => {
                                     this.notify_error(format!("获取歌曲失败：{error:#}"), cx);
+                                    this.play_next(false, cx);
                                 }
                             }
                         }

@@ -3999,7 +3999,7 @@ dependencies = [
 
 [[package]]
 name = "lyrune"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -4329,7 +4329,7 @@ dependencies = [
 
 [[package]]
 name = "netease-qq-music-api"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -5524,7 +5524,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "qmc-decrypt"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "base64",
 ]

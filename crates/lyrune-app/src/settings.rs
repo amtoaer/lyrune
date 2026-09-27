@@ -257,6 +257,7 @@ pub struct AppSettings {
     pub current_playback: Option<PersistedPlayback>,
     pub window_size: Option<PersistedWindowSize>,
     pub sidebar_width: Option<u32>,
+    pub check_updates_on_startup: bool,
 }
 
 impl Default for AppSettings {
@@ -285,6 +286,7 @@ impl Default for AppSettings {
             current_playback: None,
             window_size: None,
             sidebar_width: None,
+            check_updates_on_startup: true,
         }
     }
 }
@@ -692,6 +694,7 @@ mod tests {
             current_playback: None,
             window_size: None,
             sidebar_width: None,
+            check_updates_on_startup: true,
         }
         .normalized();
         assert_eq!(settings.volume, 1.);
@@ -757,6 +760,7 @@ mod tests {
                 height: 900,
             }),
             sidebar_width: Some(296),
+            check_updates_on_startup: true,
         };
 
         SettingsStore::save_to(&path, &expected).expect("save settings");
@@ -767,6 +771,10 @@ mod tests {
         assert_eq!(restored.color_theme_mode, expected.color_theme_mode);
         assert_eq!(restored.light_color_theme, expected.light_color_theme);
         assert_eq!(restored.dark_color_theme, expected.dark_color_theme);
+        assert_eq!(
+            restored.check_updates_on_startup,
+            expected.check_updates_on_startup
+        );
         assert_eq!(restored.tray_icon_style, expected.tray_icon_style);
         assert_eq!(restored.window_decoration, expected.window_decoration);
         assert_eq!(restored.ui_font_families, expected.ui_font_families);

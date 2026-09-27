@@ -64,6 +64,7 @@ use crate::settings::{
     default_ui_font_families, parse_font_families,
 };
 use crate::singleflight::SingleFlight;
+use crate::update::AvailableUpdate;
 use qqmusic_api::integration::{
     CredentialSession, LoginEvent, PlaybackOption, PlaylistPage, ProtocolClient, QqCredential,
     Quality, RecommendationKind, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track,
@@ -2229,8 +2230,6 @@ enum PlaybackLoadEvent {
     Finished(anyhow::Result<(PreparedPlayback, PlaybackLocation, Vec<Quality>)>),
 }
 
-struct GlobalErrorNotification;
-
 impl RepeatMode {
     fn next(self) -> Self {
         match self {
@@ -2347,6 +2346,7 @@ pub struct LyruneView {
     liked_tracks: HashMap<String, bool>,
     liked_state_loading: HashSet<String>,
     liked_toggle_loading: HashSet<String>,
+    update_check_in_progress: bool,
     shuffle: bool,
     repeat_mode: RepeatMode,
     pending_playback_restore: Option<PersistedPlayback>,
@@ -2796,6 +2796,7 @@ impl LyruneView {
             liked_tracks: HashMap::new(),
             liked_state_loading: HashSet::new(),
             liked_toggle_loading: HashSet::new(),
+            update_check_in_progress: false,
             shuffle: false,
             repeat_mode: RepeatMode::Off,
             pending_playback_restore,
@@ -2827,6 +2828,9 @@ impl LyruneView {
         view.start_audio_cache_maintenance();
         view.start_cdn_maintenance();
         view.restore_credential(cx);
+        if view.settings.check_updates_on_startup {
+            view.schedule_update_check(cx);
+        }
         view
     }
 
@@ -2857,17 +2861,98 @@ impl LyruneView {
     }
 
     fn notify_error(&self, message: impl Into<String>, cx: &mut Context<Self>) {
-        let window_handle = self.window_handle;
-        let notification = Notification::new()
-            .message(message.into())
-            .id::<GlobalErrorNotification>()
-            .bg(cx.theme().danger)
-            .text_color(cx.theme().danger_foreground)
+        self.notify_status(
+            Notification::error(message.into()),
+            cx.theme().danger,
+            cx.theme().danger_foreground,
+            cx,
+        );
+    }
+
+    fn schedule_update_check(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            if this
+                .read_with(cx, |this, _| {
+                    this.settings.check_updates_on_startup && !this.update_check_in_progress
+                })
+                .unwrap_or(false)
+            {
+                this.update(cx, |this, cx| this.check_updates(false, cx))?;
+            }
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    fn check_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if self.update_check_in_progress {
+            return;
+        }
+        self.update_check_in_progress = true;
+        let task = RUNTIME.spawn(crate::update::check());
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result);
+            this.update(cx, |this, cx| {
+                this.update_check_in_progress = false;
+                match result {
+                    Ok(Some(update)) => this.notify_update(update, cx),
+                    Ok(None) if manual => this.notify_success("当前已是最新版本", cx),
+                    Err(error) => this.notify_error(format!("检查更新失败：{error:#}"), cx),
+                    _ => {}
+                }
+                cx.notify();
+            })
+        })
+        .detach();
+    }
+
+    fn notify_update(&self, update: AvailableUpdate, cx: &mut Context<Self>) {
+        self.notify_info(
+            format!(
+                "发现 Lyrune {}，请前往 GitHub Release 页面更新",
+                update.version
+            ),
+            cx,
+        );
+    }
+
+    fn notify_info(&self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.notify_status(
+            Notification::info(message.into()),
+            cx.theme().info,
+            cx.theme().info_foreground,
+            cx,
+        );
+    }
+
+    fn notify_success(&self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.notify_status(
+            Notification::success(message.into()),
+            cx.theme().success,
+            cx.theme().success_foreground,
+            cx,
+        );
+    }
+
+    fn notify_status(
+        &self,
+        notification: Notification,
+        background: Hsla,
+        foreground: Hsla,
+        cx: &mut Context<Self>,
+    ) {
+        let notification = notification
+            .bg(background)
+            .text_color(foreground)
             .text_center()
             .border_0()
             .rounded(px(9.))
-            .w(px(440.))
             .py_3();
+        let window_handle = self.window_handle;
         cx.defer(move |cx| {
             let _ = window_handle.update(cx, |_, window, cx| {
                 window.push_notification(notification, cx);
@@ -5258,6 +5343,7 @@ impl LyruneView {
         cx.notify();
         self.maybe_load_queue_recommendations(false, cx);
 
+        let track_title = track.title.clone();
         let (sender, mut receiver) = mpsc::channel(1);
         drop(RUNTIME.spawn(async move {
             let result = async {
@@ -5387,13 +5473,19 @@ impl LyruneView {
                                             this.wake_playback_ticks();
                                         }
                                         Err(error) => {
-                                            this.notify_error(format!("播放失败：{error:#}"), cx);
+                                            this.notify_error(
+                                                format!("播放歌曲“{}”失败：{error:#}", track_title),
+                                                cx,
+                                            );
                                             this.play_next(false, cx);
                                         }
                                     }
                                 }
                                 Err(error) => {
-                                    this.notify_error(format!("获取歌曲失败：{error:#}"), cx);
+                                    this.notify_error(
+                                        format!("获取歌曲“{}”失败：{error:#}", track_title),
+                                        cx,
+                                    );
                                     this.play_next(false, cx);
                                 }
                             }
@@ -5768,6 +5860,15 @@ impl LyruneView {
         }
         self.settings.tray_icon_style = style;
         crate::set_tray_icon_style(style.resolve(cx.window_appearance()), cx);
+        self.persist_settings();
+        cx.notify();
+    }
+
+    fn set_check_updates_on_startup(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.check_updates_on_startup == enabled {
+            return;
+        }
+        self.settings.check_updates_on_startup = enabled;
         self.persist_settings();
         cx.notify();
     }
@@ -6864,6 +6965,7 @@ impl LyruneView {
                     )
             })
             .collect::<Vec<_>>();
+        let check_updates_on_startup = self.settings.check_updates_on_startup;
         let selected_window_decoration = self.settings.window_decoration;
         let window_decoration_buttons = WindowDecoration::ALL
             .into_iter()
@@ -7014,6 +7116,53 @@ impl LyruneView {
                                                 .w_full()
                                                 .gap_1()
                                                 .children(tray_icon_buttons),
+                                        ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(div().font_medium().child("更新"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("启动时在后台检查新版本，不会影响正常使用"),
+                                        )
+                                        .child(
+                                            Button::new("check-updates-on-startup")
+                                                .label(if check_updates_on_startup {
+                                                    "启动时检查更新：开启"
+                                                } else {
+                                                    "启动时检查更新：关闭"
+                                                })
+                                                .ghost()
+                                                .selected(check_updates_on_startup)
+                                                .w_full()
+                                                .h(px(38.))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_check_updates_on_startup(
+                                                        !check_updates_on_startup,
+                                                        cx,
+                                                    )
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("check-updates-now")
+                                            .label(if self.update_check_in_progress {
+                                                "正在检查更新…"
+                                            } else {
+                                                "立即检查更新"
+                                            })
+                                            .outline()
+                                            .w_full()
+                                            .h(px(38.))
+                                            .disabled(self.update_check_in_progress)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.check_updates(true, cx)
+                                            })),
                                         ),
                                 )
                                 .child(

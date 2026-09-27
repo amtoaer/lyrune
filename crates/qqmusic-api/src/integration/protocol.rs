@@ -835,14 +835,16 @@ impl ProtocolClient {
         let normal = self
             .playback_options_for(credential, track, &Quality::ALL)
             .await;
-        match normal {
-            Ok(options) if !options.is_empty() => Ok(options),
-            Ok(_) => self.encrypted_playback_options(credential, track).await,
-            Err(error) => self
-                .encrypted_playback_options(credential, track)
-                .await
-                .map_err(|_| error),
-        }
+        let mut options = match normal {
+            Ok(options) if !options.is_empty() => options,
+            Ok(_) => self.encrypted_playback_options(credential, track).await?,
+            Err(error) => match self.encrypted_playback_options(credential, track).await {
+                Ok(options) => options,
+                Err(_) => return Err(error),
+            },
+        };
+        options.sort_unstable_by_key(|option| option.quality);
+        Ok(options)
     }
 
     async fn playback_options_for(

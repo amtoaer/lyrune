@@ -382,7 +382,9 @@ pub struct Track {
     pub duration_seconds: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Quality {
     #[default]
@@ -449,16 +451,11 @@ impl Quality {
     }
 
     pub fn fallback_order(available: &[Self], preferred: Self) -> Vec<Self> {
-        let Some(preferred_rank) = Self::ALL.iter().position(|quality| *quality == preferred)
-        else {
-            return Vec::new();
-        };
-        Self::ALL[..=preferred_rank]
-            .iter()
-            .rev()
-            .copied()
-            .filter(|quality| available.contains(quality))
-            .collect()
+        let lower_end = available.partition_point(|quality| *quality <= preferred);
+        if lower_end > 0 {
+            return available[..lower_end].iter().rev().copied().collect();
+        }
+        available.iter().copied().next().into_iter().collect()
     }
 
     pub(crate) fn file_parts(self) -> (&'static str, &'static str) {
@@ -677,6 +674,7 @@ mod tests {
 
     #[test]
     fn quality_fallback_prefers_the_closest_lower_tier() {
+        assert!(Quality::ALL.is_sorted());
         let available = [Quality::Standard, Quality::High, Quality::Lossless];
         assert_eq!(
             Quality::best_available(&available, Quality::High),
@@ -721,9 +719,10 @@ mod tests {
                 Quality::Standard,
             ]
         );
-        assert!(
-            Quality::fallback_order(&[Quality::High], Quality::Standard).is_empty(),
-            "a fallback must never select a higher quality"
+        assert_eq!(
+            Quality::fallback_order(&[Quality::High, Quality::Lossless], Quality::Standard),
+            vec![Quality::High],
+            "when no lower quality exists, try the lowest available quality"
         );
     }
 }

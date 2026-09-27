@@ -235,7 +235,11 @@ impl QmcCipher {
             Cipher::Map(masks) => {
                 for (index, byte) in data.iter_mut().enumerate() {
                     let position = offset + index as u64;
-                    let position = position % masks.len() as u64;
+                    let position = if position > 0x7fff {
+                        position % 0x7fff
+                    } else {
+                        position
+                    };
                     *byte ^= masks[position as usize];
                 }
             }

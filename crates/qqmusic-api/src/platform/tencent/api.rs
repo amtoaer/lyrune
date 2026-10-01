@@ -22,6 +22,7 @@ static TENCENT_GUID: LazyLock<String> = LazyLock::new(utils::get_guid);
 
 pub(crate) struct TencentClient {
     client: Client,
+    pub(crate) guid: String,
 }
 
 impl TencentClient {
@@ -37,6 +38,7 @@ impl TencentClient {
                 )
                 .build()
                 .unwrap(),
+            guid: TENCENT_GUID.clone(),
         }
     }
 
@@ -57,13 +59,13 @@ impl TencentClient {
                 "chid": "0",
                 "uin": login_token.music_id.to_string(),
                 "g_tk": utils::hash33(login_token.music_key.as_str()),
-                "guid": TENCENT_GUID.as_str()
+                "guid": self.guid
             }),
             None => json!({
                 "ct": 19,
                 "cv": 2201,
                 "chid": "0",
-                "guid": TENCENT_GUID.as_str()
+                "guid": self.guid
             }),
         };
 
@@ -79,6 +81,15 @@ impl TencentClient {
 
         self.client
             .post(TENCENT_API_URL)
+            .timeout(
+                if body["result"]["module"] == "QQConnectLogin.LoginServer"
+                    && body["result"]["param"].get("code").is_some()
+                {
+                    Duration::from_secs(3)
+                } else {
+                    HTTP_TIMEOUT
+                },
+            )
             .query(&[("sign", sign.as_str())])
             .header(COOKIE, token.map(|v| v.to_cookie()).unwrap_or_default())
             .json(&body)
@@ -342,7 +353,7 @@ impl TencentClient {
                       "userinfo": 0,
                       "tag": 0,
                       "is_pc": 1,
-                      "guid": TENCENT_GUID.as_str()
+                      "guid": self.guid
                     }
                   }
                 }),
@@ -453,7 +464,7 @@ impl TencentClient {
                     "param": {
                       "uin": token.map(|v| v.music_id.to_string()).unwrap_or_default(),
                       "filename": filename,
-                      "guid": TENCENT_GUID.as_str(),
+                      "guid": self.guid,
                       "songmid": songmid,
                       "songtype": songtype,
                       "ctx": 0
@@ -626,12 +637,69 @@ impl TencentClient {
         }
     }
 
+    pub(crate) async fn login_with_qq_code(
+        &self,
+        code: &str,
+    ) -> MusicClientResult<TencentLoginToken> {
+        let response = self
+            .post::<TLoginInfoResponse>(
+                json!({
+                    "result": {
+                        "module": "QQConnectLogin.LoginServer",
+                        "method": "QQLogin",
+                        "param": {
+                            "onlyNeedAccessToken": 0,
+                            "forceRefreshToken": 0,
+                            "appid": 100497308,
+                            "code": code
+                        }
+                    },
+                    "comm": {
+                        "ct": 19,
+                        "cv": 1,
+                        "tmeLoginType": 2
+                    }
+                }),
+                None,
+            )
+            .await
+            .map_err(|error| match error {
+                MusicClientError::NetworkError(error) => {
+                    MusicClientError::NetworkError(error.without_url())
+                }
+                error => error,
+            })?;
+        response.into_token()
+    }
+
     pub(crate) async fn refresh_login_token(
         &self,
         token: &TencentLoginToken,
     ) -> MusicClientResult<TencentLoginToken> {
-        let response = self
-            .post::<TLoginInfoResponse>(
+        let body =
+            if token.login_type == 2 && !token.open_id.is_empty() && !token.access_token.is_empty()
+            {
+                json!({
+                    "result": {
+                        "module": "QQConnectLogin.LoginServer",
+                        "method": "QQLogin",
+                        "param": {
+                            "openid": token.open_id,
+                            "access_token": token.access_token,
+                            "refresh_token": token.refresh_token,
+                            "musicid": token.music_id,
+                            "musickey": token.music_key,
+                            "onlyNeedAccessToken": 0,
+                            "forceRefreshToken": 0
+                        }
+                    },
+                    "comm": {
+                        "ct": 19,
+                        "cv": 1,
+                        "tmeLoginType": 2
+                    }
+                })
+            } else {
                 json!({
                     "result": {
                         "module": "music.login.LoginServer",
@@ -646,10 +714,9 @@ impl TencentClient {
                     "comm": {
                         "tmeLoginType": token.login_type
                     }
-                }),
-                Some(token),
-            )
-            .await?;
+                })
+            };
+        let response = self.post::<TLoginInfoResponse>(body, Some(token)).await?;
         response.into_token()
     }
 

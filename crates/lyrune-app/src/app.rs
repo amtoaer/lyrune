@@ -33,7 +33,7 @@ use gpui_component::{
 use quick_xml::{Reader, escape::unescape, events::Event};
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use wana_kana::{ConvertJapanese as _, IsJapaneseStr as _};
 
 use crate::cache::{AudioCache, PreparedStream, audio_cache_limit_bytes};
@@ -67,8 +67,8 @@ use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
 use qqmusic_api::integration::{
     CredentialSession, LoginEvent, PlaybackOption, PlaylistPage, ProtocolClient, QqCredential,
-    Quality, RecommendationKind, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track,
-    UserPlaylist, UserPlaylistId, UserProfile, run_qr_login,
+    QqQuickLogin, Quality, RecommendationKind, SearchAlbum, SearchArtist, SearchPage,
+    SearchResults, Track, UserPlaylist, UserPlaylistId, UserProfile, run_qr_login,
 };
 #[cfg(target_os = "linux")]
 use xxhash_rust::xxh3::xxh3_128;
@@ -1650,6 +1650,7 @@ enum AccountState {
     Restoring,
     SignedOut,
     SigningIn,
+    QuickSigningIn,
     SignedIn,
 }
 
@@ -1975,11 +1976,19 @@ fn insert_external_track_after_current(
 fn canonical_queue_track_index(
     queue: &PlaybackQueue,
     playlist_id: &UserPlaylistId,
+    playlist_tracks: &[Arc<Track>],
     track_mid: &str,
 ) -> Option<usize> {
-    (!queue.modified && queue.playlist_id == *playlist_id)
-        .then(|| queue.tracks.iter().position(|track| track.mid == track_mid))
-        .flatten()
+    (!queue.modified
+        && queue.playlist_id == *playlist_id
+        && (!matches!(playlist_id, UserPlaylistId::Daily { .. })
+            || queue
+                .tracks
+                .iter()
+                .map(|track| &track.mid)
+                .eq(playlist_tracks.iter().map(|track| &track.mid))))
+    .then(|| queue.tracks.iter().position(|track| track.mid == track_mid))
+    .flatten()
 }
 
 fn resolved_playlist_scroll_row(
@@ -2253,6 +2262,8 @@ pub struct LyruneView {
     credential: Option<CredentialSession>,
     profile: Option<UserProfile>,
     qr_image: Option<Arc<Image>>,
+    qq_quick_login: Option<Arc<QqQuickLogin>>,
+    login_abort_handle: Option<AbortHandle>,
     library_loading: bool,
     selected_playlist_index: Option<usize>,
     selected_playlist: Option<UserPlaylist>,
@@ -2269,6 +2280,7 @@ pub struct LyruneView {
     home_error: Option<String>,
     home_generation: u64,
     home_recommendation_loading: Option<RecommendationKind>,
+    home_daily_loading: bool,
     search_query: String,
     search_resource: Option<SharedSearchResource>,
     search_visible_counts: SearchVisibleCounts,
@@ -2705,6 +2717,8 @@ impl LyruneView {
             credential: None,
             profile: None,
             qr_image: None,
+            qq_quick_login: None,
+            login_abort_handle: None,
             library_loading: false,
             selected_playlist_index: None,
             selected_playlist: None,
@@ -2721,6 +2735,7 @@ impl LyruneView {
             home_error: None,
             home_generation: 0,
             home_recommendation_loading: None,
+            home_daily_loading: false,
             search_query: String::new(),
             search_resource: None,
             search_visible_counts: SearchVisibleCounts::default(),
@@ -3299,20 +3314,29 @@ impl LyruneView {
     fn begin_login(&mut self, cx: &mut Context<Self>) {
         if matches!(
             self.account_state,
-            AccountState::Restoring | AccountState::SigningIn
+            AccountState::Restoring | AccountState::SignedIn
         ) {
             return;
         }
 
         self.login_generation = self.login_generation.wrapping_add(1);
         let generation = self.login_generation;
+        if let Some(task) = self.login_abort_handle.take() {
+            task.abort();
+        }
         self.account_state = AccountState::SigningIn;
         self.qr_image = None;
+        self.qq_quick_login = None;
         self.login_message = "正在向 QQ 音乐申请二维码…".to_owned();
         cx.notify();
 
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        drop(RUNTIME.spawn(run_qr_login(sender)));
+        let client_guid = self.settings.client_guid.clone();
+        self.login_abort_handle = Some(
+            RUNTIME
+                .spawn(run_qr_login(sender, client_guid))
+                .abort_handle(),
+        );
         cx.spawn(async move |this, cx| {
             while let Some(event) = receiver.recv().await {
                 let completed = matches!(
@@ -3332,6 +3356,107 @@ impl LyruneView {
         .detach();
     }
 
+    fn discover_qq_accounts(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.account_state,
+            AccountState::Restoring | AccountState::QuickSigningIn | AccountState::SignedIn
+        ) {
+            return;
+        }
+
+        self.login_generation = self.login_generation.wrapping_add(1);
+        let generation = self.login_generation;
+        if let Some(task) = self.login_abort_handle.take() {
+            task.abort();
+        }
+        self.account_state = AccountState::QuickSigningIn;
+        self.qr_image = None;
+        self.qq_quick_login = None;
+        self.login_message = "正在检测已登录的 QQ 账号…".to_owned();
+        cx.notify();
+
+        let client_guid = self.settings.client_guid.clone();
+        let task = RUNTIME.spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), QqQuickLogin::discover(client_guid))
+                .await
+                .context("检测 QQ 账号超过 5 秒，请重试")?
+        });
+        self.login_abort_handle = Some(task.abort_handle());
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.login_generation != generation {
+                    return;
+                }
+                this.login_abort_handle = None;
+                this.account_state = AccountState::SignedOut;
+                match result {
+                    Ok(session) => {
+                        this.login_message = if session.accounts().is_empty() {
+                            "未发现已登录的 QQ 账号，请登录 Linux QQ 后重新检测".to_owned()
+                        } else {
+                            "选择已登录的 QQ 账号以登录 QQ 音乐".to_owned()
+                        };
+                        this.qq_quick_login = Some(Arc::new(session));
+                    }
+                    Err(error) => {
+                        this.login_message = "检测 QQ 账号失败，请重试或使用扫码登录".to_owned();
+                        this.notify_error(format!("检测 QQ 账号失败：{error:#}"), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn begin_qq_login(&mut self, uin: u64, cx: &mut Context<Self>) {
+        if self.account_state == AccountState::QuickSigningIn {
+            return;
+        }
+        let Some(session) = self.qq_quick_login.clone() else {
+            return;
+        };
+
+        self.login_generation = self.login_generation.wrapping_add(1);
+        let generation = self.login_generation;
+        self.account_state = AccountState::QuickSigningIn;
+        self.login_message = format!("正在使用 QQ 账号 {uin} 登录…");
+        cx.notify();
+
+        let task = RUNTIME.spawn(async move {
+            tokio::time::timeout(Duration::from_secs(10), session.login(uin))
+                .await
+                .context("QQ 快捷登录超过 10 秒，请点击账号重试")?
+        });
+        self.login_abort_handle = Some(task.abort_handle());
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.login_generation != generation {
+                    return;
+                }
+                this.login_abort_handle = None;
+                match result {
+                    Ok(credential) => {
+                        this.handle_login_event(LoginEvent::Succeeded(credential), cx)
+                    }
+                    Err(error) => {
+                        this.account_state = AccountState::SignedOut;
+                        this.login_message = "QQ 快捷登录失败，请重试或使用扫码登录".to_owned();
+                        this.notify_error(format!("QQ 快捷登录失败：{error:#}"), cx);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     fn handle_login_event(&mut self, event: LoginEvent, cx: &mut Context<Self>) {
         match event {
             LoginEvent::QrReady(png) => {
@@ -3343,8 +3468,10 @@ impl LyruneView {
                 self.login_message = "已扫码，请在手机上确认登录".to_owned();
             }
             LoginEvent::Succeeded(credential) => {
+                self.login_abort_handle = None;
                 self.account_state = AccountState::SignedIn;
                 self.qr_image = None;
+                self.qq_quick_login = None;
                 self.main_content = MainContent::Home;
                 self.install_credential_session(CredentialSession::new(credential), cx);
                 self.load_home(cx);
@@ -3356,6 +3483,7 @@ impl LyruneView {
                 self.begin_login(cx);
             }
             LoginEvent::Failed(error) => {
+                self.login_abort_handle = None;
                 self.account_state = AccountState::SignedOut;
                 self.qr_image = None;
                 self.login_message = "扫码登录失败，点击二维码区域重试".to_owned();
@@ -4091,6 +4219,56 @@ impl LyruneView {
         .detach();
     }
 
+    fn open_daily_playlist(&mut self, cx: &mut Context<Self>) {
+        let Some(credential) = self.credential.clone() else {
+            self.notify_error("请先登录 QQ 音乐", cx);
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            self.notify_error("QQ 音乐客户端不可用", cx);
+            return;
+        };
+        let generation = self.login_generation;
+        self.home_daily_loading = true;
+        cx.notify();
+
+        let task = RUNTIME.spawn(async move {
+            tokio::time::timeout(Duration::from_secs(30), client.daily_playlist(&credential))
+                .await
+                .context("QQ 音乐每日30首请求等待超过 30 秒")
+                .and_then(|result| result)
+        });
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            let Ok(Some((playlist, window_handle))) = this.update(cx, |this, cx| {
+                if this.login_generation != generation {
+                    return None;
+                }
+                this.home_daily_loading = false;
+                cx.notify();
+                match result {
+                    Ok(playlist) if this.main_content == MainContent::Home => {
+                        Some((playlist, this.window_handle))
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        this.notify_error(format!("加载每日30首失败：{error:#}"), cx);
+                        None
+                    }
+                }
+            }) else {
+                return;
+            };
+            let _ = window_handle.update(cx, |_, window, cx| {
+                this.update(cx, |this, cx| this.open_home_playlist(playlist, window, cx))
+            });
+        })
+        .detach();
+    }
+
     fn start_home_recommendation(&mut self, kind: RecommendationKind, cx: &mut Context<Self>) {
         let Some(credential) = self.credential.clone() else {
             self.notify_error("请先登录 QQ 音乐", cx);
@@ -4679,11 +4857,9 @@ impl LyruneView {
         let mut playlist = artist.into_playlist();
         playlist.track_count = track_count;
 
-        if let Some(queue_index) = self
-            .playback_queue
-            .as_ref()
-            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, &selected_track.mid))
-        {
+        if let Some(queue_index) = self.playback_queue.as_ref().and_then(|queue| {
+            canonical_queue_track_index(queue, &playlist.id, &tracks, &selected_track.mid)
+        }) {
             if self.current_track == Some(queue_index) {
                 if self.loading_track.is_none() {
                     self.toggle_playback(cx);
@@ -4705,8 +4881,12 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let resource =
-            self.shared_playlist_resource(playlist.clone(), false, PlaylistCachePolicy::Fresh);
+        let force_refresh = matches!(playlist.id, UserPlaylistId::Daily { .. });
+        let resource = self.shared_playlist_resource(
+            playlist.clone(),
+            force_refresh,
+            PlaylistCachePolicy::Fresh,
+        );
         let target = NavigationPage::Playlist {
             playlist: playlist.clone(),
             selected_index: None,
@@ -4721,7 +4901,7 @@ impl LyruneView {
         self.open_playlist(
             playlist,
             None,
-            false,
+            force_refresh,
             PlaylistCachePolicy::Fresh,
             PlaylistScrollPosition::top(),
             Some(resource),
@@ -5074,11 +5254,9 @@ impl LyruneView {
             return;
         };
         let selected_mid = tracks[index].mid.as_str();
-        if let Some(queue_index) = self
-            .playback_queue
-            .as_ref()
-            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, selected_mid))
-        {
+        if let Some(queue_index) = self.playback_queue.as_ref().and_then(|queue| {
+            canonical_queue_track_index(queue, &playlist.id, &tracks, selected_mid)
+        }) {
             if self.current_track == Some(queue_index) {
                 if self.loading_track.is_none() {
                     self.toggle_playback(cx);
@@ -6616,6 +6794,10 @@ impl LyruneView {
 
     fn clear_account_session(&mut self, restart_login: bool, cx: &mut Context<Self>) {
         self.login_generation = self.login_generation.wrapping_add(1);
+        if let Some(task) = self.login_abort_handle.take() {
+            task.abort();
+        }
+        self.qq_quick_login = None;
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home_generation = self.home_generation.wrapping_add(1);
         self.queue_generation = self.queue_generation.wrapping_add(1);
@@ -6640,6 +6822,7 @@ impl LyruneView {
         self.home_loaded = false;
         self.home_error = None;
         self.home_recommendation_loading = None;
+        self.home_daily_loading = false;
         self.search_resource = None;
         self.selected_artist = None;
         self.artist_resource = None;
@@ -6708,10 +6891,25 @@ impl LyruneView {
                 .child(match self.account_state {
                     AccountState::Restoring => "正在恢复登录…",
                     AccountState::SigningIn => "正在生成二维码…",
+                    AccountState::QuickSigningIn => "正在检测已登录的 QQ…",
                     _ => "使用 QQ 音乐 App 扫码登录",
                 })
                 .into_any_element(),
         };
+        let qq_accounts = self
+            .qq_quick_login
+            .iter()
+            .flat_map(|session| session.accounts())
+            .map(|account| {
+                let uin = account.uin;
+                Button::new(format!("qq-login-{uin}"))
+                    .label(format!("{}（{uin}）登录", account.nickname))
+                    .outline()
+                    .w_full()
+                    .disabled(self.account_state == AccountState::QuickSigningIn)
+                    .on_click(cx.listener(move |this, _, _, cx| this.begin_qq_login(uin, cx)))
+            })
+            .collect::<Vec<_>>();
 
         v_flex()
             .size_full()
@@ -6724,8 +6922,8 @@ impl LyruneView {
                 v_flex()
                     .w(px(380.))
                     .items_center()
-                    .gap_5()
-                    .p_8()
+                    .gap_3()
+                    .p_6()
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(theme.border)
@@ -6739,14 +6937,52 @@ impl LyruneView {
                             .text_color(theme.muted_foreground)
                             .child("登录 QQ 音乐以加载你的歌单"),
                     )
+                    .when(self.qq_quick_login.is_none(), |this| {
+                        this.child(
+                            div()
+                                .id("login-qr")
+                                .when(self.account_state == AccountState::SignedOut, |this| {
+                                    this.cursor_pointer().on_click(
+                                        cx.listener(|this, _, _, cx| this.begin_login(cx)),
+                                    )
+                                })
+                                .child(qr),
+                        )
+                    })
                     .child(
-                        div()
-                            .id("login-qr")
-                            .when(self.account_state == AccountState::SignedOut, |this| {
-                                this.cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| this.begin_login(cx)))
-                            })
-                            .child(qr),
+                        v_flex()
+                            .w_full()
+                            .gap_2()
+                            .children(qq_accounts)
+                            .child(
+                                Button::new("qq-quick-login")
+                                    .label(if self.qq_quick_login.is_some() {
+                                        "重新检测 QQ 账号"
+                                    } else {
+                                        "使用已登录的 QQ"
+                                    })
+                                    .outline()
+                                    .w_full()
+                                    .disabled(matches!(
+                                        self.account_state,
+                                        AccountState::Restoring | AccountState::QuickSigningIn
+                                    ))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.discover_qq_accounts(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("qqmusic-qr-login")
+                                    .label(if self.account_state == AccountState::QuickSigningIn {
+                                        "取消并使用扫码登录"
+                                    } else {
+                                        "QQ 音乐扫码登录"
+                                    })
+                                    .ghost()
+                                    .w_full()
+                                    .disabled(self.account_state == AccountState::Restoring)
+                                    .on_click(cx.listener(|this, _, _, cx| this.begin_login(cx))),
+                            ),
                     )
                     .child(
                         div()
@@ -8030,46 +8266,53 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        if self.home_loading && self.home_playlists.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .text_color(theme.muted_foreground)
-                .child(Spinner::new().with_size(px(24.)).color(theme.primary))
-                .child("正在加载主页推荐…")
-                .into_any_element();
-        }
-        if self.home_playlists.is_empty()
+        let home_state: Option<AnyElement> = if self.home_loading && self.home_playlists.is_empty()
+        {
+            Some(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .text_color(theme.muted_foreground)
+                    .child(Spinner::new().with_size(px(24.)).color(theme.primary))
+                    .child("正在加载主页推荐…")
+                    .into_any_element(),
+            )
+        } else if self.home_playlists.is_empty()
             && let Some(error) = self.home_error.clone()
         {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_4()
-                .text_color(theme.muted_foreground)
-                .child(error)
-                .child(
-                    Button::new("retry-home")
-                        .outline()
-                        .h(px(44.))
-                        .px_4()
-                        .label("重新加载")
-                        .on_click(cx.listener(|this, _, _, cx| this.load_home(cx))),
-                )
-                .into_any_element();
-        }
-        if self.home_loaded && self.home_playlists.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(theme.muted_foreground)
-                .child("QQ 音乐暂时没有返回可显示的歌单推荐")
-                .into_any_element();
-        }
+            Some(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .text_color(theme.muted_foreground)
+                    .child(error)
+                    .child(
+                        Button::new("retry-home")
+                            .outline()
+                            .h(px(44.))
+                            .px_4()
+                            .label("重新加载")
+                            .on_click(cx.listener(|this, _, _, cx| this.load_home(cx))),
+                    )
+                    .into_any_element(),
+            )
+        } else if self.home_loaded && self.home_playlists.is_empty() {
+            Some(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.muted_foreground)
+                    .child("QQ 音乐暂时没有返回可显示的歌单推荐")
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
 
         let cover_size = if narrow {
             px(132.)
@@ -8079,13 +8322,6 @@ impl LyruneView {
             px(168.)
         };
         let card_width = cover_size + px(16.);
-        let feature_width = if narrow {
-            px(304.)
-        } else if compact {
-            px(344.)
-        } else {
-            px(384.)
-        };
         let grid_width = if narrow {
             px(640.)
         } else if compact {
@@ -8093,6 +8329,7 @@ impl LyruneView {
         } else {
             px(784.)
         };
+        let feature_width = (grid_width - px(32.)) / 3.;
         let cards = self
             .home_playlists
             .clone()
@@ -8141,10 +8378,57 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
-        let recommendation_loading = self.home_recommendation_loading.is_some();
+        let recommendation_loading =
+            self.home_recommendation_loading.is_some() || self.home_daily_loading;
         let radar_icon = media_icon_hsla(MediaIcon::Radar, theme.primary, px(25.));
         let guess_icon = media_icon_hsla(MediaIcon::Headphones, theme.primary, px(25.));
         let recommendation_cards = [
+            Button::new("home-daily")
+                .ghost()
+                .w(feature_width)
+                .h(px(92.))
+                .p_4()
+                .rounded(px(12.))
+                .bg(theme.muted.opacity(0.7))
+                .disabled(recommendation_loading)
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap_4()
+                        .child(
+                            div()
+                                .size(px(48.))
+                                .flex_shrink_0()
+                                .rounded(px(10.))
+                                .bg(theme.background.opacity(0.55))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_2xl()
+                                .font_semibold()
+                                .text_color(theme.primary)
+                                .child("30"),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_1()
+                                .child(div().font_semibold().child(if self.home_daily_loading {
+                                    "正在加载…"
+                                } else {
+                                    "每日30首"
+                                }))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("为你每天更新"),
+                                ),
+                        ),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.open_daily_playlist(cx))),
             Button::new("home-radar")
                 .ghost()
                 .w(feature_width)
@@ -8284,16 +8568,32 @@ impl LyruneView {
                                                 .font_semibold()
                                                 .child("今日歌单"),
                                         )
-                                        .when_some(self.home_error.clone(), |header, error| {
-                                            header.child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(error),
+                                        .when_some(
+                                            self.home_error
+                                                .clone()
+                                                .filter(|_| !self.home_playlists.is_empty()),
+                                            |header, error| {
+                                                header.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(error),
+                                                )
+                                            },
+                                        ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .items_start()
+                                        .flex_wrap()
+                                        .gap_4()
+                                        .children(cards)
+                                        .when_some(home_state, |body, state| {
+                                            body.child(
+                                                div().w_full().min_h(px(220.)).flex().child(state),
                                             )
                                         }),
-                                )
-                                .child(h_flex().items_start().flex_wrap().gap_4().children(cards)),
+                                ),
                         ),
                     ),
             )
@@ -10733,6 +11033,9 @@ impl LyruneView {
 
 impl Drop for LyruneView {
     fn drop(&mut self) {
+        if let Some(task) = self.login_abort_handle.take() {
+            task.abort();
+        }
         self.persist_current_playback();
         if let Some(audio) = &self.audio {
             audio.stop();
@@ -11491,6 +11794,30 @@ mod tests {
         assert_eq!(inserted, 1);
         assert_eq!(mids(&queue.tracks), ["A", "search", "B"]);
         assert!(queue.modified);
-        assert_eq!(canonical_queue_track_index(&queue, &playlist_id, "B"), None);
+        assert_eq!(
+            canonical_queue_track_index(&queue, &playlist_id, &queue.tracks, "B"),
+            None
+        );
+    }
+
+    #[test]
+    fn daily_refresh_does_not_reuse_yesterdays_queue() {
+        let playlist_id = UserPlaylistId::Daily { diss_id: 30 };
+        let queue = PlaybackQueue {
+            playlist_id: playlist_id.clone(),
+            tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
+            modified: false,
+            continuation: None,
+        };
+        let today = vec![Arc::new(track("A")), Arc::new(track("C"))];
+
+        assert_eq!(
+            canonical_queue_track_index(&queue, &playlist_id, &queue.tracks, "A"),
+            Some(0)
+        );
+        assert_eq!(
+            canonical_queue_track_index(&queue, &playlist_id, &today, "A"),
+            None
+        );
     }
 }

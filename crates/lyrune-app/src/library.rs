@@ -1039,6 +1039,7 @@ fn playlist_subtitle(playlist: &UserPlaylist) -> String {
         UserPlaylistId::Created { .. } => "创建的歌单",
         UserPlaylistId::Favorite { .. } => "收藏的歌单",
         UserPlaylistId::Recommended { .. } => "推荐歌单",
+        UserPlaylistId::Daily { .. } => "每日30首",
         UserPlaylistId::Artist { .. } => "歌手",
         UserPlaylistId::Album { .. } => "专辑",
         UserPlaylistId::Search { .. } => "搜索结果",

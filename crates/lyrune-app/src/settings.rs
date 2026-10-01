@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::design::ColorTheme;
 use gpui::WindowAppearance;
 use qqmusic_api::integration::{
-    CdnCache, Quality, Track, UserPlaylist, UserPlaylistId, UserProfile,
+    CdnCache, Quality, Track, UserPlaylist, UserPlaylistId, UserProfile, new_client_guid,
 };
 
 pub const DEFAULT_AUDIO_CACHE_LIMIT_GB: u64 = 10;
@@ -232,6 +232,7 @@ impl PersistedPlayback {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
+    pub client_guid: String,
     pub volume: f32,
     pub last_nonzero_volume: f32,
     pub color_theme_mode: ColorThemeMode,
@@ -263,6 +264,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            client_guid: String::new(),
             volume: 1.,
             last_nonzero_volume: 1.,
             color_theme_mode: ColorThemeMode::default(),
@@ -401,14 +403,18 @@ impl SettingsStore {
     }
 
     fn load_from(path: &Path) -> Result<AppSettings> {
-        let serialized = match fs::read_to_string(path) {
-            Ok(serialized) => serialized,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(AppSettings::default()),
+        let mut settings = match fs::read_to_string(path) {
+            Ok(serialized) => {
+                serde_json::from_str::<AppSettings>(&serialized).context("应用设置格式无效")?
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => AppSettings::default(),
             Err(error) => return Err(error).context("无法读取应用设置"),
         };
-        serde_json::from_str::<AppSettings>(&serialized)
-            .context("应用设置格式无效")
-            .map(AppSettings::normalized)
+        if settings.client_guid.trim().is_empty() {
+            settings.client_guid = new_client_guid();
+            Self::save_to(path, &settings)?;
+        }
+        Ok(settings.normalized())
     }
 
     fn save_to(path: &Path, settings: &AppSettings) -> Result<()> {
@@ -671,6 +677,7 @@ mod tests {
     #[test]
     fn persisted_volumes_are_clamped() {
         let settings = AppSettings {
+            client_guid: String::new(),
             volume: 2.,
             last_nonzero_volume: -1.,
             color_theme_mode: ColorThemeMode::Dark,
@@ -717,7 +724,14 @@ mod tests {
             std::thread::current().name().unwrap_or("unnamed")
         ));
         let path = directory.join("settings.json");
+        let settings = SettingsStore::load_from(&path).expect("initialize settings");
+        assert!(!settings.client_guid.is_empty());
+        assert!(path.exists());
+        let restored = SettingsStore::load_from(&path).expect("load settings");
+        assert_eq!(restored.client_guid, settings.client_guid);
+
         let expected = AppSettings {
+            client_guid: "installation-guid".to_owned(),
             volume: 0.37,
             last_nonzero_volume: 0.64,
             color_theme_mode: ColorThemeMode::Auto,
@@ -766,6 +780,7 @@ mod tests {
         SettingsStore::save_to(&path, &expected).expect("save settings");
         let restored = SettingsStore::load_from(&path).expect("load settings");
 
+        assert_eq!(restored.client_guid, expected.client_guid);
         assert_eq!(restored.volume, expected.volume);
         assert_eq!(restored.last_nonzero_volume, expected.last_nonzero_volume);
         assert_eq!(restored.color_theme_mode, expected.color_theme_mode);
@@ -804,6 +819,13 @@ mod tests {
         assert_eq!(restored.current_playback, expected.current_playback);
         assert_eq!(restored.window_size, expected.window_size);
         assert_eq!(restored.sidebar_width, expected.sidebar_width);
+
+        fs::write(&path, r#"{"volume":0.37}"#).expect("write legacy settings");
+        let migrated = SettingsStore::load_from(&path).expect("migrate settings");
+        assert!(!migrated.client_guid.is_empty());
+        assert_eq!(migrated.volume, 0.37);
+        let restored = SettingsStore::load_from(&path).expect("load migrated settings");
+        assert_eq!(restored.client_guid, migrated.client_guid);
         fs::remove_dir_all(directory).expect("remove test settings directory");
     }
 

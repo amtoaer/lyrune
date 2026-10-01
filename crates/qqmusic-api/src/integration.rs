@@ -1,5 +1,6 @@
 mod protocol;
 mod qrc_des;
+mod quick_login;
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,6 +17,7 @@ use crate::error::MusicClientError;
 use crate::models::{LoginStatus, LoginToken, Platform, TencentLoginToken};
 
 pub use protocol::{CdnCache, ProtocolClient};
+pub use quick_login::{QqAccount, QqQuickLogin};
 
 const QR_DATA_PREFIX: &str = "data:image/png;base64,";
 

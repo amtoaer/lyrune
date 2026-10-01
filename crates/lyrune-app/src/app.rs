@@ -33,7 +33,7 @@ use gpui_component::{
 use quick_xml::{Reader, escape::unescape, events::Event};
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use wana_kana::{ConvertJapanese as _, IsJapaneseStr as _};
 
 use crate::cache::{AudioCache, PreparedStream, audio_cache_limit_bytes};
@@ -67,8 +67,8 @@ use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
 use qqmusic_api::integration::{
     CredentialSession, LoginEvent, PlaybackOption, PlaylistPage, ProtocolClient, QqCredential,
-    Quality, RecommendationKind, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track,
-    UserPlaylist, UserPlaylistId, UserProfile, run_qr_login,
+    QqQuickLogin, Quality, RecommendationKind, SearchAlbum, SearchArtist, SearchPage,
+    SearchResults, Track, UserPlaylist, UserPlaylistId, UserProfile, run_qr_login,
 };
 #[cfg(target_os = "linux")]
 use xxhash_rust::xxh3::xxh3_128;
@@ -1650,6 +1650,7 @@ enum AccountState {
     Restoring,
     SignedOut,
     SigningIn,
+    QuickSigningIn,
     SignedIn,
 }
 
@@ -2253,6 +2254,8 @@ pub struct LyruneView {
     credential: Option<CredentialSession>,
     profile: Option<UserProfile>,
     qr_image: Option<Arc<Image>>,
+    qq_quick_login: Option<Arc<QqQuickLogin>>,
+    login_abort_handle: Option<AbortHandle>,
     library_loading: bool,
     selected_playlist_index: Option<usize>,
     selected_playlist: Option<UserPlaylist>,
@@ -2705,6 +2708,8 @@ impl LyruneView {
             credential: None,
             profile: None,
             qr_image: None,
+            qq_quick_login: None,
+            login_abort_handle: None,
             library_loading: false,
             selected_playlist_index: None,
             selected_playlist: None,
@@ -3299,20 +3304,24 @@ impl LyruneView {
     fn begin_login(&mut self, cx: &mut Context<Self>) {
         if matches!(
             self.account_state,
-            AccountState::Restoring | AccountState::SigningIn
+            AccountState::Restoring | AccountState::SignedIn
         ) {
             return;
         }
 
         self.login_generation = self.login_generation.wrapping_add(1);
         let generation = self.login_generation;
+        if let Some(task) = self.login_abort_handle.take() {
+            task.abort();
+        }
         self.account_state = AccountState::SigningIn;
         self.qr_image = None;
+        self.qq_quick_login = None;
         self.login_message = "正在向 QQ 音乐申请二维码…".to_owned();
         cx.notify();
 
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        drop(RUNTIME.spawn(run_qr_login(sender)));
+        self.login_abort_handle = Some(RUNTIME.spawn(run_qr_login(sender)).abort_handle());
         cx.spawn(async move |this, cx| {
             while let Some(event) = receiver.recv().await {
                 let completed = matches!(
@@ -3332,6 +3341,112 @@ impl LyruneView {
         .detach();
     }
 
+    fn discover_qq_accounts(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.account_state,
+            AccountState::Restoring | AccountState::QuickSigningIn | AccountState::SignedIn
+        ) {
+            return;
+        }
+
+        self.login_generation = self.login_generation.wrapping_add(1);
+        let generation = self.login_generation;
+        if let Some(task) = self.login_abort_handle.take() {
+            task.abort();
+        }
+        self.account_state = AccountState::QuickSigningIn;
+        self.qr_image = None;
+        self.qq_quick_login = None;
+        self.login_message = "正在检测已登录的 QQ 账号…".to_owned();
+        cx.notify();
+
+        let task = RUNTIME.spawn(async {
+            tokio::time::timeout(Duration::from_secs(5), QqQuickLogin::discover())
+                .await
+                .context("检测 QQ 账号超过 5 秒，请重试")?
+        });
+        self.login_abort_handle = Some(task.abort_handle());
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.login_generation != generation {
+                    return;
+                }
+                this.login_abort_handle = None;
+                this.account_state = AccountState::SignedOut;
+                match result {
+                    Ok(session) => {
+                        this.login_message = if session.accounts().is_empty() {
+                            "未发现已登录的 QQ 账号，请登录 Linux QQ 后重新检测".to_owned()
+                        } else {
+                            "选择已登录的 QQ 账号以登录 QQ 音乐".to_owned()
+                        };
+                        this.qq_quick_login = Some(Arc::new(session));
+                    }
+                    Err(error) => {
+                        this.login_message = "检测 QQ 账号失败，请重试或使用扫码登录".to_owned();
+                        this.notify_error(format!("检测 QQ 账号失败：{error:#}"), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn begin_qq_login(&mut self, uin: u64, cx: &mut Context<Self>) {
+        if matches!(
+            self.account_state,
+            AccountState::Restoring | AccountState::QuickSigningIn | AccountState::SignedIn
+        ) {
+            return;
+        }
+        let Some(session) = self.qq_quick_login.clone() else {
+            return;
+        };
+
+        self.login_generation = self.login_generation.wrapping_add(1);
+        let generation = self.login_generation;
+        if let Some(task) = self.login_abort_handle.take() {
+            task.abort();
+        }
+        self.account_state = AccountState::QuickSigningIn;
+        self.login_message = format!("正在使用 QQ 账号 {uin} 登录…");
+        cx.notify();
+
+        let task = RUNTIME.spawn(async move {
+            tokio::time::timeout(Duration::from_secs(10), session.login(uin))
+                .await
+                .context("QQ 快捷登录超过 10 秒，请点击账号重试")?
+        });
+        self.login_abort_handle = Some(task.abort_handle());
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.login_generation != generation {
+                    return;
+                }
+                this.login_abort_handle = None;
+                match result {
+                    Ok(credential) => {
+                        this.handle_login_event(LoginEvent::Succeeded(credential), cx)
+                    }
+                    Err(error) => {
+                        this.account_state = AccountState::SignedOut;
+                        this.login_message = "QQ 快捷登录失败，请重试或使用扫码登录".to_owned();
+                        this.notify_error(format!("QQ 快捷登录失败：{error:#}"), cx);
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     fn handle_login_event(&mut self, event: LoginEvent, cx: &mut Context<Self>) {
         match event {
             LoginEvent::QrReady(png) => {
@@ -3343,8 +3458,12 @@ impl LyruneView {
                 self.login_message = "已扫码，请在手机上确认登录".to_owned();
             }
             LoginEvent::Succeeded(credential) => {
+                if let Some(task) = self.login_abort_handle.take() {
+                    task.abort();
+                }
                 self.account_state = AccountState::SignedIn;
                 self.qr_image = None;
+                self.qq_quick_login = None;
                 self.main_content = MainContent::Home;
                 self.install_credential_session(CredentialSession::new(credential), cx);
                 self.load_home(cx);
@@ -3356,6 +3475,7 @@ impl LyruneView {
                 self.begin_login(cx);
             }
             LoginEvent::Failed(error) => {
+                self.login_abort_handle = None;
                 self.account_state = AccountState::SignedOut;
                 self.qr_image = None;
                 self.login_message = "扫码登录失败，点击二维码区域重试".to_owned();
@@ -6616,6 +6736,10 @@ impl LyruneView {
 
     fn clear_account_session(&mut self, restart_login: bool, cx: &mut Context<Self>) {
         self.login_generation = self.login_generation.wrapping_add(1);
+        if let Some(task) = self.login_abort_handle.take() {
+            task.abort();
+        }
+        self.qq_quick_login = None;
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home_generation = self.home_generation.wrapping_add(1);
         self.queue_generation = self.queue_generation.wrapping_add(1);
@@ -6708,10 +6832,25 @@ impl LyruneView {
                 .child(match self.account_state {
                     AccountState::Restoring => "正在恢复登录…",
                     AccountState::SigningIn => "正在生成二维码…",
+                    AccountState::QuickSigningIn => "正在检测已登录的 QQ…",
                     _ => "使用 QQ 音乐 App 扫码登录",
                 })
                 .into_any_element(),
         };
+        let qq_accounts = self
+            .qq_quick_login
+            .iter()
+            .flat_map(|session| session.accounts())
+            .map(|account| {
+                let uin = account.uin;
+                Button::new(format!("qq-login-{uin}"))
+                    .label(format!("{}（{uin}）登录", account.nickname))
+                    .outline()
+                    .w_full()
+                    .disabled(self.account_state == AccountState::QuickSigningIn)
+                    .on_click(cx.listener(move |this, _, _, cx| this.begin_qq_login(uin, cx)))
+            })
+            .collect::<Vec<_>>();
 
         v_flex()
             .size_full()
@@ -6724,8 +6863,8 @@ impl LyruneView {
                 v_flex()
                     .w(px(380.))
                     .items_center()
-                    .gap_5()
-                    .p_8()
+                    .gap_3()
+                    .p_6()
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(theme.border)
@@ -6739,14 +6878,52 @@ impl LyruneView {
                             .text_color(theme.muted_foreground)
                             .child("登录 QQ 音乐以加载你的歌单"),
                     )
+                    .when(self.qq_quick_login.is_none(), |this| {
+                        this.child(
+                            div()
+                                .id("login-qr")
+                                .when(self.account_state == AccountState::SignedOut, |this| {
+                                    this.cursor_pointer().on_click(
+                                        cx.listener(|this, _, _, cx| this.begin_login(cx)),
+                                    )
+                                })
+                                .child(qr),
+                        )
+                    })
                     .child(
-                        div()
-                            .id("login-qr")
-                            .when(self.account_state == AccountState::SignedOut, |this| {
-                                this.cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| this.begin_login(cx)))
-                            })
-                            .child(qr),
+                        v_flex()
+                            .w_full()
+                            .gap_2()
+                            .children(qq_accounts)
+                            .child(
+                                Button::new("qq-quick-login")
+                                    .label(if self.qq_quick_login.is_some() {
+                                        "重新检测 QQ 账号"
+                                    } else {
+                                        "使用已登录的 QQ"
+                                    })
+                                    .outline()
+                                    .w_full()
+                                    .disabled(matches!(
+                                        self.account_state,
+                                        AccountState::Restoring | AccountState::QuickSigningIn
+                                    ))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.discover_qq_accounts(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("qqmusic-qr-login")
+                                    .label(if self.account_state == AccountState::QuickSigningIn {
+                                        "取消并使用扫码登录"
+                                    } else {
+                                        "QQ 音乐扫码登录"
+                                    })
+                                    .ghost()
+                                    .w_full()
+                                    .disabled(self.account_state == AccountState::Restoring)
+                                    .on_click(cx.listener(|this, _, _, cx| this.begin_login(cx))),
+                            ),
                     )
                     .child(
                         div()
@@ -10733,6 +10910,9 @@ impl LyruneView {
 
 impl Drop for LyruneView {
     fn drop(&mut self) {
+        if let Some(task) = self.login_abort_handle.take() {
+            task.abort();
+        }
         self.persist_current_playback();
         if let Some(audio) = &self.audio {
             audio.stop();

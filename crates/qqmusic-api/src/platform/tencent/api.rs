@@ -79,6 +79,15 @@ impl TencentClient {
 
         self.client
             .post(TENCENT_API_URL)
+            .timeout(
+                if body["result"]["module"] == "QQConnectLogin.LoginServer"
+                    && body["result"]["param"].get("code").is_some()
+                {
+                    Duration::from_secs(3)
+                } else {
+                    HTTP_TIMEOUT
+                },
+            )
             .query(&[("sign", sign.as_str())])
             .header(COOKIE, token.map(|v| v.to_cookie()).unwrap_or_default())
             .json(&body)
@@ -626,12 +635,69 @@ impl TencentClient {
         }
     }
 
+    pub(crate) async fn login_with_qq_code(
+        &self,
+        code: &str,
+    ) -> MusicClientResult<TencentLoginToken> {
+        let response = self
+            .post::<TLoginInfoResponse>(
+                json!({
+                    "result": {
+                        "module": "QQConnectLogin.LoginServer",
+                        "method": "QQLogin",
+                        "param": {
+                            "onlyNeedAccessToken": 0,
+                            "forceRefreshToken": 0,
+                            "appid": 100497308,
+                            "code": code
+                        }
+                    },
+                    "comm": {
+                        "ct": 19,
+                        "cv": 1,
+                        "tmeLoginType": 2
+                    }
+                }),
+                None,
+            )
+            .await
+            .map_err(|error| match error {
+                MusicClientError::NetworkError(error) => {
+                    MusicClientError::NetworkError(error.without_url())
+                }
+                error => error,
+            })?;
+        response.into_token()
+    }
+
     pub(crate) async fn refresh_login_token(
         &self,
         token: &TencentLoginToken,
     ) -> MusicClientResult<TencentLoginToken> {
-        let response = self
-            .post::<TLoginInfoResponse>(
+        let body =
+            if token.login_type == 2 && !token.open_id.is_empty() && !token.access_token.is_empty()
+            {
+                json!({
+                    "result": {
+                        "module": "QQConnectLogin.LoginServer",
+                        "method": "QQLogin",
+                        "param": {
+                            "openid": token.open_id,
+                            "access_token": token.access_token,
+                            "refresh_token": token.refresh_token,
+                            "musicid": token.music_id,
+                            "musickey": token.music_key,
+                            "onlyNeedAccessToken": 0,
+                            "forceRefreshToken": 0
+                        }
+                    },
+                    "comm": {
+                        "ct": 19,
+                        "cv": 1,
+                        "tmeLoginType": 2
+                    }
+                })
+            } else {
                 json!({
                     "result": {
                         "module": "music.login.LoginServer",
@@ -646,10 +712,9 @@ impl TencentClient {
                     "comm": {
                         "tmeLoginType": token.login_type
                     }
-                }),
-                Some(token),
-            )
-            .await?;
+                })
+            };
+        let response = self.post::<TLoginInfoResponse>(body, Some(token)).await?;
         response.into_token()
     }
 

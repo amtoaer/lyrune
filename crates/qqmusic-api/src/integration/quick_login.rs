@@ -32,6 +32,7 @@ pub struct QqAccount {
 
 pub struct QqQuickLogin {
     client: Client,
+    client_guid: String,
     local_token: String,
     cookies: Arc<Jar>,
     port: u16,
@@ -39,7 +40,11 @@ pub struct QqQuickLogin {
 }
 
 impl QqQuickLogin {
-    pub async fn discover() -> Result<Self> {
+    pub async fn discover(client_guid: String) -> Result<Self> {
+        ensure!(
+            !client_guid.trim().is_empty(),
+            "设备标识未保存，请检查应用设置后重新启动"
+        );
         let cookies = Arc::new(Jar::default());
         let client = Client::builder()
             .no_proxy()
@@ -112,6 +117,7 @@ impl QqQuickLogin {
                 .collect::<Result<Vec<_>>>()?;
             return Ok(Self {
                 client,
+                client_guid,
                 local_token,
                 cookies,
                 port,
@@ -122,6 +128,7 @@ impl QqQuickLogin {
             empty_port.context("未检测到 QQ 快捷登录服务，请先启动并登录 Linux QQ 后重试")?;
         Ok(Self {
             client,
+            client_guid,
             local_token,
             cookies,
             port,
@@ -210,7 +217,7 @@ impl QqQuickLogin {
             .error_for_status()
             .map_err(reqwest::Error::without_url)?;
         let token = self.music_token().await?;
-        let credential = QqCredential::from_token(token)?;
+        let credential = QqCredential::from_token(token, self.client_guid.clone())?;
         tokio::time::timeout(
             Duration::from_secs(3),
             ProtocolClient::new()?.ensure_encrypted_uin(credential),
@@ -288,7 +295,9 @@ impl QqQuickLogin {
             .map(|(_, value)| value.into_owned())
             .filter(|code| !code.is_empty())
             .context("QQ 未返回音乐授权码")?;
-        TencentClient::new()
+        let mut client = TencentClient::new();
+        client.guid.clone_from(&self.client_guid);
+        client
             .login_with_qq_code(&code)
             .await
             .context("QQ 音乐凭据兑换失败")
@@ -445,6 +454,7 @@ mod tests {
                 .cookie_provider(cookies.clone())
                 .build()
                 .unwrap(),
+            client_guid: "test-guid".to_owned(),
             local_token: String::new(),
             cookies,
             port: 0,

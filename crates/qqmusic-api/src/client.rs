@@ -119,6 +119,11 @@ impl MusicClient {
         }
     }
 
+    pub fn with_client_guid(mut self, guid: impl Into<String>) -> Self {
+        self.tencent.guid = guid.into();
+        self
+    }
+
     /// 创建搜索域请求构建器。
     pub fn search(&self) -> SearchRequest<'_, SearchKind> {
         SearchRequest::new(self)

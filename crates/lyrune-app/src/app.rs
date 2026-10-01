@@ -3321,7 +3321,12 @@ impl LyruneView {
         cx.notify();
 
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        self.login_abort_handle = Some(RUNTIME.spawn(run_qr_login(sender)).abort_handle());
+        let client_guid = self.settings.client_guid.clone();
+        self.login_abort_handle = Some(
+            RUNTIME
+                .spawn(run_qr_login(sender, client_guid))
+                .abort_handle(),
+        );
         cx.spawn(async move |this, cx| {
             while let Some(event) = receiver.recv().await {
                 let completed = matches!(
@@ -3360,8 +3365,9 @@ impl LyruneView {
         self.login_message = "正在检测已登录的 QQ 账号…".to_owned();
         cx.notify();
 
-        let task = RUNTIME.spawn(async {
-            tokio::time::timeout(Duration::from_secs(5), QqQuickLogin::discover())
+        let client_guid = self.settings.client_guid.clone();
+        let task = RUNTIME.spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), QqQuickLogin::discover(client_guid))
                 .await
                 .context("检测 QQ 账号超过 5 秒，请重试")?
         });

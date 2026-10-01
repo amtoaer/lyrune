@@ -22,6 +22,7 @@ static TENCENT_GUID: LazyLock<String> = LazyLock::new(utils::get_guid);
 
 pub(crate) struct TencentClient {
     client: Client,
+    pub(crate) guid: String,
 }
 
 impl TencentClient {
@@ -37,6 +38,7 @@ impl TencentClient {
                 )
                 .build()
                 .unwrap(),
+            guid: TENCENT_GUID.clone(),
         }
     }
 
@@ -57,13 +59,13 @@ impl TencentClient {
                 "chid": "0",
                 "uin": login_token.music_id.to_string(),
                 "g_tk": utils::hash33(login_token.music_key.as_str()),
-                "guid": TENCENT_GUID.as_str()
+                "guid": self.guid
             }),
             None => json!({
                 "ct": 19,
                 "cv": 2201,
                 "chid": "0",
-                "guid": TENCENT_GUID.as_str()
+                "guid": self.guid
             }),
         };
 
@@ -351,7 +353,7 @@ impl TencentClient {
                       "userinfo": 0,
                       "tag": 0,
                       "is_pc": 1,
-                      "guid": TENCENT_GUID.as_str()
+                      "guid": self.guid
                     }
                   }
                 }),
@@ -462,7 +464,7 @@ impl TencentClient {
                     "param": {
                       "uin": token.map(|v| v.music_id.to_string()).unwrap_or_default(),
                       "filename": filename,
-                      "guid": TENCENT_GUID.as_str(),
+                      "guid": self.guid,
                       "songmid": songmid,
                       "songtype": songtype,
                       "ctx": 0

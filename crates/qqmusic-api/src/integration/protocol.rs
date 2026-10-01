@@ -443,6 +443,26 @@ impl ProtocolClient {
         parse_recommended_playlist_page(&data, offset)
     }
 
+    pub async fn daily_playlist(&self, credential: &CredentialSession) -> Result<UserPlaylist> {
+        let data = self
+            .call(
+                "music.recommend.RecommendFeed",
+                "get_recommend_feed",
+                json!({
+                    "direction": 0,
+                    "page": 1,
+                    "v_cache": [],
+                    "v_uniq": [],
+                    "s_num": 0,
+                }),
+                credential,
+                None,
+            )
+            .await
+            .context("无法加载 QQ 音乐每日30首")?;
+        parse_daily_playlist(&data)
+    }
+
     pub async fn radar_tracks(
         &self,
         credential: &CredentialSession,
@@ -1110,13 +1130,31 @@ impl ProtocolClient {
         limit: u64,
     ) -> Result<Value> {
         let current = credential.ensure_fresh().await?;
+        if let UserPlaylistId::Daily { diss_id } = id {
+            return self
+                .call_with_session(
+                    "music.srfDissInfo.aiDissInfo",
+                    "uniform_get_Dissinfo",
+                    json!({
+                        "disstid": diss_id,
+                        "userinfo": 1,
+                        "tag": 1,
+                        "guid": current.client_guid,
+                    }),
+                    credential,
+                    &current,
+                    None,
+                )
+                .await;
+        }
         let (diss_id, dir_id, encrypted_uin) = match id {
             UserPlaylistId::Liked => (0, 201, Some(current.encrypted_uin.as_str())),
             UserPlaylistId::Created { tid, .. } => (*tid, 0, None),
             UserPlaylistId::Favorite { diss_id } | UserPlaylistId::Recommended { diss_id } => {
                 (*diss_id, 0, None)
             }
-            UserPlaylistId::Artist { .. }
+            UserPlaylistId::Daily { .. }
+            | UserPlaylistId::Artist { .. }
             | UserPlaylistId::Album { .. }
             | UserPlaylistId::Search { .. }
             | UserPlaylistId::Recommendation { .. } => {
@@ -1713,6 +1751,38 @@ fn parse_recommended_playlist_page(data: &Value, offset: u64) -> Result<SearchPa
         has_more,
         next_offset,
     })
+}
+
+fn parse_daily_playlist(data: &Value) -> Result<UserPlaylist> {
+    let shelves = data
+        .get("v_shelf")
+        .and_then(Value::as_array)
+        .context("每日30首结果缺少 v_shelf")?;
+    let card = shelves
+        .iter()
+        .filter_map(|shelf| shelf.get("v_niche").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|niche| niche.get("v_card").and_then(Value::as_array))
+        .flatten()
+        .find(|card| {
+            integer_field(card, &["type"]) == Some(500)
+                && string_field(card, &["title"]).as_deref() == Some("每日30首")
+        })
+        .context("QQ 音乐推荐结果中没有每日30首")?;
+    let diss_id = integer_field(card, &["id"]).context("每日30首缺少歌单 ID")?;
+    let mut playlist = parse_playlist_summary(card, UserPlaylistId::Daily { diss_id })
+        .context("每日30首歌单信息格式发生了变化")?;
+    playlist.cover_url = string_field(card, &["cover"])
+        .filter(|url| !url.trim().is_empty())
+        .map(force_https)
+        .or(playlist.cover_url);
+    if playlist.description.is_empty() {
+        playlist.description = string_field(card, &["subtitle"]).unwrap_or_default();
+    }
+    playlist.track_count =
+        integer_field(card, &["song_cnt", "songNum", "songnum", "total_song_num"])
+            .unwrap_or_default();
+    Ok(playlist)
 }
 
 fn parse_recommended_playlist(value: &Value) -> Option<UserPlaylist> {
@@ -2741,6 +2811,53 @@ mod tests {
             playlist.cover_url.as_deref(),
             Some("https://example.test/detail.jpg")
         );
+    }
+
+    #[test]
+    fn parses_daily_playlist() {
+        let playlist = parse_daily_playlist(&json!({
+            "v_shelf": [{
+                "v_niche": [{
+                    "v_card": [{
+                        "type": 700,
+                        "id": "99",
+                        "title": "每日30首"
+                    }, {
+                        "type": 500,
+                        "id": "4270386076",
+                        "title": "每日30首",
+                        "cover": "http://example.test/daily.jpg",
+                        "subtitle": "每日更新",
+                        "creator": {
+                            "nick": "amtoaer",
+                            "head_url": "http://example.test/avatar.jpg"
+                        },
+                        "song_cnt": 30
+                    }]
+                }]
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            playlist.id,
+            UserPlaylistId::Daily {
+                diss_id: 4_270_386_076
+            }
+        );
+        assert_eq!(playlist.title, "每日30首");
+        assert_eq!(playlist.description, "每日更新");
+        assert_eq!(
+            playlist.cover_url.as_deref(),
+            Some("https://example.test/daily.jpg")
+        );
+        assert_eq!(playlist.owner, "amtoaer");
+        assert_eq!(
+            playlist.owner_avatar_url.as_deref(),
+            Some("https://example.test/avatar.jpg")
+        );
+        assert_eq!(playlist.track_count, 30);
+        assert!(parse_daily_playlist(&json!({"v_shelf": []})).is_err());
     }
 
     #[test]

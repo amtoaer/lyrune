@@ -1976,11 +1976,19 @@ fn insert_external_track_after_current(
 fn canonical_queue_track_index(
     queue: &PlaybackQueue,
     playlist_id: &UserPlaylistId,
+    playlist_tracks: &[Arc<Track>],
     track_mid: &str,
 ) -> Option<usize> {
-    (!queue.modified && queue.playlist_id == *playlist_id)
-        .then(|| queue.tracks.iter().position(|track| track.mid == track_mid))
-        .flatten()
+    (!queue.modified
+        && queue.playlist_id == *playlist_id
+        && (!matches!(playlist_id, UserPlaylistId::Daily { .. })
+            || queue
+                .tracks
+                .iter()
+                .map(|track| &track.mid)
+                .eq(playlist_tracks.iter().map(|track| &track.mid))))
+    .then(|| queue.tracks.iter().position(|track| track.mid == track_mid))
+    .flatten()
 }
 
 fn resolved_playlist_scroll_row(
@@ -2272,6 +2280,7 @@ pub struct LyruneView {
     home_error: Option<String>,
     home_generation: u64,
     home_recommendation_loading: Option<RecommendationKind>,
+    home_daily_loading: bool,
     search_query: String,
     search_resource: Option<SharedSearchResource>,
     search_visible_counts: SearchVisibleCounts,
@@ -2726,6 +2735,7 @@ impl LyruneView {
             home_error: None,
             home_generation: 0,
             home_recommendation_loading: None,
+            home_daily_loading: false,
             search_query: String::new(),
             search_resource: None,
             search_visible_counts: SearchVisibleCounts::default(),
@@ -4209,6 +4219,56 @@ impl LyruneView {
         .detach();
     }
 
+    fn open_daily_playlist(&mut self, cx: &mut Context<Self>) {
+        let Some(credential) = self.credential.clone() else {
+            self.notify_error("请先登录 QQ 音乐", cx);
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            self.notify_error("QQ 音乐客户端不可用", cx);
+            return;
+        };
+        let generation = self.login_generation;
+        self.home_daily_loading = true;
+        cx.notify();
+
+        let task = RUNTIME.spawn(async move {
+            tokio::time::timeout(Duration::from_secs(30), client.daily_playlist(&credential))
+                .await
+                .context("QQ 音乐每日30首请求等待超过 30 秒")
+                .and_then(|result| result)
+        });
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            let Ok(Some((playlist, window_handle))) = this.update(cx, |this, cx| {
+                if this.login_generation != generation {
+                    return None;
+                }
+                this.home_daily_loading = false;
+                cx.notify();
+                match result {
+                    Ok(playlist) if this.main_content == MainContent::Home => {
+                        Some((playlist, this.window_handle))
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        this.notify_error(format!("加载每日30首失败：{error:#}"), cx);
+                        None
+                    }
+                }
+            }) else {
+                return;
+            };
+            let _ = window_handle.update(cx, |_, window, cx| {
+                this.update(cx, |this, cx| this.open_home_playlist(playlist, window, cx))
+            });
+        })
+        .detach();
+    }
+
     fn start_home_recommendation(&mut self, kind: RecommendationKind, cx: &mut Context<Self>) {
         let Some(credential) = self.credential.clone() else {
             self.notify_error("请先登录 QQ 音乐", cx);
@@ -4797,11 +4857,9 @@ impl LyruneView {
         let mut playlist = artist.into_playlist();
         playlist.track_count = track_count;
 
-        if let Some(queue_index) = self
-            .playback_queue
-            .as_ref()
-            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, &selected_track.mid))
-        {
+        if let Some(queue_index) = self.playback_queue.as_ref().and_then(|queue| {
+            canonical_queue_track_index(queue, &playlist.id, &tracks, &selected_track.mid)
+        }) {
             if self.current_track == Some(queue_index) {
                 if self.loading_track.is_none() {
                     self.toggle_playback(cx);
@@ -4823,8 +4881,12 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let resource =
-            self.shared_playlist_resource(playlist.clone(), false, PlaylistCachePolicy::Fresh);
+        let force_refresh = matches!(playlist.id, UserPlaylistId::Daily { .. });
+        let resource = self.shared_playlist_resource(
+            playlist.clone(),
+            force_refresh,
+            PlaylistCachePolicy::Fresh,
+        );
         let target = NavigationPage::Playlist {
             playlist: playlist.clone(),
             selected_index: None,
@@ -4839,7 +4901,7 @@ impl LyruneView {
         self.open_playlist(
             playlist,
             None,
-            false,
+            force_refresh,
             PlaylistCachePolicy::Fresh,
             PlaylistScrollPosition::top(),
             Some(resource),
@@ -5192,11 +5254,9 @@ impl LyruneView {
             return;
         };
         let selected_mid = tracks[index].mid.as_str();
-        if let Some(queue_index) = self
-            .playback_queue
-            .as_ref()
-            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, selected_mid))
-        {
+        if let Some(queue_index) = self.playback_queue.as_ref().and_then(|queue| {
+            canonical_queue_track_index(queue, &playlist.id, &tracks, selected_mid)
+        }) {
             if self.current_track == Some(queue_index) {
                 if self.loading_track.is_none() {
                     self.toggle_playback(cx);
@@ -6762,6 +6822,7 @@ impl LyruneView {
         self.home_loaded = false;
         self.home_error = None;
         self.home_recommendation_loading = None;
+        self.home_daily_loading = false;
         self.search_resource = None;
         self.selected_artist = None;
         self.artist_resource = None;
@@ -8205,46 +8266,53 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        if self.home_loading && self.home_playlists.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .text_color(theme.muted_foreground)
-                .child(Spinner::new().with_size(px(24.)).color(theme.primary))
-                .child("正在加载主页推荐…")
-                .into_any_element();
-        }
-        if self.home_playlists.is_empty()
+        let home_state: Option<AnyElement> = if self.home_loading && self.home_playlists.is_empty()
+        {
+            Some(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .text_color(theme.muted_foreground)
+                    .child(Spinner::new().with_size(px(24.)).color(theme.primary))
+                    .child("正在加载主页推荐…")
+                    .into_any_element(),
+            )
+        } else if self.home_playlists.is_empty()
             && let Some(error) = self.home_error.clone()
         {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_4()
-                .text_color(theme.muted_foreground)
-                .child(error)
-                .child(
-                    Button::new("retry-home")
-                        .outline()
-                        .h(px(44.))
-                        .px_4()
-                        .label("重新加载")
-                        .on_click(cx.listener(|this, _, _, cx| this.load_home(cx))),
-                )
-                .into_any_element();
-        }
-        if self.home_loaded && self.home_playlists.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(theme.muted_foreground)
-                .child("QQ 音乐暂时没有返回可显示的歌单推荐")
-                .into_any_element();
-        }
+            Some(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .text_color(theme.muted_foreground)
+                    .child(error)
+                    .child(
+                        Button::new("retry-home")
+                            .outline()
+                            .h(px(44.))
+                            .px_4()
+                            .label("重新加载")
+                            .on_click(cx.listener(|this, _, _, cx| this.load_home(cx))),
+                    )
+                    .into_any_element(),
+            )
+        } else if self.home_loaded && self.home_playlists.is_empty() {
+            Some(
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.muted_foreground)
+                    .child("QQ 音乐暂时没有返回可显示的歌单推荐")
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
 
         let cover_size = if narrow {
             px(132.)
@@ -8254,13 +8322,6 @@ impl LyruneView {
             px(168.)
         };
         let card_width = cover_size + px(16.);
-        let feature_width = if narrow {
-            px(304.)
-        } else if compact {
-            px(344.)
-        } else {
-            px(384.)
-        };
         let grid_width = if narrow {
             px(640.)
         } else if compact {
@@ -8268,6 +8329,7 @@ impl LyruneView {
         } else {
             px(784.)
         };
+        let feature_width = (grid_width - px(32.)) / 3.;
         let cards = self
             .home_playlists
             .clone()
@@ -8316,10 +8378,57 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
-        let recommendation_loading = self.home_recommendation_loading.is_some();
+        let recommendation_loading =
+            self.home_recommendation_loading.is_some() || self.home_daily_loading;
         let radar_icon = media_icon_hsla(MediaIcon::Radar, theme.primary, px(25.));
         let guess_icon = media_icon_hsla(MediaIcon::Headphones, theme.primary, px(25.));
         let recommendation_cards = [
+            Button::new("home-daily")
+                .ghost()
+                .w(feature_width)
+                .h(px(92.))
+                .p_4()
+                .rounded(px(12.))
+                .bg(theme.muted.opacity(0.7))
+                .disabled(recommendation_loading)
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap_4()
+                        .child(
+                            div()
+                                .size(px(48.))
+                                .flex_shrink_0()
+                                .rounded(px(10.))
+                                .bg(theme.background.opacity(0.55))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_2xl()
+                                .font_semibold()
+                                .text_color(theme.primary)
+                                .child("30"),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_1()
+                                .child(div().font_semibold().child(if self.home_daily_loading {
+                                    "正在加载…"
+                                } else {
+                                    "每日30首"
+                                }))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("为你每天更新"),
+                                ),
+                        ),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.open_daily_playlist(cx))),
             Button::new("home-radar")
                 .ghost()
                 .w(feature_width)
@@ -8459,16 +8568,32 @@ impl LyruneView {
                                                 .font_semibold()
                                                 .child("今日歌单"),
                                         )
-                                        .when_some(self.home_error.clone(), |header, error| {
-                                            header.child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(error),
+                                        .when_some(
+                                            self.home_error
+                                                .clone()
+                                                .filter(|_| !self.home_playlists.is_empty()),
+                                            |header, error| {
+                                                header.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(error),
+                                                )
+                                            },
+                                        ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .items_start()
+                                        .flex_wrap()
+                                        .gap_4()
+                                        .children(cards)
+                                        .when_some(home_state, |body, state| {
+                                            body.child(
+                                                div().w_full().min_h(px(220.)).flex().child(state),
                                             )
                                         }),
-                                )
-                                .child(h_flex().items_start().flex_wrap().gap_4().children(cards)),
+                                ),
                         ),
                     ),
             )
@@ -11669,6 +11794,30 @@ mod tests {
         assert_eq!(inserted, 1);
         assert_eq!(mids(&queue.tracks), ["A", "search", "B"]);
         assert!(queue.modified);
-        assert_eq!(canonical_queue_track_index(&queue, &playlist_id, "B"), None);
+        assert_eq!(
+            canonical_queue_track_index(&queue, &playlist_id, &queue.tracks, "B"),
+            None
+        );
+    }
+
+    #[test]
+    fn daily_refresh_does_not_reuse_yesterdays_queue() {
+        let playlist_id = UserPlaylistId::Daily { diss_id: 30 };
+        let queue = PlaybackQueue {
+            playlist_id: playlist_id.clone(),
+            tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
+            modified: false,
+            continuation: None,
+        };
+        let today = vec![Arc::new(track("A")), Arc::new(track("C"))];
+
+        assert_eq!(
+            canonical_queue_track_index(&queue, &playlist_id, &queue.tracks, "A"),
+            Some(0)
+        );
+        assert_eq!(
+            canonical_queue_track_index(&queue, &playlist_id, &today, "A"),
+            None
+        );
     }
 }

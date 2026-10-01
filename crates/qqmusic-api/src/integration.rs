@@ -249,6 +249,7 @@ pub enum UserPlaylistId {
     Created { tid: u64, dir_id: u64 },
     Favorite { diss_id: u64 },
     Recommended { diss_id: u64 },
+    Daily { diss_id: u64 },
     Artist { mid: String },
     Album { mid: String },
     Search { query: String },

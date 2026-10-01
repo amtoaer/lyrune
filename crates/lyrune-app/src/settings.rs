@@ -232,7 +232,6 @@ impl PersistedPlayback {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
-    #[serde(default)]
     pub client_guid: String,
     pub volume: f32,
     pub last_nonzero_volume: f32,
@@ -725,6 +724,12 @@ mod tests {
             std::thread::current().name().unwrap_or("unnamed")
         ));
         let path = directory.join("settings.json");
+        let settings = SettingsStore::load_from(&path).expect("initialize settings");
+        assert!(!settings.client_guid.is_empty());
+        assert!(path.exists());
+        let restored = SettingsStore::load_from(&path).expect("load settings");
+        assert_eq!(restored.client_guid, settings.client_guid);
+
         let expected = AppSettings {
             client_guid: "installation-guid".to_owned(),
             volume: 0.37,
@@ -814,22 +819,6 @@ mod tests {
         assert_eq!(restored.current_playback, expected.current_playback);
         assert_eq!(restored.window_size, expected.window_size);
         assert_eq!(restored.sidebar_width, expected.sidebar_width);
-        fs::remove_dir_all(directory).expect("remove test settings directory");
-    }
-
-    #[test]
-    fn test_client_guid() {
-        let directory = std::env::temp_dir().join(format!(
-            "lyrune-settings-test-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
-        let path = directory.join("settings.json");
-        let settings = SettingsStore::load_from(&path).expect("initialize settings");
-        assert!(!settings.client_guid.is_empty());
-        assert!(path.exists());
-        let restored = SettingsStore::load_from(&path).expect("load settings");
-        assert_eq!(restored.client_guid, settings.client_guid);
 
         fs::write(&path, r#"{"volume":0.37}"#).expect("write legacy settings");
         let migrated = SettingsStore::load_from(&path).expect("migrate settings");

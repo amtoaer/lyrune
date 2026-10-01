@@ -3403,10 +3403,7 @@ impl LyruneView {
     }
 
     fn begin_qq_login(&mut self, uin: u64, cx: &mut Context<Self>) {
-        if matches!(
-            self.account_state,
-            AccountState::Restoring | AccountState::QuickSigningIn | AccountState::SignedIn
-        ) {
+        if self.account_state == AccountState::QuickSigningIn {
             return;
         }
         let Some(session) = self.qq_quick_login.clone() else {
@@ -3415,9 +3412,6 @@ impl LyruneView {
 
         self.login_generation = self.login_generation.wrapping_add(1);
         let generation = self.login_generation;
-        if let Some(task) = self.login_abort_handle.take() {
-            task.abort();
-        }
         self.account_state = AccountState::QuickSigningIn;
         self.login_message = format!("正在使用 QQ 账号 {uin} 登录…");
         cx.notify();
@@ -3464,9 +3458,7 @@ impl LyruneView {
                 self.login_message = "已扫码，请在手机上确认登录".to_owned();
             }
             LoginEvent::Succeeded(credential) => {
-                if let Some(task) = self.login_abort_handle.take() {
-                    task.abort();
-                }
+                self.login_abort_handle = None;
                 self.account_state = AccountState::SignedIn;
                 self.qr_image = None;
                 self.qq_quick_login = None;

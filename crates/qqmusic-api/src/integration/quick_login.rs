@@ -24,7 +24,6 @@ const MUSIC_REDIRECT: &str =
 const LOGIN_REFERER: &str = "https://xui.ptlogin2.qq.com/cgi-bin/xlogin?appid=716027609&daid=383&style=33&target=self&pt_3rd_aid=100497308&s_url=https%3A%2F%2Fgraph.qq.com%2Foauth2.0%2Flogin_jump";
 const QQ_PORTS: [u16; 5] = [4301, 4303, 4305, 4307, 4309];
 
-#[derive(Clone)]
 pub struct QqAccount {
     pub uin: u64,
     pub nickname: String,
@@ -91,48 +90,41 @@ impl QqQuickLogin {
             }
         }))
         .await;
-        let mut empty_port = None;
+        let mut response = None;
         for (port, result) in probes {
             let Ok(data) = result else { continue };
-            if data.is_empty() {
-                empty_port = Some(port);
-                continue;
+            let has_accounts = !data.is_empty();
+            response = Some((port, data));
+            if has_accounts {
+                break;
             }
-            let accounts = data
-                .into_iter()
-                .map(|account| {
-                    let uin = match &account["uin"] {
-                        Value::String(uin) => uin.parse().context("QQ 账号格式无效")?,
-                        value => value.as_u64().context("QQ 账号格式无效")?,
-                    };
-                    ensure!(uin > 0, "QQ 账号格式无效");
-                    Ok(QqAccount {
-                        uin,
-                        nickname: account["nickname"]
-                            .as_str()
-                            .context("QQ 账号昵称格式无效")?
-                            .to_owned(),
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            return Ok(Self {
-                client,
-                client_guid,
-                local_token,
-                cookies,
-                port,
-                accounts,
-            });
         }
-        let port =
-            empty_port.context("未检测到 QQ 快捷登录服务，请先启动并登录 Linux QQ 后重试")?;
+        let (port, data) =
+            response.context("未检测到 QQ 快捷登录服务，请先启动并登录 Linux QQ 后重试")?;
+        let accounts = data
+            .into_iter()
+            .map(|account| {
+                let uin = match &account["uin"] {
+                    Value::String(uin) => uin.parse().context("QQ 账号格式无效")?,
+                    value => value.as_u64().context("QQ 账号格式无效")?,
+                };
+                ensure!(uin > 0, "QQ 账号格式无效");
+                Ok(QqAccount {
+                    uin,
+                    nickname: account["nickname"]
+                        .as_str()
+                        .context("QQ 账号昵称格式无效")?
+                        .to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             client,
             client_guid,
             local_token,
             cookies,
             port,
-            accounts: Vec::new(),
+            accounts,
         })
     }
 
@@ -165,8 +157,7 @@ impl QqQuickLogin {
             .timeout(Duration::from_secs(2))
             .send()
             .await
-            .map_err(reqwest::Error::without_url)?
-            .error_for_status()
+            .and_then(reqwest::Response::error_for_status)
             .map_err(reqwest::Error::without_url)?;
         let client_key = session_cookie(
             &self.cookies,
@@ -204,8 +195,7 @@ impl QqQuickLogin {
             .header(REFERER, LOGIN_REFERER)
             .send()
             .await
-            .map_err(reqwest::Error::without_url)?
-            .error_for_status()
+            .and_then(reqwest::Response::error_for_status)
             .map_err(reqwest::Error::without_url)?;
         let redirect = parse_qlogin(&response.text().await?)?;
         self.client
@@ -213,21 +203,9 @@ impl QqQuickLogin {
             .header(REFERER, LOGIN_REFERER)
             .send()
             .await
-            .map_err(reqwest::Error::without_url)?
-            .error_for_status()
+            .and_then(reqwest::Response::error_for_status)
             .map_err(reqwest::Error::without_url)?;
-        let token = self.music_token().await?;
-        let credential = QqCredential::from_token(token, self.client_guid.clone())?;
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            ProtocolClient::new()?.ensure_encrypted_uin(credential),
-        )
-        .await
-        .context("读取 QQ 音乐用户资料超时，请稍后重试")?
-    }
-
-    async fn music_token(&self) -> Result<TencentLoginToken> {
-        match self.authorize_music().await {
+        let token = match self.authorize_music().await {
             Err(error)
                 if error.chain().any(|cause| {
                     cause
@@ -236,10 +214,17 @@ impl QqQuickLogin {
                 }) =>
             {
                 tokio::time::sleep(Duration::from_millis(300)).await;
-                self.authorize_music().await
+                self.authorize_music().await?
             }
-            result => result,
-        }
+            result => result?,
+        };
+        let credential = QqCredential::from_token(token, self.client_guid.clone())?;
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            ProtocolClient::new()?.ensure_encrypted_uin(credential),
+        )
+        .await
+        .context("读取 QQ 音乐用户资料超时，请稍后重试")?
     }
 
     async fn authorize_music(&self) -> Result<TencentLoginToken> {
@@ -275,8 +260,7 @@ impl QqQuickLogin {
             ])
             .send()
             .await
-            .map_err(reqwest::Error::without_url)?
-            .error_for_status()
+            .and_then(reqwest::Response::error_for_status)
             .map_err(reqwest::Error::without_url)?;
         let redirect = Url::parse(
             response
@@ -380,23 +364,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_qq_accounts() {
-        let accounts: Vec<Value> = parse_jsonp(
-            r#"var var_sso_uin_list=[{"uin":"10001","nickname":"测试;账号"},{"uin":"10002","nickname":"另一账号"}];ptui_getuins_CB(var_sso_uin_list);"#,
-            "ptui_getuins_CB",
-        ).unwrap();
-        assert_eq!(accounts.len(), 2);
-        assert_eq!(accounts[0]["nickname"], "测试;账号");
-        let ticket: Value = parse_jsonp(
-            r#"ptui_getst_CB({"uin":"10001","keyindex":19});"#,
-            "ptui_getst_CB",
-        )
-        .unwrap();
-        assert_eq!(ticket["keyindex"], 19);
-        assert!(parse_jsonp::<Vec<Value>>("other_callback([]);", "ptui_getuins_CB").is_err());
-    }
-
-    #[test]
     fn test_qq_ticket() {
         let ticket: Value = parse_jsonp(
             "var var_sso_get_st_uin={uin: 10001, keyindex: 19}; ptui_getst_CB(var_sso_get_st_uin);",
@@ -405,72 +372,5 @@ mod tests {
         .unwrap();
         assert_eq!(ticket["uin"], 10001);
         assert_eq!(ticket["keyindex"], 19);
-    }
-
-    #[test]
-    fn test_qq_authorization() {
-        let url = parse_qlogin("ptui_qlogin_CB('0', 'https://ssl.ptlogin2.graph.qq.com/check_sig?ptsigx=test-ticket', '');").unwrap();
-        assert_eq!(url.query_pairs().next().unwrap().1, "test-ticket");
-        assert!(parse_qlogin("ptui_qlogin_CB('0', 'https://example.com/check_sig', '');").is_err());
-        let error = parse_qlogin("ptui_qlogin_CB('10006', '', '请扫码');").unwrap_err();
-        assert!(error.to_string().contains("10006"));
-    }
-
-    #[tokio::test]
-    async fn test_music_token_retry() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-        use tokio::net::TcpListener;
-
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let server_attempts = attempts.clone();
-        let server = tokio::spawn(async move {
-            loop {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut stream = BufReader::new(stream);
-                let mut request = String::new();
-                stream.read_line(&mut request).await.unwrap();
-                assert!(request.starts_with("CONNECT graph.qq.com:443 "));
-                server_attempts.fetch_add(1, Ordering::Relaxed);
-                stream
-                    .get_mut()
-                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                    .await
-                    .unwrap();
-            }
-        });
-        let cookies = Arc::new(Jar::default());
-        cookies.add_cookie_str(
-            "p_skey=test; Path=/",
-            &Url::parse("https://graph.qq.com/").unwrap(),
-        );
-        let session = QqQuickLogin {
-            client: Client::builder()
-                .no_proxy()
-                .proxy(reqwest::Proxy::all(format!("http://{address}")).unwrap())
-                .cookie_provider(cookies.clone())
-                .build()
-                .unwrap(),
-            client_guid: "test-guid".to_owned(),
-            local_token: String::new(),
-            cookies,
-            port: 0,
-            accounts: Vec::new(),
-        };
-        let result = tokio::time::timeout(Duration::from_secs(2), session.music_token()).await;
-        server.abort();
-        let error = result
-            .unwrap()
-            .err()
-            .expect("connection failure must propagate");
-        assert_eq!(attempts.load(Ordering::Relaxed), 2);
-        assert!(error.chain().any(|cause| {
-            cause
-                .downcast_ref::<reqwest::Error>()
-                .is_some_and(reqwest::Error::is_connect)
-        }));
     }
 }

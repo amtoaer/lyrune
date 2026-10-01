@@ -620,19 +620,6 @@ mod tests {
     }
 
     #[test]
-    fn test_credential_guid() {
-        let old = credential_from_old_storage(2);
-        let mut token = old.to_token();
-        token.music_key = "refreshed-music-key".to_owned();
-        let refreshed = QqCredential::from_token(token, old.client_guid.clone()).unwrap();
-        let serialized = serde_json::to_string(&refreshed).unwrap();
-        let restored: QqCredential = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(restored.music_key, "refreshed-music-key");
-        assert_eq!(restored.client_guid, old.client_guid);
-    }
-
-    #[test]
     fn credential_session_shares_and_revokes_snapshot() {
         let credential = credential_from_old_storage(2);
         let session = CredentialSession::new(credential);

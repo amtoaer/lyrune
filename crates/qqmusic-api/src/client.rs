@@ -119,7 +119,7 @@ impl MusicClient {
         }
     }
 
-    pub fn with_client_guid(mut self, guid: impl Into<String>) -> Self {
+    pub(crate) fn with_client_guid(mut self, guid: impl Into<String>) -> Self {
         self.tencent.guid = guid.into();
         self
     }

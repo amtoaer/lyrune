@@ -168,10 +168,11 @@ impl LyruneView {
                     .position(|playlist| playlist.id == view.playlist_id)
             });
         let playback_restore = self
-            .pending_playback_restore
+            .playback
+            .pending_restore
             .clone()
             .filter(|restore| restore.account_id == account_id);
-        if self.pending_playback_restore.is_some() && playback_restore.is_none() {
+        if self.playback.pending_restore.is_some() && playback_restore.is_none() {
             self.clear_persisted_playback();
         }
         self.playlist_list.update(cx, |list, cx| {
@@ -503,15 +504,19 @@ impl LyruneView {
     pub(super) fn sync_table_playback_state(&mut self, cx: &mut Context<Self>) {
         let (playing, loading) = {
             let table = self.track_table.read(cx);
-            self.playback_queue.as_ref().map_or((None, None), |queue| {
+            self.playback.queue.as_ref().map_or((None, None), |queue| {
                 queue.playback_indices_in(
                     table.delegate().tracks(),
-                    self.current_track,
-                    self.playback_load.track,
+                    self.playback.current_track,
+                    self.playback.load.track,
                 )
             })
         };
-        let playback_active = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
+        let playback_active = self
+            .playback
+            .audio
+            .as_ref()
+            .is_some_and(AudioPlayer::is_playing);
         self.track_table.update(cx, |table, cx| {
             table
                 .delegate_mut()

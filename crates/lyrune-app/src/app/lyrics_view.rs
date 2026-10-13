@@ -1244,7 +1244,7 @@ impl LyruneView {
 
         let render_radius =
             ((window.viewport_size().height * 0.65 / row_height).ceil() as usize) + 2;
-        let anchor = lyrics.active_index(self.position).unwrap_or(0);
+        let anchor = lyrics.active_index(self.playback.position).unwrap_or(0);
         // 排版缓存复用字形；面板缓存则固定本帧的行、滚动位置和高亮时间，
         // 避免其他控件触发重绘时绕过用户设置的歌词帧率。
         let cache_needs_update = self.lyric_panel_frame_pending
@@ -1269,7 +1269,7 @@ impl LyruneView {
             let render_start = anchor.saturating_sub(render_radius);
             let render_end = (anchor + render_radius + 1).min(lyrics.lines.len());
             let highlight_position = lyric_position_for_frame_rate(
-                self.position,
+                self.playback.position,
                 self.settings.lyric_highlight_frame_rate,
             );
             let track_duration = self.current_duration();

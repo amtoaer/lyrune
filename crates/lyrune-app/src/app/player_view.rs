@@ -42,9 +42,10 @@ pub(super) fn format_playback_time(duration: Duration) -> String {
 impl LyruneView {
     fn render_quality_selector(&mut self, has_track: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let active_quality = self.active_quality;
+        let active_quality = self.playback.active_quality;
         let active_label = active_quality.badge_label();
         let options = self
+            .playback
             .available_qualities
             .iter()
             .rev()
@@ -74,7 +75,7 @@ impl LyruneView {
                     .text_size(px(11.))
                     .rounded(px(7.))
                     .tooltip("切换音质")
-                    .when(self.playback_load.track.is_some(), |button| {
+                    .when(self.playback.load.track.is_some(), |button| {
                         button
                             .bg(theme.input_background())
                             .border_color(theme.input)
@@ -82,8 +83,8 @@ impl LyruneView {
                     })
                     .disabled(
                         !has_track
-                            || self.playback_load.track.is_some()
-                            || self.available_qualities.is_empty(),
+                            || self.playback.load.track.is_some()
+                            || self.playback.available_qualities.is_empty(),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.quality_menu_open = !this.quality_menu_open;
@@ -136,11 +137,11 @@ impl LyruneView {
         let duration = self.current_duration().unwrap_or_default();
         let percentage =
             if self.cover_backdrop_visible && self.seek_preview.is_none() && !duration.is_zero() {
-                progress_fraction(self.position, duration)
+                progress_fraction(self.playback.position, duration)
             } else {
                 self.progress_slider.read(cx).percentage().end
             };
-        let interactive = has_track && self.playback_started && self.playback_load.track.is_none();
+        let interactive = has_track && self.playback.started && self.playback.load.track.is_none();
         let bar_color = theme.slider_bar;
         let thumb_color = theme.slider_thumb;
         let hover_fraction = interactive
@@ -235,7 +236,7 @@ impl LyruneView {
             .w_full()
             .child(track);
 
-        let current_time = format_playback_time(self.position.min(duration));
+        let current_time = format_playback_time(self.playback.position.min(duration));
         let total_time = format_playback_time(duration);
         div()
             .id("player-progress")
@@ -343,10 +344,14 @@ impl LyruneView {
         let quality_selector = self.render_quality_selector(has_track, cx);
         let progress = self.render_player_progress(has_track, narrow, window, cx);
         let theme = cx.theme();
-        let is_playing = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
-        let loading = self.playback_load.track.is_some();
+        let is_playing = self
+            .playback
+            .audio
+            .as_ref()
+            .is_some_and(AudioPlayer::is_playing);
+        let loading = self.playback.load.track.is_some();
         let show_pause = if loading {
-            self.playback_load.autoplay
+            self.playback.load.autoplay
         } else {
             is_playing
         };
@@ -599,17 +604,18 @@ impl LyruneView {
                                             .size(px(44.))
                                             .p_0()
                                             .tooltip("随机播放")
-                                            .toggled(self.shuffle)
-                                            .selected(self.shuffle)
+                                            .toggled(self.playback.shuffle)
+                                            .selected(self.playback.shuffle)
                                             .disabled(
-                                                self.playback_queue
+                                                self.playback
+                                                    .queue
                                                     .as_ref()
                                                     .is_none_or(|queue| queue.tracks.is_empty()),
                                             )
                                             .child(div().w(px(28.)).flex().justify_center().child(
                                                 media_icon(
                                                     MediaIcon::Shuffle,
-                                                    if self.shuffle {
+                                                    if self.playback.shuffle {
                                                         icon_accent
                                                     } else {
                                                         icon_foreground
@@ -618,13 +624,13 @@ impl LyruneView {
                                                 ),
                                             ))
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.shuffle = !this.shuffle;
+                                                this.playback.shuffle = !this.playback.shuffle;
                                                 #[cfg(target_os = "linux")]
                                                 this.sync_mpris(false);
                                                 cx.notify();
                                             })),
                                     )
-                                    .when(self.shuffle, |this| {
+                                    .when(self.playback.shuffle, |this| {
                                         this.child(
                                             div()
                                                 .absolute()
@@ -643,7 +649,7 @@ impl LyruneView {
                                     .size(px(44.))
                                     .p_0()
                                     .tooltip("上一首")
-                                    .disabled(self.current_track.is_none())
+                                    .disabled(self.playback.current_track.is_none())
                                     .child(div().w(px(28.)).flex().justify_center().child(
                                         media_icon(MediaIcon::SkipBack, icon_foreground, px(20.)),
                                     ))
@@ -659,7 +665,7 @@ impl LyruneView {
                                     .when(loading, |button| button.bg(theme.button_primary))
                                     .disabled(
                                         loading
-                                            || (self.current_track.is_none()
+                                            || (self.playback.current_track.is_none()
                                                 && self
                                                     .track_table
                                                     .read(cx)
@@ -687,7 +693,7 @@ impl LyruneView {
                                     .size(px(44.))
                                     .p_0()
                                     .tooltip("下一首")
-                                    .disabled(self.current_track.is_none())
+                                    .disabled(self.playback.current_track.is_none())
                                     .child(div().w(px(28.)).flex().justify_center().child(
                                         media_icon(
                                             MediaIcon::SkipForward,
@@ -708,22 +714,25 @@ impl LyruneView {
                                             .rounded(px(999.))
                                             .size(px(44.))
                                             .p_0()
-                                            .tooltip(self.repeat_mode.label())
-                                            .toggled(self.repeat_mode != RepeatMode::Off)
-                                            .selected(self.repeat_mode != RepeatMode::Off)
+                                            .tooltip(self.playback.repeat_mode.label())
+                                            .toggled(self.playback.repeat_mode != RepeatMode::Off)
+                                            .selected(self.playback.repeat_mode != RepeatMode::Off)
                                             .disabled(
-                                                self.playback_queue
+                                                self.playback
+                                                    .queue
                                                     .as_ref()
                                                     .is_none_or(|queue| queue.tracks.is_empty()),
                                             )
                                             .child(div().w(px(28.)).flex().justify_center().child(
                                                 media_icon(
-                                                    if self.repeat_mode == RepeatMode::One {
+                                                    if self.playback.repeat_mode == RepeatMode::One
+                                                    {
                                                         MediaIcon::RepeatOne
                                                     } else {
                                                         MediaIcon::Repeat
                                                     },
-                                                    if self.repeat_mode != RepeatMode::Off {
+                                                    if self.playback.repeat_mode != RepeatMode::Off
+                                                    {
                                                         icon_accent
                                                     } else {
                                                         icon_foreground
@@ -732,13 +741,14 @@ impl LyruneView {
                                                 ),
                                             ))
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.repeat_mode = this.repeat_mode.next();
+                                                this.playback.repeat_mode =
+                                                    this.playback.repeat_mode.next();
                                                 #[cfg(target_os = "linux")]
                                                 this.sync_mpris(false);
                                                 cx.notify();
                                             })),
                                     )
-                                    .when(self.repeat_mode != RepeatMode::Off, |this| {
+                                    .when(self.playback.repeat_mode != RepeatMode::Off, |this| {
                                         this.child(
                                             div()
                                                 .absolute()

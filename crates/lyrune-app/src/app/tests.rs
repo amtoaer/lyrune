@@ -12,11 +12,10 @@ use super::playback::PlaybackLoad;
 use super::player_view::format_playback_time;
 use super::playlists::playlist_title_is_long;
 use super::queue::{
-    canonical_queue_track_index, insert_external_track_after_current, insert_track_after_current,
+    PlaybackQueue, canonical_queue_track_index, insert_external_track_after_current,
+    insert_track_after_current,
 };
-use super::{
-    NavigationHistory, PlaybackQueue, PlaylistScrollPosition, SearchCategory, SearchVisibleCounts,
-};
+use super::{NavigationHistory, PlaylistScrollPosition, SearchCategory, SearchVisibleCounts};
 use crate::settings::{DEFAULT_NAVIGATION_HISTORY_LIMIT, LyricFrameRate};
 use gpui::{Pixels, Rgba, black, px, rgb};
 use qqmusic_api::integration::{

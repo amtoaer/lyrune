@@ -315,9 +315,9 @@ impl LyruneView {
         self.account.invalidate_login();
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home_generation = self.home_generation.wrapping_add(1);
-        self.queue_generation = self.queue_generation.wrapping_add(1);
-        self.playback_load.invalidate();
-        if let Some(audio) = &self.audio {
+        self.playback.queue_generation = self.playback.queue_generation.wrapping_add(1);
+        self.playback.load.invalidate();
+        if let Some(audio) = &self.playback.audio {
             audio.stop();
         }
         self.account.revoke();
@@ -341,18 +341,18 @@ impl LyruneView {
         self.selected_playlist = None;
         self.selected_playlist_resource = None;
         self.page_resource_cache = PageResourceCache::default();
-        self.playback_queue = None;
-        self.queue_recommendation_loading = false;
-        self.queue_waiting_for_recommendation = false;
-        self.current_track = None;
-        self.playback_load.clear();
-        self.playback_started = false;
+        self.playback.queue = None;
+        self.playback.recommendation_loading = false;
+        self.playback.waiting_for_recommendation = false;
+        self.playback.current_track = None;
+        self.playback.load.clear();
+        self.playback.started = false;
         self.wake_playback_ticks();
-        self.playback_location = None;
-        self.active_quality = self.settings.playback_quality;
-        self.available_qualities.clear();
+        self.playback.location = None;
+        self.playback.active_quality = self.settings.playback_quality;
+        self.playback.available_qualities.clear();
         self.quality_menu_open = false;
-        self.position = Duration::ZERO;
+        self.playback.position = Duration::ZERO;
         self.account.menu_open = false;
         self.clear_persisted_playback();
         #[cfg(target_os = "linux")]

@@ -57,8 +57,8 @@ use crate::mpris::MprisHandle;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 use crate::settings::{
-    AppSettings, CdnCacheStore, LibraryCache, MIN_SCALE_PERCENT, PersistedPlayback,
-    PersistedWindowSize, SettingsStore, WindowDecoration,
+    AppSettings, CdnCacheStore, LibraryCache, MIN_SCALE_PERCENT, PersistedWindowSize,
+    SettingsStore, WindowDecoration,
 };
 use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
@@ -71,12 +71,11 @@ use navigation::{
     MainContent, NavigationHistory, PageResourceCache, PlaylistScrollPosition, SearchCategory,
     SearchVisibleCounts, SharedArtistResource, SharedPlaylistResource, SharedSearchResource,
 };
-use playback::{PlaybackLoad, PlaybackLocation};
+use playback::Playback;
 use playlists::PlaylistPageKey;
 use qqmusic_api::integration::{
-    PlaylistPage, ProtocolClient, Quality, RecommendationKind, SearchArtist, UserPlaylist,
+    PlaylistPage, ProtocolClient, RecommendationKind, SearchArtist, UserPlaylist,
 };
-use queue::{PlaybackQueue, RepeatMode};
 
 const PAGE_SIZE: u64 = 100;
 const ARTIST_PAGE_SIZE: u64 = 5;
@@ -172,27 +171,12 @@ pub struct LyruneView {
     window_drag_pressed: bool,
 
     // 音频、网络服务及维护任务。队列版本与单次音源加载版本分别失效。
-    audio: Option<AudioPlayer>,
+    playback: Playback,
     audio_cache: Option<AudioCache>,
     protocol_client: Option<ProtocolClient>,
     cdn_maintenance: Option<JoinHandle<()>>,
     audio_cache_maintenance: Option<JoinHandle<()>>,
-    playback_queue: Option<PlaybackQueue>,
-    queue_generation: u64,
-    // loading 可在当前歌曲播放时预取；waiting 表示已到队尾，结果到达后需要续播。
-    queue_recommendation_loading: bool,
-    queue_waiting_for_recommendation: bool,
-    // 属于 playback_queue，不是当前页面表格中的行号。
-    current_track: Option<usize>,
-    playback_load: PlaybackLoad,
-    // 表示音源已装入播放器；暂停时仍为 true，用于区分暂停与尚未开始/已经停止。
-    playback_started: bool,
-    playback_location: Option<PlaybackLocation>,
-    // 记录回退后实际采用的音质；用户偏好保存在 settings.playback_quality。
-    active_quality: Quality,
-    available_qualities: Vec<Quality>,
     quality_menu_open: bool,
-    position: Duration,
     seek_preview: Option<Duration>,
     progress_hovered: bool,
     progress_hover_fraction: Option<f32>,
@@ -224,10 +208,6 @@ pub struct LyruneView {
     liked_state_loading: HashSet<String>,
     liked_toggle_loading: HashSet<String>,
     update_check_in_progress: bool,
-    shuffle: bool,
-    repeat_mode: RepeatMode,
-    pending_playback_restore: Option<PersistedPlayback>,
-    last_playback_persisted_at: Instant,
 
     window_handle: AnyWindowHandle,
     // 保存控件订阅句柄；下方两个窗口观察句柄由 attach_window 在窗口重开时替换。
@@ -585,23 +565,12 @@ impl LyruneView {
             volume_slider,
             image_cache,
             window_drag_pressed: false,
-            audio,
+            playback: Playback::new(audio, playback_quality, pending_playback_restore),
             audio_cache,
             protocol_client,
             cdn_maintenance: None,
             audio_cache_maintenance: None,
-            playback_queue: None,
-            queue_generation: 0,
-            queue_recommendation_loading: false,
-            queue_waiting_for_recommendation: false,
-            current_track: None,
-            playback_load: PlaybackLoad::default(),
-            playback_started: false,
-            playback_location: None,
-            active_quality: playback_quality,
-            available_qualities: Vec::new(),
             quality_menu_open: false,
-            position: Duration::ZERO,
             seek_preview: None,
             progress_hovered: false,
             progress_hover_fraction: None,
@@ -631,10 +600,6 @@ impl LyruneView {
             liked_state_loading: HashSet::new(),
             liked_toggle_loading: HashSet::new(),
             update_check_in_progress: false,
-            shuffle: false,
-            repeat_mode: RepeatMode::Off,
-            pending_playback_restore,
-            last_playback_persisted_at: Instant::now(),
             window_handle: window.window_handle(),
             _subscriptions: subscriptions,
             _window_subscription: None,
@@ -1063,7 +1028,8 @@ impl LyruneView {
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.cover_backdrop_visible && self.playback_is_advancing() {
             if self.seek_preview.is_none() {
-                self.position = self
+                self.playback.position = self
+                    .playback
                     .audio
                     .as_ref()
                     .map(AudioPlayer::position)
@@ -1354,7 +1320,7 @@ impl LyruneView {
 impl Drop for LyruneView {
     fn drop(&mut self) {
         self.persist_current_playback();
-        if let Some(audio) = &self.audio {
+        if let Some(audio) = &self.playback.audio {
             audio.stop();
         }
         self.persist_settings();

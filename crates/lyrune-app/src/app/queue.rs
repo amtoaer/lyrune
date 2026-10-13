@@ -143,13 +143,13 @@ impl LyruneView {
         let Some(selected_track) = tracks.get(index) else {
             return;
         };
-        if let Some(queue_index) = self
-            .playback_queue
-            .as_ref()
-            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, &selected_track.mid))
+        if let Some(queue_index) =
+            self.playback.queue.as_ref().and_then(|queue| {
+                canonical_queue_track_index(queue, &playlist.id, &selected_track.mid)
+            })
         {
-            if self.current_track == Some(queue_index) {
-                if self.playback_load.track.is_none() {
+            if self.playback.current_track == Some(queue_index) {
+                if self.playback.load.track.is_none() {
                     self.toggle_playback(cx);
                 }
             } else {
@@ -158,7 +158,7 @@ impl LyruneView {
             return;
         }
 
-        self.pending_playback_restore = None;
+        self.playback.pending_restore = None;
         self.replace_playback_queue(playlist, tracks, has_more, cx);
         self.start_playback(index, Duration::ZERO, None, true, cx);
     }
@@ -216,11 +216,12 @@ impl LyruneView {
                 this.home_recommendation_loading = None;
                 match result {
                     Ok((tracks, continuation)) if !tracks.is_empty() => {
-                        this.pending_playback_restore = None;
-                        this.queue_generation = this.queue_generation.wrapping_add(1);
-                        this.queue_recommendation_loading = false;
-                        this.queue_waiting_for_recommendation = false;
-                        this.playback_queue = Some(PlaybackQueue {
+                        this.playback.pending_restore = None;
+                        this.playback.queue_generation =
+                            this.playback.queue_generation.wrapping_add(1);
+                        this.playback.recommendation_loading = false;
+                        this.playback.waiting_for_recommendation = false;
+                        this.playback.queue = Some(PlaybackQueue {
                             playlist_id: UserPlaylistId::Recommendation { kind },
                             tracks: share_items(tracks),
                             modified: false,
@@ -242,12 +243,12 @@ impl LyruneView {
     }
 
     pub(super) fn maybe_load_queue_recommendations(&mut self, force: bool, cx: &mut Context<Self>) {
-        if self.queue_recommendation_loading {
+        if self.playback.recommendation_loading {
             return;
         }
-        let Some((continuation, remaining)) = self.playback_queue.as_ref().and_then(|queue| {
+        let Some((continuation, remaining)) = self.playback.queue.as_ref().and_then(|queue| {
             let continuation = queue.continuation?;
-            let current = self.current_track.unwrap_or_default();
+            let current = self.playback.current_track.unwrap_or_default();
             Some((
                 continuation,
                 queue.tracks.len().saturating_sub(current.saturating_add(1)),
@@ -264,8 +265,8 @@ impl LyruneView {
         let Some(client) = self.protocol_client.clone() else {
             return;
         };
-        let generation = self.queue_generation;
-        self.queue_recommendation_loading = true;
+        let generation = self.playback.queue_generation;
+        self.playback.recommendation_loading = true;
 
         let task = RUNTIME.spawn(async move {
             tokio::time::timeout(Duration::from_secs(30), async {
@@ -298,28 +299,28 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.queue_generation != generation {
+                if this.playback.queue_generation != generation {
                     return;
                 }
-                this.queue_recommendation_loading = false;
+                this.playback.recommendation_loading = false;
                 match result {
                     Ok((tracks, continuation)) => {
                         let mut first_added = None;
-                        if let Some(queue) = &mut this.playback_queue {
+                        if let Some(queue) = &mut this.playback.queue {
                             queue.continuation = continuation;
                             first_added = queue.append_tracks(tracks.into_iter().map(Arc::new));
                         }
                         this.persist_current_playback();
                         // 已播到队尾时，续播从第一首新加入的歌开始；去重后的空批次不能越界跳歌。
-                        if this.queue_waiting_for_recommendation {
-                            this.queue_waiting_for_recommendation = false;
+                        if this.playback.waiting_for_recommendation {
+                            this.playback.waiting_for_recommendation = false;
                             if let Some(index) = first_added {
                                 this.start_playback(index, Duration::ZERO, None, true, cx);
                             }
                         }
                     }
                     Err(error) => {
-                        this.queue_waiting_for_recommendation = false;
+                        this.playback.waiting_for_recommendation = false;
                         this.notify_error(format!("继续加载推荐歌曲失败：{error:#}"), cx);
                     }
                 }
@@ -342,11 +343,11 @@ impl LyruneView {
             .position(|track| track.mid == restore.track_mid);
         if let Some(index) = index {
             let resume_at = restore.resume_position(restore.queue_tracks[index].duration_seconds);
-            self.pending_playback_restore = None;
-            self.queue_generation = self.queue_generation.wrapping_add(1);
-            self.queue_recommendation_loading = false;
-            self.queue_waiting_for_recommendation = false;
-            self.playback_queue = Some(PlaybackQueue {
+            self.playback.pending_restore = None;
+            self.playback.queue_generation = self.playback.queue_generation.wrapping_add(1);
+            self.playback.recommendation_loading = false;
+            self.playback.waiting_for_recommendation = false;
+            self.playback.queue = Some(PlaybackQueue {
                 playlist_id: restore.playlist_id,
                 tracks: restore.queue_tracks,
                 modified: restore.queue_modified,
@@ -366,8 +367,8 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) {
         self.home_recommendation_loading = None;
-        self.queue_generation = self.queue_generation.wrapping_add(1);
-        let generation = self.queue_generation;
+        self.playback.queue_generation = self.playback.queue_generation.wrapping_add(1);
+        let generation = self.playback.queue_generation;
         let playlist_resource = self
             .selected_playlist_resource
             .as_ref()
@@ -378,14 +379,14 @@ impl LyruneView {
             .map_or(tracks.len() as u64, |resource| {
                 lock_resource(resource).next_offset
             });
-        self.playback_queue = Some(PlaybackQueue {
+        self.playback.queue = Some(PlaybackQueue {
             playlist_id: playlist.id.clone(),
             tracks,
             modified: false,
             continuation: None,
         });
-        self.queue_recommendation_loading = false;
-        self.queue_waiting_for_recommendation = false;
+        self.playback.recommendation_loading = false;
+        self.playback.waiting_for_recommendation = false;
 
         if !has_more {
             return;
@@ -437,10 +438,10 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.queue_generation != generation {
+                if this.playback.queue_generation != generation {
                     return;
                 }
-                if let (Some(queue), Ok(tracks)) = (&mut this.playback_queue, result) {
+                if let (Some(queue), Ok(tracks)) = (&mut this.playback.queue, result) {
                     queue.append_tracks(tracks);
                     if let Some(resource) = playlist_resource {
                         let state = lock_resource(&resource);
@@ -474,7 +475,8 @@ impl LyruneView {
             return;
         };
         let Some(playlist_id) = self
-            .playback_queue
+            .playback
+            .queue
             .as_ref()
             .map(|queue| queue.playlist_id.clone())
         else {
@@ -483,31 +485,35 @@ impl LyruneView {
         let Some(track_mid) = self.current_track_data().map(|track| track.mid.clone()) else {
             return;
         };
-        let position = if self.playback_load.track.is_some() || !self.playback_started {
-            self.position
+        let position = if self.playback.load.track.is_some() || !self.playback.started {
+            self.playback.position
         } else {
-            self.audio
+            self.playback
+                .audio
                 .as_ref()
                 .map(AudioPlayer::position)
-                .unwrap_or(self.position)
+                .unwrap_or(self.playback.position)
         };
-        self.position = position;
+        self.playback.position = position;
         let current_playback = PersistedPlayback {
             account_id,
             playlist_id,
             track_mid,
             position_ms: position.as_millis().min(u64::MAX as u128) as u64,
             queue_tracks: self
-                .playback_queue
+                .playback
+                .queue
                 .as_ref()
                 .map(|queue| queue.tracks.clone())
                 .unwrap_or_default(),
             queue_modified: self
-                .playback_queue
+                .playback
+                .queue
                 .as_ref()
                 .is_some_and(|queue| queue.modified),
             queue_continuation: self
-                .playback_queue
+                .playback
+                .queue
                 .as_ref()
                 .and_then(|queue| queue.continuation),
         };
@@ -515,21 +521,23 @@ impl LyruneView {
             self.settings.current_playback = Some(current_playback);
             self.persist_settings();
         }
-        self.last_playback_persisted_at = Instant::now();
+        self.playback.last_persisted_at = Instant::now();
     }
 
     pub(super) fn clear_persisted_playback(&mut self) {
-        self.pending_playback_restore = None;
+        self.playback.pending_restore = None;
         if self.settings.current_playback.take().is_some() {
             self.persist_settings();
         }
-        self.last_playback_persisted_at = Instant::now();
+        self.playback.last_persisted_at = Instant::now();
     }
 
     pub(super) fn current_track_data(&self) -> Option<&Track> {
-        self.current_track
+        self.playback
+            .current_track
             .and_then(|index| {
-                self.playback_queue
+                self.playback
+                    .queue
                     .as_ref()
                     .and_then(|queue| queue.tracks.get(index))
             })

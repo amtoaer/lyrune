@@ -195,19 +195,19 @@ impl LyruneView {
             .current_track_data()
             .is_some_and(|current| current.mid == track.mid)
         {
-            if self.playback_load.track.is_none() {
+            if self.playback.load.track.is_none() {
                 self.toggle_playback(cx);
             }
             return;
         }
 
-        self.pending_playback_restore = None;
+        self.playback.pending_restore = None;
         self.home_recommendation_loading = None;
-        let current_index = self.current_track;
-        let queue_index = if let Some(queue) = &mut self.playback_queue {
+        let current_index = self.playback.current_track;
+        let queue_index = if let Some(queue) = &mut self.playback.queue {
             insert_external_track_after_current(queue, current_index, track)
         } else {
-            self.playback_queue = Some(PlaybackQueue {
+            self.playback.queue = Some(PlaybackQueue {
                 playlist_id: UserPlaylistId::Search {
                     query: self.search_query.clone(),
                 },
@@ -284,14 +284,18 @@ impl LyruneView {
                 SearchCategory::Songs => {
                     is_empty = results.songs.items.is_empty();
                     let (playing_index, loading_index) =
-                        self.playback_queue.as_ref().map_or((None, None), |queue| {
+                        self.playback.queue.as_ref().map_or((None, None), |queue| {
                             queue.playback_indices_in(
                                 &results.songs.items,
-                                self.current_track,
-                                self.playback_load.track,
+                                self.playback.current_track,
+                                self.playback.load.track,
                             )
                         });
-                    let playback_active = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
+                    let playback_active = self
+                        .playback
+                        .audio
+                        .as_ref()
+                        .is_some_and(AudioPlayer::is_playing);
                     self.search_track_table.update(cx, |table, cx| {
                         let delegate = table.delegate_mut();
                         delegate.set_tracks(

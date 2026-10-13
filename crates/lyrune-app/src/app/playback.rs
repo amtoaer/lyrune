@@ -16,6 +16,15 @@ use crate::settings::PersistedQueueContinuation;
 use super::playback_sync::{duration_micros, mpris_track_id};
 use super::{LyruneView, RepeatMode, progress_fraction, progress_slider_state};
 
+#[derive(Default)]
+pub(super) struct PlaybackLoad {
+    pub(super) generation: u64,
+    // 属于播放队列，不是当前页面表格中的行号。
+    pub(super) track: Option<usize>,
+    // 加载中再次切换音质时沿用原来的播放意图，此时不能从已停止的音频设备推断。
+    pub(super) autoplay: bool,
+}
+
 #[derive(Clone)]
 pub(super) struct PlaybackLocation {
     pub(super) track_mid: String,
@@ -168,7 +177,7 @@ impl LyruneView {
         };
 
         let desired_quality = requested_quality.unwrap_or(self.settings.playback_quality);
-        let same_track = (self.current_track == Some(index) && self.loading_track.is_some())
+        let same_track = (self.current_track == Some(index) && self.playback_load.track.is_some())
             || self
                 .playback_location
                 .as_ref()
@@ -194,12 +203,12 @@ impl LyruneView {
             track.as_ref().clone(),
             cx,
         );
-        self.play_generation = self.play_generation.wrapping_add(1);
-        let generation = self.play_generation;
+        self.playback_load.generation = self.playback_load.generation.wrapping_add(1);
+        let generation = self.playback_load.generation;
         self.current_track = Some(index);
-        self.loading_track = Some(index);
+        self.playback_load.track = Some(index);
         self.ensure_track_like_state(track.mid.clone(), cx);
-        self.loading_autoplay = autoplay;
+        self.playback_load.autoplay = autoplay;
         self.playback_started = false;
         self.wake_playback_ticks();
         self.position = resume_at;
@@ -252,7 +261,7 @@ impl LyruneView {
                 let seeked = matches!(&event, PlaybackLoadEvent::Finished(Ok(_)));
                 let _ = this.update(cx, |this, cx| {
                     // 切歌、切音质或停止后，旧任务仍可能发来结果；不能据此替换当前音源。
-                    if this.play_generation != generation {
+                    if this.playback_load.generation != generation {
                         return;
                     }
                     match event {
@@ -262,8 +271,8 @@ impl LyruneView {
                             this.available_qualities = available_qualities;
                         }
                         PlaybackLoadEvent::Finished(result) => {
-                            this.loading_track = None;
-                            this.loading_autoplay = false;
+                            this.playback_load.track = None;
+                            this.playback_load.autoplay = false;
                             let playback_result = match result {
                                 Ok((playback, location, available_qualities)) => {
                                     let quality = location.quality;
@@ -314,7 +323,7 @@ impl LyruneView {
     }
 
     pub(super) fn toggle_playback(&mut self, cx: &mut Context<Self>) {
-        if self.loading_track.is_some() {
+        if self.playback_load.track.is_some() {
             return;
         }
         let Some(index) = self.current_track else {
@@ -343,7 +352,7 @@ impl LyruneView {
 
     #[cfg(target_os = "linux")]
     pub(super) fn play(&mut self, cx: &mut Context<Self>) {
-        if self.loading_track.is_some() {
+        if self.playback_load.track.is_some() {
             return;
         }
         let Some(index) = self.current_track else {
@@ -364,7 +373,8 @@ impl LyruneView {
 
     #[cfg(target_os = "linux")]
     pub(super) fn pause_playback(&mut self, cx: &mut Context<Self>) {
-        if self.loading_track.is_none() && self.audio.as_ref().is_some_and(AudioPlayer::is_playing)
+        if self.playback_load.track.is_none()
+            && self.audio.as_ref().is_some_and(AudioPlayer::is_playing)
         {
             self.toggle_playback(cx);
         }
@@ -375,12 +385,12 @@ impl LyruneView {
         if self.current_track.is_none() {
             return;
         }
-        self.play_generation = self.play_generation.wrapping_add(1);
+        self.playback_load.generation = self.playback_load.generation.wrapping_add(1);
         if let Some(audio) = &self.audio {
             audio.stop();
         }
-        self.loading_track = None;
-        self.loading_autoplay = false;
+        self.playback_load.track = None;
+        self.playback_load.autoplay = false;
         self.playback_started = false;
         self.wake_playback_ticks();
         self.position = Duration::ZERO;
@@ -413,7 +423,7 @@ impl LyruneView {
 
     #[cfg(target_os = "linux")]
     pub(super) fn seek_by(&mut self, offset_micros: i64, cx: &mut Context<Self>) {
-        if self.loading_track.is_some() || !self.playback_started {
+        if self.playback_load.track.is_some() || !self.playback_started {
             return;
         }
         let Some(duration) = self.current_duration() else {
@@ -440,7 +450,7 @@ impl LyruneView {
         position_micros: i64,
         cx: &mut Context<Self>,
     ) {
-        if self.loading_track.is_some() || !self.playback_started {
+        if self.playback_load.track.is_some() || !self.playback_started {
             return;
         }
         let Some(track) = self.current_track_data() else {
@@ -579,9 +589,9 @@ impl LyruneView {
             cx.notify();
             return;
         };
-        let loading = self.loading_track.is_some();
+        let loading = self.playback_load.track.is_some();
         let autoplay = if loading {
-            self.loading_autoplay
+            self.playback_load.autoplay
         } else {
             self.audio.as_ref().is_some_and(AudioPlayer::is_playing)
         };

@@ -149,7 +149,7 @@ impl LyruneView {
             .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, &selected_track.mid))
         {
             if self.current_track == Some(queue_index) {
-                if self.loading_track.is_none() {
+                if self.playback_load.track.is_none() {
                     self.toggle_playback(cx);
                 }
             } else {
@@ -483,7 +483,7 @@ impl LyruneView {
         let Some(track_mid) = self.current_track_data().map(|track| track.mid.clone()) else {
             return;
         };
-        let position = if self.loading_track.is_some() || !self.playback_started {
+        let position = if self.playback_load.track.is_some() || !self.playback_started {
             self.position
         } else {
             self.audio

@@ -507,7 +507,7 @@ impl LyruneView {
                 queue.playback_indices_in(
                     table.delegate().tracks(),
                     self.current_track,
-                    self.loading_track,
+                    self.playback_load.track,
                 )
             })
         };

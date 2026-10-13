@@ -72,7 +72,7 @@ use navigation::{
     MainContent, NavigationHistory, PageResourceCache, PlaylistScrollPosition, SearchCategory,
     SearchVisibleCounts, SharedArtistResource, SharedPlaylistResource, SharedSearchResource,
 };
-use playback::PlaybackLocation;
+use playback::{PlaybackLoad, PlaybackLocation};
 use playlists::PlaylistPageKey;
 use qqmusic_api::integration::{
     CredentialSession, PlaylistPage, ProtocolClient, Quality, RecommendationKind, SearchArtist,
@@ -187,11 +187,9 @@ pub struct LyruneView {
     // loading 可在当前歌曲播放时预取；waiting 表示已到队尾，结果到达后需要续播。
     queue_recommendation_loading: bool,
     queue_waiting_for_recommendation: bool,
-    // 这两个索引属于 playback_queue，不是当前页面表格中的行号。
+    // 属于 playback_queue，不是当前页面表格中的行号。
     current_track: Option<usize>,
-    loading_track: Option<usize>,
-    // 加载中再次切换音质时沿用原来的播放意图，此时不能从已停止的音频设备推断。
-    loading_autoplay: bool,
+    playback_load: PlaybackLoad,
     // 表示音源已装入播放器；暂停时仍为 true，用于区分暂停与尚未开始/已经停止。
     playback_started: bool,
     playback_location: Option<PlaybackLocation>,
@@ -239,7 +237,6 @@ pub struct LyruneView {
     login_message: String,
     window_handle: AnyWindowHandle,
     login_generation: u64,
-    play_generation: u64,
     account_menu_open: bool,
     // 保存控件订阅句柄；下方两个窗口观察句柄由 attach_window 在窗口重开时替换。
     _subscriptions: Vec<Subscription>,
@@ -609,8 +606,7 @@ impl LyruneView {
             queue_recommendation_loading: false,
             queue_waiting_for_recommendation: false,
             current_track: None,
-            loading_track: None,
-            loading_autoplay: false,
+            playback_load: PlaybackLoad::default(),
             playback_started: false,
             playback_location: None,
             active_quality: playback_quality,
@@ -653,7 +649,6 @@ impl LyruneView {
             login_message: "正在读取已保存的登录状态…".to_owned(),
             window_handle: window.window_handle(),
             login_generation: 0,
-            play_generation: 0,
             account_menu_open: false,
             _subscriptions: subscriptions,
             _window_subscription: None,

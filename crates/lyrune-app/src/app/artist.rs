@@ -609,7 +609,8 @@ impl LyruneView {
         let monospace_font = self.fonts.monospace.clone();
         let current_mid = self.current_track_data().map(|track| track.mid.clone());
         let loading_mid = self
-            .loading_track
+            .playback_load
+            .track
             .and_then(|index| self.playback_queue.as_ref()?.tracks.get(index))
             .map(|track| track.mid.clone());
         let is_playing = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);

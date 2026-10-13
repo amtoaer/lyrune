@@ -74,7 +74,7 @@ impl LyruneView {
                     .text_size(px(11.))
                     .rounded(px(7.))
                     .tooltip("切换音质")
-                    .when(self.loading_track.is_some(), |button| {
+                    .when(self.playback_load.track.is_some(), |button| {
                         button
                             .bg(theme.input_background())
                             .border_color(theme.input)
@@ -82,7 +82,7 @@ impl LyruneView {
                     })
                     .disabled(
                         !has_track
-                            || self.loading_track.is_some()
+                            || self.playback_load.track.is_some()
                             || self.available_qualities.is_empty(),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -140,7 +140,7 @@ impl LyruneView {
             } else {
                 self.progress_slider.read(cx).percentage().end
             };
-        let interactive = has_track && self.playback_started && self.loading_track.is_none();
+        let interactive = has_track && self.playback_started && self.playback_load.track.is_none();
         let bar_color = theme.slider_bar;
         let thumb_color = theme.slider_thumb;
         let hover_fraction = interactive
@@ -344,9 +344,9 @@ impl LyruneView {
         let progress = self.render_player_progress(has_track, narrow, window, cx);
         let theme = cx.theme();
         let is_playing = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
-        let loading = self.loading_track.is_some();
+        let loading = self.playback_load.track.is_some();
         let show_pause = if loading {
-            self.loading_autoplay
+            self.playback_load.autoplay
         } else {
             is_playing
         };

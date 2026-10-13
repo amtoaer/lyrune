@@ -195,7 +195,7 @@ impl LyruneView {
             .current_track_data()
             .is_some_and(|current| current.mid == track.mid)
         {
-            if self.loading_track.is_none() {
+            if self.playback_load.track.is_none() {
                 self.toggle_playback(cx);
             }
             return;
@@ -288,7 +288,7 @@ impl LyruneView {
                             queue.playback_indices_in(
                                 &results.songs.items,
                                 self.current_track,
-                                self.loading_track,
+                                self.playback_load.track,
                             )
                         });
                     let playback_active = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);

@@ -126,7 +126,7 @@ impl LyruneView {
 
     pub(super) fn playback_is_advancing(&self) -> bool {
         self.playback_started
-            && self.loading_track.is_none()
+            && self.playback_load.track.is_none()
             && self.audio.as_ref().is_some_and(AudioPlayer::is_playing)
     }
 
@@ -194,7 +194,7 @@ impl LyruneView {
     #[cfg(target_os = "linux")]
     fn mpris_snapshot(&self) -> MprisSnapshot {
         let audio_available = self.audio.is_some();
-        let loading = self.loading_track.is_some();
+        let loading = self.playback_load.track.is_some();
         let playback_status = if loading {
             MprisPlaybackStatus::Playing
         } else if !self.playback_started {
@@ -302,7 +302,10 @@ impl LyruneView {
 
     fn tick(&mut self, cx: &mut Context<Self>) {
         let previous_position = self.position;
-        if self.seek_preview.is_none() && self.loading_track.is_none() && self.playback_started {
+        if self.seek_preview.is_none()
+            && self.playback_load.track.is_none()
+            && self.playback_started
+        {
             self.position = self
                 .audio
                 .as_ref()
@@ -311,7 +314,7 @@ impl LyruneView {
         }
 
         let ended = self.playback_started
-            && self.loading_track.is_none()
+            && self.playback_load.track.is_none()
             && self.audio.as_ref().is_some_and(AudioPlayer::is_empty);
         if ended {
             self.playback_started = false;
@@ -324,7 +327,7 @@ impl LyruneView {
         }
         #[cfg(target_os = "linux")]
         if self.current_track.is_some()
-            && self.loading_track.is_none()
+            && self.playback_load.track.is_none()
             && self.last_mpris_position_sync.elapsed() >= PROGRESS_TICK
         {
             self.sync_mpris_position();

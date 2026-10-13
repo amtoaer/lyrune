@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use gpui::{Context, Window};
-use qqmusic_api::integration::{PlaybackOption, Quality, Track};
+use qqmusic_api::integration::{CredentialSession, PlaybackOption, ProtocolClient, Quality, Track};
 use tokio::sync::mpsc;
 
 use crate::cache::{AudioCache, PreparedStream};
@@ -45,6 +45,90 @@ enum PlaybackLoadEvent {
     ResolvingOptions,
     Options(Vec<Quality>),
     Finished(anyhow::Result<(PreparedPlayback, PlaybackLocation, Vec<Quality>)>),
+}
+
+// 只准备音源，不读取或修改界面状态；返回后仍由 GPUI 接收端检查播放版本。
+async fn prepare_playback_stream(
+    audio_cache: &AudioCache,
+    client: &ProtocolClient,
+    credential: &CredentialSession,
+    track: &Track,
+    desired_quality: Quality,
+    reused_options: Option<Vec<PlaybackOption>>,
+    sender: &mpsc::Sender<PlaybackLoadEvent>,
+) -> anyhow::Result<(PreparedStream, PlaybackLocation, Vec<Quality>)> {
+    // 旧地址可能已过期；复用失败后重新解析音源，再尝试当前可用的音质。
+    let reused_stream = match reused_options {
+        Some(options) => match options
+            .iter()
+            .find(|option| option.quality == desired_quality)
+            .cloned()
+        {
+            Some(option) => prepare_playback_option(audio_cache, &option, track)
+                .await
+                .ok()
+                .map(|stream| {
+                    (
+                        desired_quality,
+                        stream,
+                        options.iter().map(|option| option.quality).collect(),
+                        options,
+                    )
+                }),
+            None => None,
+        },
+        None => None,
+    };
+    let (quality, stream, available_qualities, options) = match reused_stream {
+        Some(reused) => reused,
+        None => {
+            let _ = sender.send(PlaybackLoadEvent::ResolvingOptions).await;
+            let options = client.playback_options(credential, track).await?;
+            let mut available_qualities = options
+                .iter()
+                .map(|option| option.quality)
+                .collect::<Vec<_>>();
+            let _ = sender
+                .send(PlaybackLoadEvent::Options(available_qualities.clone()))
+                .await;
+            let candidates = Quality::fallback_order(&available_qualities, desired_quality);
+            let mut prepared = None;
+            let mut last_error = None;
+            for quality in candidates {
+                let Some(option) = options.iter().find(|option| option.quality == quality) else {
+                    continue;
+                };
+                let stream_result = prepare_playback_option(audio_cache, option, track).await;
+                match stream_result {
+                    Ok(stream) => {
+                        prepared = Some((quality, stream, options.clone()));
+                        break;
+                    }
+                    Err(error) => {
+                        available_qualities.retain(|candidate| *candidate != quality);
+                        last_error = Some(error.context(format!(
+                            "“{}”的{}音源不可用",
+                            track.title,
+                            quality.label()
+                        )));
+                    }
+                }
+            }
+            let (quality, stream, options) = prepared.ok_or_else(|| {
+                last_error.unwrap_or_else(|| anyhow::anyhow!("QQ 音乐没有返回当前账号可播放的音质"))
+            })?;
+            (quality, stream, available_qualities, options)
+        }
+    };
+    Ok((
+        stream,
+        PlaybackLocation {
+            track_mid: track.mid.clone(),
+            quality,
+            options,
+        },
+        available_qualities,
+    ))
 }
 
 impl LyruneView {
@@ -144,89 +228,25 @@ impl LyruneView {
 
         let track_title = track.title.clone();
         let (sender, mut receiver) = mpsc::channel(1);
+        // 丢弃 Tokio JoinHandle 会让任务继续运行。即使界面已离开，缓存准备仍可完成；
+        // 通道关闭只表示结果无人接收，不能因此改变已启动任务的执行路径。
         drop(RUNTIME.spawn(async move {
             let result = async {
-                let reused_stream = match reused_options {
-                    Some(options) => match options
-                        .iter()
-                        .find(|option| option.quality == desired_quality)
-                        .cloned()
-                    {
-                        Some(option) => prepare_playback_option(&audio_cache, &option, &track)
-                            .await
-                            .ok()
-                            .map(|stream| {
-                                (
-                                    desired_quality,
-                                    stream,
-                                    options.iter().map(|option| option.quality).collect(),
-                                    options,
-                                )
-                            }),
-                        None => None,
-                    },
-                    None => None,
-                };
-                let (quality, stream, available_qualities, options) = match reused_stream {
-                    Some(reused) => reused,
-                    None => {
-                        let _ = sender.send(PlaybackLoadEvent::ResolvingOptions).await;
-                        let options = client.playback_options(&credential, &track).await?;
-                        let mut available_qualities = options
-                            .iter()
-                            .map(|option| option.quality)
-                            .collect::<Vec<_>>();
-                        let _ = sender
-                            .send(PlaybackLoadEvent::Options(available_qualities.clone()))
-                            .await;
-                        let candidates =
-                            Quality::fallback_order(&available_qualities, desired_quality);
-                        let mut prepared = None;
-                        let mut last_error = None;
-                        for quality in candidates {
-                            let Some(option) =
-                                options.iter().find(|option| option.quality == quality)
-                            else {
-                                continue;
-                            };
-                            let stream_result =
-                                prepare_playback_option(&audio_cache, option, &track).await;
-                            match stream_result {
-                                Ok(stream) => {
-                                    prepared = Some((quality, stream, options.clone()));
-                                    break;
-                                }
-                                Err(error) => {
-                                    available_qualities.retain(|candidate| *candidate != quality);
-                                    last_error = Some(error.context(format!(
-                                        "“{}”的{}音源不可用",
-                                        track.title,
-                                        quality.label()
-                                    )));
-                                }
-                            }
-                        }
-                        let (quality, stream, options) = prepared.ok_or_else(|| {
-                            last_error.unwrap_or_else(|| {
-                                anyhow::anyhow!("QQ 音乐没有返回当前账号可播放的音质")
-                            })
-                        })?;
-                        (quality, stream, available_qualities, options)
-                    }
-                };
+                let (stream, location, available_qualities) = prepare_playback_stream(
+                    &audio_cache,
+                    &client,
+                    &credential,
+                    &track,
+                    desired_quality,
+                    reused_options,
+                    &sender,
+                )
+                .await?;
                 let playback =
                     tokio::task::spawn_blocking(move || PreparedPlayback::new(stream, resume_at))
                         .await
                         .context("音频解码准备任务异常退出")??;
-                Ok::<_, anyhow::Error>((
-                    playback,
-                    PlaybackLocation {
-                        track_mid: track.mid.clone(),
-                        quality,
-                        options,
-                    },
-                    available_qualities,
-                ))
+                Ok::<_, anyhow::Error>((playback, location, available_qualities))
             }
             .await;
             let _ = sender.send(PlaybackLoadEvent::Finished(result)).await;

@@ -339,7 +339,11 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let track = self.playback.track().cloned();
+        let track = self
+            .playback
+            .queue
+            .as_ref()
+            .and_then(|queue| queue.tracks.get(self.playback.current_track?).cloned());
         let has_track = track.is_some();
         let quality_selector = self.render_quality_selector(has_track, cx);
         let progress = self.render_player_progress(has_track, narrow, window, cx);

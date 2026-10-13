@@ -58,26 +58,24 @@ async fn prepare_playback_stream(
     sender: &mpsc::Sender<PlaybackLoadEvent>,
 ) -> anyhow::Result<(PreparedStream, PlaybackLocation, Vec<Quality>)> {
     // 旧地址可能已过期；复用失败后重新解析音源，再尝试当前可用的音质。
-    let reused_stream = match reused_options {
-        Some(options) => match options
+    let reused_stream = if let Some(options) = reused_options
+        && let Some(option) = options
             .iter()
             .find(|option| option.quality == desired_quality)
-            .cloned()
-        {
-            Some(option) => prepare_playback_option(audio_cache, &option, track)
-                .await
-                .ok()
-                .map(|stream| {
-                    (
-                        desired_quality,
-                        stream,
-                        options.iter().map(|option| option.quality).collect(),
-                        options,
-                    )
-                }),
-            None => None,
-        },
-        None => None,
+    {
+        prepare_playback_option(audio_cache, option, track)
+            .await
+            .ok()
+            .map(|stream| {
+                (
+                    desired_quality,
+                    stream,
+                    options.iter().map(|option| option.quality).collect(),
+                    options,
+                )
+            })
+    } else {
+        None
     };
     let (quality, stream, available_qualities, options) = match reused_stream {
         Some(reused) => reused,
@@ -101,7 +99,7 @@ async fn prepare_playback_stream(
                 let stream_result = prepare_playback_option(audio_cache, option, track).await;
                 match stream_result {
                     Ok(stream) => {
-                        prepared = Some((quality, stream, options.clone()));
+                        prepared = Some((quality, stream));
                         break;
                     }
                     Err(error) => {
@@ -114,7 +112,7 @@ async fn prepare_playback_stream(
                     }
                 }
             }
-            let (quality, stream, options) = prepared.ok_or_else(|| {
+            let (quality, stream) = prepared.ok_or_else(|| {
                 last_error.unwrap_or_else(|| anyhow::anyhow!("QQ 音乐没有返回当前账号可播放的音质"))
             })?;
             (quality, stream, available_qualities, options)
@@ -175,13 +173,11 @@ impl LyruneView {
                 .playback_location
                 .as_ref()
                 .is_some_and(|location| location.track_mid == track.mid);
-        let known_qualities = if same_track {
-            self.available_qualities.clone()
-        } else {
+        let has_known_qualities = same_track && !self.available_qualities.is_empty();
+        if !same_track {
             self.available_qualities.clear();
             self.quality_menu_open = false;
-            Vec::new()
-        };
+        }
         let reused_options = self
             .playback_location
             .as_ref()
@@ -205,7 +201,7 @@ impl LyruneView {
         self.loading_track = Some(index);
         self.ensure_track_like_state(track.mid.clone(), cx);
         self.loading_autoplay = autoplay;
-        self.resolving_qualities = reused_options.is_none() && known_qualities.is_empty();
+        self.resolving_qualities = reused_options.is_none() && !has_known_qualities;
         self.playback_started = false;
         self.wake_playback_ticks();
         self.position = resume_at;

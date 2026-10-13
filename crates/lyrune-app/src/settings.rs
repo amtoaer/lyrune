@@ -423,14 +423,8 @@ impl SettingsStore {
         temporary
             .write_all(&serialized)
             .context("无法写入应用设置临时文件")?;
-        temporary.sync_all().context("无法同步应用设置临时文件")?;
         drop(temporary);
         fs::rename(&temporary_path, path).context("无法替换应用设置")?;
-        // 同步文件内容不包含 rename 对目录项的更新。
-        #[cfg(unix)]
-        fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .context("无法同步应用设置目录")?;
         Ok(())
     }
 }

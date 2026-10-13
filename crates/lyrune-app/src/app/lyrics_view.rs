@@ -998,7 +998,7 @@ impl LyruneView {
         self.lyric_panel_frame_pending = true;
     }
 
-    pub(super) fn lyric_motion_is_active(&self, now: Instant, reduce_motion: bool) -> bool {
+    fn lyric_motion_is_active(&self, now: Instant, reduce_motion: bool) -> bool {
         if reduce_motion {
             return false;
         }
@@ -1051,7 +1051,7 @@ impl LyruneView {
         });
     }
 
-    pub(super) fn lyric_motion_anchors(
+    fn lyric_motion_anchors(
         &mut self,
         mid: &str,
         target: usize,
@@ -1091,7 +1091,7 @@ impl LyruneView {
         (state.scroll_anchor(now), state.style_anchor(now))
     }
 
-    pub(super) fn defer_new_lyrics_until_next_frame(
+    fn defer_new_lyrics_until_next_frame(
         &mut self,
         mid: &str,
         window: &mut Window,
@@ -1134,7 +1134,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    pub(super) fn lyric_foreground_for_url(
+    fn lyric_foreground_for_url(
         &self,
         url: &str,
         narrow: bool,
@@ -1176,7 +1176,7 @@ impl LyruneView {
         None
     }
 
-    pub(super) fn render_lyrics_panel(
+    fn render_lyrics_panel(
         &mut self,
         mid: &str,
         foreground: Hsla,

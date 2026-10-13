@@ -70,7 +70,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    pub(super) fn load_artist_songs(&mut self, append: bool, cx: &mut Context<Self>) {
+    fn load_artist_songs(&mut self, append: bool, cx: &mut Context<Self>) {
         let Some(resource) = self.artist_resource.clone() else {
             return;
         };
@@ -161,7 +161,7 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn load_artist_albums(&mut self, append: bool, cx: &mut Context<Self>) {
+    fn load_artist_albums(&mut self, append: bool, cx: &mut Context<Self>) {
         let Some(resource) = self.artist_resource.clone() else {
             return;
         };
@@ -244,7 +244,7 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn select_artist_track(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn select_artist_track(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(artist) = self.selected_artist.clone() else {
             return;
         };
@@ -289,7 +289,7 @@ impl LyruneView {
         self.start_playback(index, Duration::ZERO, None, true, cx);
     }
 
-    pub(super) fn render_artist_header(
+    fn render_artist_header(
         &mut self,
         compact: bool,
         narrow: bool,
@@ -310,7 +310,7 @@ impl LyruneView {
         let cover = div()
             .rounded(px(999.))
             .shadow_md()
-            .child(self.render_search_cover(
+            .child(self.render_artist_cover(
                 artist.cover_url,
                 MediaIcon::Artist,
                 cover_size,
@@ -502,7 +502,7 @@ impl LyruneView {
                 .into_any_element()
         } else if let Some(songs) = songs.filter(|page| !page.items.is_empty()) {
             let visible = self.artist_visible_song_count.min(songs.items.len());
-            self.render_song_rows(songs.items[..visible].to_vec(), narrow, scale_factor, cx)
+            self.render_artist_song_rows(songs.items[..visible].to_vec(), narrow, scale_factor, cx)
         } else {
             h_flex()
                 .h(px(72.))
@@ -544,7 +544,7 @@ impl LyruneView {
                 .into_any_element()
         } else if let Some(albums) = albums.filter(|page| !page.items.is_empty()) {
             let visible = self.artist_visible_album_count.min(albums.items.len());
-            self.render_search_cards(
+            self.render_artist_cards(
                 SearchCategory::Albums,
                 Vec::new(),
                 albums.items[..visible].to_vec(),
@@ -642,7 +642,7 @@ impl LyruneView {
             .into_any_element()
     }
 
-    pub(super) fn render_search_cover(
+    fn render_artist_cover(
         &self,
         cover_url: Option<String>,
         icon: MediaIcon,
@@ -671,7 +671,7 @@ impl LyruneView {
         }
     }
 
-    pub(super) fn render_song_rows(
+    fn render_artist_song_rows(
         &mut self,
         songs: Vec<Arc<Track>>,
         narrow: bool,
@@ -696,7 +696,7 @@ impl LyruneView {
                 let artists = track.artists.clone();
                 let album = track.album.clone();
                 let duration = format_duration(track.duration_seconds);
-                let cover = self.render_search_cover(
+                let cover = self.render_artist_cover(
                     track.cover_url.clone(),
                     MediaIcon::Music,
                     px(48.),
@@ -806,7 +806,7 @@ impl LyruneView {
     // 这里保留原有的多类别渲染分支；目前歌手页只传入 Albums，
     // 搜索页本身使用虚拟列表。收窄这个接口应另行验证各类别的交互与布局。
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn render_search_cards(
+    fn render_artist_cards(
         &mut self,
         category: SearchCategory,
         artists: Vec<Arc<SearchArtist>>,
@@ -825,7 +825,7 @@ impl LyruneView {
                 .enumerate()
                 .map(|(index, artist)| {
                     let title = artist.name.clone();
-                    let cover = self.render_search_cover(
+                    let cover = self.render_artist_cover(
                         artist.cover_url.clone(),
                         MediaIcon::Artist,
                         cover_size,
@@ -868,7 +868,7 @@ impl LyruneView {
                 .map(|(index, album)| {
                     let title = album.title.clone();
                     let subtitle = album.artist.clone();
-                    let cover = self.render_search_cover(
+                    let cover = self.render_artist_cover(
                         album.cover_url.clone(),
                         MediaIcon::Album,
                         cover_size,
@@ -923,7 +923,7 @@ impl LyruneView {
                     } else {
                         playlist.owner.clone()
                     };
-                    let cover = self.render_search_cover(
+                    let cover = self.render_artist_cover(
                         playlist.cover_url.clone(),
                         MediaIcon::Playlist,
                         cover_size,

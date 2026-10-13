@@ -289,7 +289,7 @@ pub(super) struct PageResourceCache {
 }
 
 impl PageResourceCache {
-    pub(super) fn prune(&mut self) {
+    fn prune(&mut self) {
         self.searches
             .retain(|_, resource| resource.strong_count() > 0);
         self.artists
@@ -464,7 +464,7 @@ impl NavigationHistory {
 }
 
 impl LyruneView {
-    pub(super) fn shared_search_resource(&mut self, query: &str) -> SharedSearchResource {
+    fn shared_search_resource(&mut self, query: &str) -> SharedSearchResource {
         let account_id = self.account_id().unwrap_or(0);
         let key = (account_id, query.to_owned());
         if let Some(resource) = self

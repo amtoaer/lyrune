@@ -192,7 +192,7 @@ impl LyruneView {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn mpris_snapshot(&self) -> MprisSnapshot {
+    fn mpris_snapshot(&self) -> MprisSnapshot {
         let audio_available = self.audio.is_some();
         let loading = self.loading_track.is_some();
         let playback_status = if loading {
@@ -281,7 +281,7 @@ impl LyruneView {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn sync_mpris_position(&self) {
+    fn sync_mpris_position(&self) {
         if let Some(mpris) = &self.mpris {
             mpris.update_position(duration_micros(self.position));
         }
@@ -300,7 +300,7 @@ impl LyruneView {
         }
     }
 
-    pub(super) fn tick(&mut self, cx: &mut Context<Self>) {
+    fn tick(&mut self, cx: &mut Context<Self>) {
         let previous_position = self.position;
         if self.seek_preview.is_none() && self.loading_track.is_none() && self.playback_started {
             self.position = self

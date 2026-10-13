@@ -148,7 +148,7 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn apply_library(
+    fn apply_library(
         &mut self,
         account_id: u64,
         profile: UserProfile,
@@ -204,7 +204,7 @@ impl LyruneView {
         self.select_playlist_with_refresh(index, false, true, Some(window), cx);
     }
 
-    pub(super) fn select_playlist_with_refresh(
+    fn select_playlist_with_refresh(
         &mut self,
         index: usize,
         force_refresh: bool,
@@ -635,7 +635,7 @@ impl LyruneView {
         self.set_track_liked(track, false, cx);
     }
 
-    pub(super) fn set_track_liked(&mut self, track: Track, liked: bool, cx: &mut Context<Self>) {
+    fn set_track_liked(&mut self, track: Track, liked: bool, cx: &mut Context<Self>) {
         let mid = track.mid.clone();
         if self.liked_toggle_loading.contains(&mid) {
             return;
@@ -710,7 +710,7 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn apply_track_liked(
+    fn apply_track_liked(
         &mut self,
         account_id: u64,
         track: Track,
@@ -769,7 +769,7 @@ impl LyruneView {
         self.sync_table_playback_state(cx);
     }
 
-    pub(super) fn render_playlist_header(
+    fn render_playlist_header(
         &mut self,
         compact: bool,
         narrow: bool,

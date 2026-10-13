@@ -41,7 +41,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    pub(super) fn set_color_theme(
+    fn set_color_theme(
         &mut self,
         color_theme: ColorTheme,
         light: bool,
@@ -61,7 +61,7 @@ impl LyruneView {
         self.persist_settings();
     }
 
-    pub(super) fn set_color_theme_mode(
+    fn set_color_theme_mode(
         &mut self,
         mode: ColorThemeMode,
         window: &mut Window,
@@ -75,7 +75,7 @@ impl LyruneView {
         self.persist_settings();
     }
 
-    pub(super) fn set_tray_icon_style(&mut self, style: TrayIconStyle, cx: &mut Context<Self>) {
+    fn set_tray_icon_style(&mut self, style: TrayIconStyle, cx: &mut Context<Self>) {
         if self.settings.tray_icon_style == style {
             return;
         }
@@ -85,7 +85,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    pub(super) fn set_check_updates_on_startup(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    fn set_check_updates_on_startup(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.settings.check_updates_on_startup == enabled {
             return;
         }
@@ -94,7 +94,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    pub(super) fn set_window_decoration(
+    fn set_window_decoration(
         &mut self,
         decoration: WindowDecoration,
         window: &mut Window,
@@ -117,11 +117,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    pub(super) fn set_preferred_playback_quality(
-        &mut self,
-        quality: Quality,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_preferred_playback_quality(&mut self, quality: Quality, cx: &mut Context<Self>) {
         if self.settings.playback_quality == quality {
             return;
         }
@@ -252,7 +248,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    pub(super) fn apply_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ui = parse_font_families(self.ui_font_input.read(cx).value().as_ref());
         let monospace = parse_font_families(self.monospace_font_input.read(cx).value().as_ref());
         let lyrics = parse_font_families(self.lyric_font_input.read(cx).value().as_ref());
@@ -277,7 +273,7 @@ impl LyruneView {
         );
     }
 
-    pub(super) fn reset_font_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn reset_font_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ui = default_ui_font_families();
         let monospace = default_monospace_font_families();
         let lyrics = default_lyric_font_families();
@@ -291,7 +287,7 @@ impl LyruneView {
         });
     }
 
-    pub(super) fn set_font_settings(
+    fn set_font_settings(
         &mut self,
         ui: Vec<String>,
         monospace: Vec<String>,
@@ -322,7 +318,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    pub(super) fn set_lyric_highlight_frame_rate(
+    fn set_lyric_highlight_frame_rate(
         &mut self,
         frame_rate: LyricFrameRate,
         window: &mut Window,
@@ -338,7 +334,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    pub(super) fn set_lyric_scroll_frame_rate(
+    fn set_lyric_scroll_frame_rate(
         &mut self,
         frame_rate: LyricFrameRate,
         window: &mut Window,

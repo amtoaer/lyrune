@@ -62,7 +62,7 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn begin_login(&mut self, cx: &mut Context<Self>) {
+    fn begin_login(&mut self, cx: &mut Context<Self>) {
         if matches!(
             self.account_state,
             AccountState::Restoring | AccountState::SigningIn
@@ -98,7 +98,7 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn handle_login_event(&mut self, event: LoginEvent, cx: &mut Context<Self>) {
+    fn handle_login_event(&mut self, event: LoginEvent, cx: &mut Context<Self>) {
         match event {
             LoginEvent::QrReady(png) => {
                 self.qr_image = Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)));
@@ -131,7 +131,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    pub(super) fn persist_credential(&self, credential: QqCredential, cx: &mut Context<Self>) {
+    fn persist_credential(&self, credential: QqCredential, cx: &mut Context<Self>) {
         let task = RUNTIME.spawn(async move {
             tokio::task::spawn_blocking(move || CredentialStore::save(&credential))
                 .await
@@ -154,7 +154,7 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn install_credential_session(
+    fn install_credential_session(
         &mut self,
         credential: CredentialSession,
         cx: &mut Context<Self>,
@@ -234,7 +234,7 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn credential_snapshot(&self) -> Option<Arc<QqCredential>> {
+    fn credential_snapshot(&self) -> Option<Arc<QqCredential>> {
         self.credential.as_ref()?.snapshot()
     }
 
@@ -243,7 +243,7 @@ impl LyruneView {
             .map(|credential| credential.music_id)
     }
 
-    pub(super) fn logout(&mut self, cx: &mut Context<Self>) {
+    fn logout(&mut self, cx: &mut Context<Self>) {
         if let (Some(client), Some(credential)) =
             (self.protocol_client.clone(), self.credential_snapshot())
         {
@@ -254,13 +254,13 @@ impl LyruneView {
         self.clear_account_session(true, cx);
     }
 
-    pub(super) fn handle_credential_rejected(&mut self, cx: &mut Context<Self>) {
+    fn handle_credential_rejected(&mut self, cx: &mut Context<Self>) {
         self.clear_account_session(false, cx);
         self.login_message = "QQ 音乐登录凭据已失效，请重新登录".to_owned();
         self.notify_error(self.login_message.clone(), cx);
     }
 
-    pub(super) fn clear_account_session(&mut self, restart_login: bool, cx: &mut Context<Self>) {
+    fn clear_account_session(&mut self, restart_login: bool, cx: &mut Context<Self>) {
         self.login_generation = self.login_generation.wrapping_add(1);
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home_generation = self.home_generation.wrapping_add(1);

@@ -40,11 +40,7 @@ pub(super) fn format_playback_time(duration: Duration) -> String {
 }
 
 impl LyruneView {
-    pub(super) fn render_quality_selector(
-        &mut self,
-        has_track: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_quality_selector(&mut self, has_track: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let active_quality = self.active_quality;
         let active_label = active_quality.badge_label();
@@ -128,7 +124,7 @@ impl LyruneView {
             .into_any_element()
     }
 
-    pub(super) fn render_player_progress(
+    fn render_player_progress(
         &mut self,
         has_track: bool,
         narrow: bool,

@@ -529,7 +529,7 @@ impl LyruneView {
         }
     }
 
-    pub(super) fn random_track_index(&self, current: usize, len: usize) -> usize {
+    fn random_track_index(&self, current: usize, len: usize) -> usize {
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

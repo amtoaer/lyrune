@@ -6,13 +6,16 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use directories::ProjectDirs;
-use serde::{Deserialize, Serialize};
-
-use crate::design::ColorTheme;
 use gpui::WindowAppearance;
 use qqmusic_api::integration::{
     CdnCache, Quality, Track, UserPlaylist, UserPlaylistId, UserProfile,
 };
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use crate::design::ColorTheme;
+use crate::runtime::RUNTIME;
 
 pub const DEFAULT_AUDIO_CACHE_LIMIT_GB: u64 = 10;
 pub const DEFAULT_IMAGE_CACHE_CAPACITY: usize = 80;
@@ -391,13 +394,44 @@ fn normalize_font_families(families: Vec<String>, defaults: Vec<String>) -> Vec<
 
 pub struct SettingsStore;
 
+pub struct SettingsWriter {
+    sender: mpsc::UnboundedSender<AppSettings>,
+    task: JoinHandle<()>,
+}
+
+impl SettingsWriter {
+    pub fn new() -> Result<Self> {
+        Ok(Self::start(settings_path()?))
+    }
+
+    fn start(path: PathBuf) -> Self {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let task = RUNTIME.spawn(async move {
+            while let Some(settings) = receiver.recv().await {
+                let path = path.clone();
+                // 等本次替换完成才接收下一份快照，旧进度不能覆盖新设置或退出账号的清空。
+                let _ =
+                    tokio::task::spawn_blocking(move || SettingsStore::save_to(&path, settings))
+                        .await;
+            }
+        });
+        Self { sender, task }
+    }
+
+    pub fn save(&self, settings: &AppSettings) {
+        let _ = self.sender.send(settings.clone());
+    }
+
+    // 仅用于应用退出；关闭唯一发送端后，任务会排空队列再结束。
+    pub fn finish(self) {
+        drop(self.sender);
+        let _ = RUNTIME.block_on(self.task);
+    }
+}
+
 impl SettingsStore {
     pub fn load() -> Result<AppSettings> {
         Self::load_from(&settings_path()?)
-    }
-
-    pub fn save(settings: &AppSettings) -> Result<()> {
-        Self::save_to(&settings_path()?, settings)
     }
 
     fn load_from(path: &Path) -> Result<AppSettings> {
@@ -411,11 +445,11 @@ impl SettingsStore {
             .map(AppSettings::normalized)
     }
 
-    fn save_to(path: &Path, settings: &AppSettings) -> Result<()> {
+    fn save_to(path: &Path, settings: AppSettings) -> Result<()> {
         let parent = path.parent().context("应用设置路径缺少父目录")?;
         fs::create_dir_all(parent).context("无法创建应用设置目录")?;
-        let serialized = serde_json::to_vec_pretty(&settings.clone().normalized())
-            .context("无法序列化应用设置")?;
+        let serialized =
+            serde_json::to_vec_pretty(&settings.normalized()).context("无法序列化应用设置")?;
         // 单一写入者使用同目录临时文件；中断时保留旧配置，下次保存覆盖残留临时文件。
         let temporary_path = path.with_extension("json.tmp");
         let mut temporary =
@@ -772,7 +806,7 @@ mod tests {
             check_updates_on_startup: true,
         };
 
-        SettingsStore::save_to(&path, &expected).expect("save settings");
+        SettingsStore::save_to(&path, expected.clone()).expect("save settings");
         let restored = SettingsStore::load_from(&path).expect("load settings");
 
         assert_eq!(restored.volume, expected.volume);
@@ -828,7 +862,7 @@ mod tests {
         let path = directory.join("settings.json");
         let temporary_path = path.with_extension("json.tmp");
         let mut settings = AppSettings::default();
-        SettingsStore::save_to(&path, &settings)?;
+        SettingsStore::save_to(&path, settings.clone())?;
         let original = fs::read(&path)?;
         let mut original_file = fs::File::open(&path)?;
 
@@ -836,7 +870,7 @@ mod tests {
         fs::write(&temporary_path, b"{\"volume\":")?;
         assert_eq!(SettingsStore::load_from(&path)?.volume, settings.volume);
         settings.volume = 0.37;
-        SettingsStore::save_to(&path, &settings)?;
+        SettingsStore::save_to(&path, settings.clone())?;
         assert_eq!(SettingsStore::load_from(&path)?.volume, settings.volume);
         assert!(!temporary_path.exists());
 
@@ -858,13 +892,55 @@ mod tests {
         ));
         let path = directory.join("settings.json");
         let mut settings = AppSettings::default();
-        SettingsStore::save_to(&path, &settings)?;
+        SettingsStore::save_to(&path, settings.clone())?;
         let original = fs::read(&path)?;
 
         fs::create_dir(path.with_extension("json.tmp"))?;
         settings.volume = 0.37;
-        assert!(SettingsStore::save_to(&path, &settings).is_err());
+        assert!(SettingsStore::save_to(&path, settings).is_err());
         assert_eq!(fs::read(&path)?, original);
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_settings_writer_drains_on_shutdown() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "lyrune-settings-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let path = directory.join("settings.json");
+        let writer = SettingsWriter::start(path.clone());
+        let queued_track = Arc::new(track("track-mid"));
+        let mut settings = AppSettings {
+            current_playback: Some(PersistedPlayback {
+                account_id: 10001,
+                playlist_id: UserPlaylistId::Liked,
+                track_mid: "track-mid".to_owned(),
+                position_ms: 0,
+                queue_tracks: vec![queued_track; 128],
+                queue_modified: false,
+                queue_continuation: None,
+            }),
+            ..Default::default()
+        };
+        for position in 1..=8 {
+            settings.current_playback.as_mut().unwrap().position_ms = position * 5000;
+            writer.save(&settings);
+        }
+        settings.current_playback = None;
+        settings.volume = 0.37;
+        settings.image_cache_capacity = 0;
+        writer.save(&settings);
+        settings.volume = 0.99;
+
+        writer.finish();
+        let restored = SettingsStore::load_from(&path)?;
+        assert_eq!(restored.current_playback, None);
+        assert_eq!(restored.volume, 0.37);
+        assert_eq!(restored.image_cache_capacity, 1);
+        assert!(!path.with_extension("json.tmp").exists());
         fs::remove_dir_all(directory)?;
         Ok(())
     }

@@ -73,7 +73,7 @@ use crate::mpris::MprisHandle;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 use crate::settings::{
-    AppSettings, CdnCacheStore, LibraryCache, PersistedWindowSize, SettingsStore, WindowDecoration,
+    AppSettings, CdnCacheStore, LibraryCache, PersistedWindowSize, SettingsWriter, WindowDecoration,
 };
 use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
@@ -175,6 +175,7 @@ pub struct LyruneView {
     fonts: AppFonts,
     color_theme: ColorTheme,
     settings: AppSettings,
+    settings_writer: Option<SettingsWriter>,
     library_cache: LibraryCache,
     page_resource_cache: PageResourceCache,
     liked_tracks: HashMap<String, bool>,
@@ -479,6 +480,7 @@ impl LyruneView {
             fonts,
             color_theme,
             settings,
+            settings_writer: SettingsWriter::new().ok(),
             library_cache,
             page_resource_cache: PageResourceCache::default(),
             liked_tracks: HashMap::new(),
@@ -511,6 +513,13 @@ impl LyruneView {
         if view.settings.check_updates_on_startup {
             view.schedule_update_check(cx);
         }
+        cx.on_app_quit(|this, _| {
+            // GPUI 只等待退出 future 200ms，macOS 终止后也不保证返回 main。
+            // 在回调返回前排空写入；后台任务不访问 GPUI，退出时同步等待不会形成互相等待。
+            this.shutdown();
+            async {}
+        })
+        .detach();
         view
     }
 
@@ -709,7 +718,29 @@ impl LyruneView {
     }
 
     fn persist_settings(&self) {
-        let _ = SettingsStore::save(&self.settings);
+        if let Some(writer) = &self.settings_writer {
+            writer.save(&self.settings);
+        }
+    }
+
+    fn shutdown(&mut self) {
+        if self.settings_writer.is_some() {
+            self.persist_current_playback();
+        }
+        if let Some(audio) = self.playback.audio.take() {
+            audio.stop();
+        }
+        if let Some(writer) = self.settings_writer.take() {
+            // 播放快照未变化时上面的保存会跳过；这里仍需保存窗口大小等其他偏好。
+            writer.save(&self.settings);
+            writer.finish();
+        }
+        if let Some(task) = self.cdn_maintenance.take() {
+            task.abort();
+        }
+        if let Some(task) = self.audio_cache_maintenance.take() {
+            task.abort();
+        }
     }
 
     fn render_sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1204,18 +1235,7 @@ impl LyruneView {
 
 impl Drop for LyruneView {
     fn drop(&mut self) {
-        self.persist_current_playback();
-        if let Some(audio) = &self.playback.audio {
-            audio.stop();
-        }
-        // 播放快照未变化时上面的保存会跳过；这里仍需保存窗口大小等其他偏好。
-        self.persist_settings();
-        if let Some(task) = self.cdn_maintenance.take() {
-            task.abort();
-        }
-        if let Some(task) = self.audio_cache_maintenance.take() {
-            task.abort();
-        }
+        self.shutdown();
     }
 }
 

@@ -389,12 +389,7 @@ impl LyruneView {
         });
         let search_track_table = cx.new(|cx| {
             TableState::new(
-                TrackTableDelegate::new_with_header_style(
-                    search_load_more_sender,
-                    track_event_sender.clone(),
-                    px(32.),
-                    px(14.),
-                ),
+                TrackTableDelegate::new(search_load_more_sender, track_event_sender.clone()),
                 window,
                 cx,
             )

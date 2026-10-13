@@ -593,19 +593,10 @@ impl TrackTableDelegate {
         load_more_sender: mpsc::Sender<()>,
         event_sender: mpsc::UnboundedSender<TrackTableEvent>,
     ) -> Self {
-        Self::new_with_header_style(load_more_sender, event_sender, px(32.), px(14.))
-    }
-
-    pub fn new_with_header_style(
-        load_more_sender: mpsc::Sender<()>,
-        event_sender: mpsc::UnboundedSender<TrackTableEvent>,
-        header_height: Pixels,
-        header_text_padding: Pixels,
-    ) -> Self {
         Self {
             columns: track_columns(false),
-            header_height,
-            header_text_padding,
+            header_height: px(32.),
+            header_text_padding: px(14.),
             tracks: Vec::new(),
             loading: false,
             has_more: false,

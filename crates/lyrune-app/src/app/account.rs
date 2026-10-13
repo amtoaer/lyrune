@@ -303,7 +303,6 @@ impl LyruneView {
         self.current_track = None;
         self.loading_track = None;
         self.loading_autoplay = false;
-        self.resolving_qualities = false;
         self.playback_started = false;
         self.wake_playback_ticks();
         self.playback_location = None;

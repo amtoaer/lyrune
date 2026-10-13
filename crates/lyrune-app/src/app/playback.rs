@@ -173,7 +173,6 @@ impl LyruneView {
                 .playback_location
                 .as_ref()
                 .is_some_and(|location| location.track_mid == track.mid);
-        let has_known_qualities = same_track && !self.available_qualities.is_empty();
         if !same_track {
             self.available_qualities.clear();
             self.quality_menu_open = false;
@@ -201,7 +200,6 @@ impl LyruneView {
         self.loading_track = Some(index);
         self.ensure_track_like_state(track.mid.clone(), cx);
         self.loading_autoplay = autoplay;
-        self.resolving_qualities = reused_options.is_none() && !has_known_qualities;
         self.playback_started = false;
         self.wake_playback_ticks();
         self.position = resume_at;
@@ -258,17 +256,14 @@ impl LyruneView {
                         return;
                     }
                     match event {
-                        PlaybackLoadEvent::ResolvingOptions => {
-                            this.resolving_qualities = true;
-                        }
+                        // 保留有界通道中的事件，以及下方的列表同步和界面通知。
+                        PlaybackLoadEvent::ResolvingOptions => {}
                         PlaybackLoadEvent::Options(available_qualities) => {
-                            this.resolving_qualities = false;
                             this.available_qualities = available_qualities;
                         }
                         PlaybackLoadEvent::Finished(result) => {
                             this.loading_track = None;
                             this.loading_autoplay = false;
-                            this.resolving_qualities = false;
                             let playback_result = match result {
                                 Ok((playback, location, available_qualities)) => {
                                     let quality = location.quality;
@@ -386,7 +381,6 @@ impl LyruneView {
         }
         self.loading_track = None;
         self.loading_autoplay = false;
-        self.resolving_qualities = false;
         self.playback_started = false;
         self.wake_playback_ticks();
         self.position = Duration::ZERO;

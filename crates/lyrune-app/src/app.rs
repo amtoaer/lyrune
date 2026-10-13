@@ -192,8 +192,6 @@ pub struct LyruneView {
     loading_track: Option<usize>,
     // 加载中再次切换音质时沿用原来的播放意图，此时不能从已停止的音频设备推断。
     loading_autoplay: bool,
-    // 音质列表解析完成后仍可能在准备音频流/解码，因此不等同于 loading_track。
-    resolving_qualities: bool,
     // 表示音源已装入播放器；暂停时仍为 true，用于区分暂停与尚未开始/已经停止。
     playback_started: bool,
     playback_location: Option<PlaybackLocation>,
@@ -613,7 +611,6 @@ impl LyruneView {
             current_track: None,
             loading_track: None,
             loading_autoplay: false,
-            resolving_qualities: false,
             playback_started: false,
             playback_location: None,
             active_quality: playback_quality,

@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use gpui::{App, Context, Pixels, Window, px};
 use gpui_component::IndexPath;
 use qqmusic_api::integration::{
-    SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId,
+    PlaylistPage, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist,
+    UserPlaylistId,
 };
 
 use crate::icons::MediaIcon;
@@ -117,7 +118,7 @@ impl<T> From<SearchPage<T>> for SharedSearchPage<T> {
     }
 }
 
-pub(super) fn append_shared_search_page<T>(target: &mut SharedSearchPage<T>, page: SearchPage<T>) {
+fn append_shared_search_page<T>(target: &mut SharedSearchPage<T>, page: SearchPage<T>) {
     target.items.extend(share_items(page.items));
     target.has_more = page.has_more;
     target.next_offset = page.next_offset;
@@ -243,6 +244,51 @@ pub(super) struct ArtistResource {
     pub(super) albums_loading: bool,
     pub(super) albums_loading_more: bool,
     pub(super) album_error: Option<String>,
+}
+
+impl ArtistResource {
+    pub(super) fn apply_songs(&mut self, offset: u64, result: anyhow::Result<PlaylistPage>) {
+        self.songs_loading = false;
+        self.songs_loading_more = false;
+        match result {
+            Ok(page) => {
+                self.track_count = page.total;
+                let page = SearchPage {
+                    items: page.tracks,
+                    has_more: page.has_more,
+                    next_offset: page.next_offset,
+                };
+                if offset == 0 {
+                    self.songs = Some(page.into());
+                } else if let Some(songs) = &mut self.songs {
+                    append_shared_search_page(songs, page);
+                }
+            }
+            Err(error) => {
+                self.song_error = Some(format!("加载歌手歌曲失败：{error:#}"));
+            }
+        }
+    }
+
+    pub(super) fn apply_albums(
+        &mut self,
+        offset: u64,
+        result: anyhow::Result<SearchPage<SearchAlbum>>,
+    ) {
+        self.albums_loading = false;
+        self.albums_loading_more = false;
+        match result {
+            Ok(page) if offset == 0 => self.albums = Some(page.into()),
+            Ok(page) => {
+                if let Some(albums) = &mut self.albums {
+                    append_shared_search_page(albums, page);
+                }
+            }
+            Err(error) => {
+                self.album_error = Some(format!("加载歌手专辑失败：{error:#}"));
+            }
+        }
+    }
 }
 
 pub(super) struct PlaylistResource {

@@ -11,11 +11,9 @@ use gpui_component::{
     spinner::Spinner,
     v_flex,
 };
-use qqmusic_api::integration::{SearchAlbum, SearchArtist, SearchPage, Track};
+use qqmusic_api::integration::{SearchAlbum, SearchArtist, Track};
 
-use super::navigation::{
-    MainContent, NavigationPage, SharedArtistResource, append_shared_search_page, lock_resource,
-};
+use super::navigation::{MainContent, NavigationPage, SharedArtistResource, lock_resource};
 use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, LyruneView, page_horizontal_padding};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
@@ -125,26 +123,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 let mut state = lock_resource(&resource);
-                state.songs_loading = false;
-                state.songs_loading_more = false;
-                match result {
-                    Ok(page) => {
-                        state.track_count = page.total;
-                        let page = SearchPage {
-                            items: page.tracks,
-                            has_more: page.has_more,
-                            next_offset: page.next_offset,
-                        };
-                        if offset == 0 {
-                            state.songs = Some(page.into());
-                        } else if let Some(songs) = &mut state.songs {
-                            append_shared_search_page(songs, page);
-                        }
-                    }
-                    Err(error) => {
-                        state.song_error = Some(format!("加载歌手歌曲失败：{error:#}"));
-                    }
-                }
+                state.apply_songs(offset, result);
                 drop(state);
                 if this
                     .artist_resource
@@ -215,19 +194,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 let mut state = lock_resource(&resource);
-                state.albums_loading = false;
-                state.albums_loading_more = false;
-                match result {
-                    Ok(page) if offset == 0 => state.albums = Some(page.into()),
-                    Ok(page) => {
-                        if let Some(albums) = &mut state.albums {
-                            append_shared_search_page(albums, page);
-                        }
-                    }
-                    Err(error) => {
-                        state.album_error = Some(format!("加载歌手专辑失败：{error:#}"));
-                    }
-                }
+                state.apply_albums(offset, result);
                 drop(state);
                 if this
                     .artist_resource

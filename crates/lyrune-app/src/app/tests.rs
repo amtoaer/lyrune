@@ -5,7 +5,7 @@ use super::lyrics_view::{
     lyric_position_for_frame_rate, readable_lyric_color,
 };
 use super::navigation::{
-    NavigationPage, PlaylistResource, SearchMoreResults, SearchResource,
+    ArtistResource, NavigationPage, PlaylistResource, SearchMoreResults, SearchResource,
     resolved_playlist_scroll_row,
 };
 use super::player_view::format_playback_time;
@@ -18,7 +18,9 @@ use super::{
 };
 use crate::settings::{DEFAULT_NAVIGATION_HISTORY_LIMIT, LyricFrameRate};
 use gpui::{Pixels, Rgba, black, px, rgb};
-use qqmusic_api::integration::{SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId};
+use qqmusic_api::integration::{
+    PlaylistPage, SearchAlbum, SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId,
+};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -573,6 +575,88 @@ fn search_results_survive_paging_errors() {
         resource.error.as_deref(),
         Some("继续加载搜索结果失败：albums: timeout")
     );
+}
+
+#[test]
+fn artist_results_keep_independent_pages() {
+    let album = SearchAlbum {
+        mid: "album".to_owned(),
+        title: "album".to_owned(),
+        cover_url: None,
+        artist: String::new(),
+    };
+    let first_page = PlaylistPage {
+        playlist: UserPlaylist::liked(),
+        tracks: vec![track("A")],
+        total: 3,
+        has_more: true,
+        next_offset: 4,
+    };
+    let mut resource = ArtistResource {
+        songs_loading: true,
+        albums_loading: true,
+        ..Default::default()
+    };
+    resource.apply_songs(0, Ok(first_page.clone()));
+    assert!(!resource.songs_loading && resource.albums_loading);
+    resource.apply_albums(
+        0,
+        Ok(SearchPage {
+            items: vec![album.clone()],
+            has_more: true,
+            next_offset: 1,
+        }),
+    );
+    assert!(!resource.albums_loading);
+
+    resource.songs_loading_more = true;
+    resource.albums_loading_more = true;
+    resource.apply_songs(4, Err(anyhow::anyhow!("offline").context("songs")));
+    let songs = resource.songs.as_ref().unwrap();
+    assert_eq!(mids(&songs.items), ["A"]);
+    assert_eq!(songs.next_offset, 4);
+    assert!(songs.has_more);
+    assert_eq!(resource.track_count, 3);
+    assert!(!resource.songs_loading_more && resource.albums_loading_more);
+
+    resource.apply_albums(
+        1,
+        Ok(SearchPage {
+            items: vec![album],
+            has_more: false,
+            next_offset: 9,
+        }),
+    );
+    let albums = resource.albums.as_ref().unwrap();
+    assert_eq!(albums.items.len(), 2);
+    assert_eq!(albums.next_offset, 9);
+    assert!(!albums.has_more && !resource.albums_loading_more);
+    assert_eq!(
+        resource.song_error.as_deref(),
+        Some("加载歌手歌曲失败：songs: offline")
+    );
+
+    resource.songs_loading_more = true;
+    resource.song_error = None;
+    resource.apply_songs(
+        4,
+        Ok(PlaylistPage {
+            tracks: vec![track("B")],
+            total: 6,
+            has_more: false,
+            next_offset: 9,
+            ..first_page.clone()
+        }),
+    );
+    let songs = resource.songs.as_ref().unwrap();
+    assert_eq!(mids(&songs.items), ["A", "B"]);
+    assert_eq!(songs.next_offset, 9);
+    assert!(!songs.has_more && !resource.songs_loading_more);
+    assert_eq!(resource.track_count, 6);
+
+    resource.apply_songs(0, Ok(first_page));
+    assert_eq!(mids(&resource.songs.as_ref().unwrap().items), ["A"]);
+    assert_eq!(resource.albums.as_ref().unwrap().items.len(), 2);
 }
 
 #[test]

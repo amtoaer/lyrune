@@ -192,7 +192,8 @@ impl LyruneView {
             return;
         };
         if self
-            .current_track_data()
+            .playback
+            .track()
             .is_some_and(|current| current.mid == track.mid)
         {
             if self.playback.load.track.is_none() {
@@ -204,6 +205,7 @@ impl LyruneView {
         self.playback.pending_restore = None;
         self.home_recommendation_loading = None;
         let current_index = self.playback.current_track;
+        // 搜索插队保留队列版本；已启动的同队列补页仍可追加，不等同于换歌单。
         let queue_index = if let Some(queue) = &mut self.playback.queue {
             insert_external_track_after_current(queue, current_index, track)
         } else {

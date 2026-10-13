@@ -51,7 +51,7 @@ impl LyruneView {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 let playback_advancing =
-                    match this.read_with(cx, |this, _| this.playback_is_advancing()) {
+                    match this.read_with(cx, |this, _| this.playback.is_advancing()) {
                         Ok(playback_advancing) => playback_advancing,
                         Err(_) => break,
                     };
@@ -93,7 +93,7 @@ impl LyruneView {
         cx.spawn(async move |this, cx| {
             loop {
                 let interval = match this.read_with(cx, |this, _| {
-                    if !this.playback_is_advancing() {
+                    if !this.playback.is_advancing() {
                         None
                     } else {
                         Some(PROGRESS_TICK)
@@ -124,16 +124,6 @@ impl LyruneView {
             }
         })
         .detach();
-    }
-
-    pub(super) fn playback_is_advancing(&self) -> bool {
-        self.playback.started
-            && self.playback.load.track.is_none()
-            && self
-                .playback
-                .audio
-                .as_ref()
-                .is_some_and(AudioPlayer::is_playing)
     }
 
     pub(super) fn wake_playback_ticks(&self) {
@@ -237,7 +227,7 @@ impl LyruneView {
                     || index > 0
                     || (self.playback.repeat_mode == RepeatMode::All && queue_len > 0)
             });
-        let track = self.current_track_data().map(|track| MprisTrack {
+        let track = self.playback.track().map(|track| MprisTrack {
             id: mpris_track_id(&track.mid),
             title: track.title.clone(),
             artists: if track.artists.trim().is_empty() {
@@ -287,7 +277,7 @@ impl LyruneView {
     #[cfg(target_os = "linux")]
     pub(super) fn sync_inhibit(&self) {
         if let Some(inhibit) = &self.inhibit {
-            inhibit.set_active(self.playback_is_advancing());
+            inhibit.set_active(self.playback.is_advancing());
         }
     }
 
@@ -300,7 +290,7 @@ impl LyruneView {
 
     pub(super) fn sync_progress_slider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.seek_preview.is_none() {
-            let progress = self.current_duration().map_or(0., |duration| {
+            let progress = self.playback.duration().map_or(0., |duration| {
                 progress_fraction(self.playback.position, duration)
             });
             self.progress_slider.update(cx, |slider, cx| {

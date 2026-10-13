@@ -134,7 +134,7 @@ impl LyruneView {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let monospace_font = self.fonts.monospace.clone();
-        let duration = self.current_duration().unwrap_or_default();
+        let duration = self.playback.duration().unwrap_or_default();
         let percentage =
             if self.cover_backdrop_visible && self.seek_preview.is_none() && !duration.is_zero() {
                 progress_fraction(self.playback.position, duration)
@@ -339,7 +339,7 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let track = self.current_track_data().cloned();
+        let track = self.playback.track().cloned();
         let has_track = track.is_some();
         let quality_selector = self.render_quality_selector(has_track, cx);
         let progress = self.render_player_progress(has_track, narrow, window, cx);

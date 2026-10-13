@@ -10,7 +10,6 @@ use qqmusic_api::integration::{RecommendationKind, Track, UserPlaylist, UserPlay
 use super::LyruneView;
 use super::navigation::{lock_resource, share_items};
 use super::playlists::request_playlist_page;
-use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 use crate::settings::{PersistedPlayback, PersistedQueueContinuation};
 
@@ -217,11 +216,7 @@ impl LyruneView {
                 match result {
                     Ok((tracks, continuation)) if !tracks.is_empty() => {
                         this.playback.pending_restore = None;
-                        this.playback.queue_generation =
-                            this.playback.queue_generation.wrapping_add(1);
-                        this.playback.recommendation_loading = false;
-                        this.playback.waiting_for_recommendation = false;
-                        this.playback.queue = Some(PlaybackQueue {
+                        this.playback.replace_queue(PlaybackQueue {
                             playlist_id: UserPlaylistId::Recommendation { kind },
                             tracks: share_items(tracks),
                             modified: false,
@@ -344,10 +339,7 @@ impl LyruneView {
         if let Some(index) = index {
             let resume_at = restore.resume_position(restore.queue_tracks[index].duration_seconds);
             self.playback.pending_restore = None;
-            self.playback.queue_generation = self.playback.queue_generation.wrapping_add(1);
-            self.playback.recommendation_loading = false;
-            self.playback.waiting_for_recommendation = false;
-            self.playback.queue = Some(PlaybackQueue {
+            self.playback.replace_queue(PlaybackQueue {
                 playlist_id: restore.playlist_id,
                 tracks: restore.queue_tracks,
                 modified: restore.queue_modified,
@@ -367,8 +359,6 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) {
         self.home_recommendation_loading = None;
-        self.playback.queue_generation = self.playback.queue_generation.wrapping_add(1);
-        let generation = self.playback.queue_generation;
         let playlist_resource = self
             .selected_playlist_resource
             .as_ref()
@@ -379,14 +369,12 @@ impl LyruneView {
             .map_or(tracks.len() as u64, |resource| {
                 lock_resource(resource).next_offset
             });
-        self.playback.queue = Some(PlaybackQueue {
+        let generation = self.playback.replace_queue(PlaybackQueue {
             playlist_id: playlist.id.clone(),
             tracks,
             modified: false,
             continuation: None,
         });
-        self.playback.recommendation_loading = false;
-        self.playback.waiting_for_recommendation = false;
 
         if !has_more {
             return;
@@ -474,48 +462,8 @@ impl LyruneView {
         let Some(account_id) = self.account.id() else {
             return;
         };
-        let Some(playlist_id) = self
-            .playback
-            .queue
-            .as_ref()
-            .map(|queue| queue.playlist_id.clone())
-        else {
+        let Some(current_playback) = self.playback.snapshot(account_id) else {
             return;
-        };
-        let Some(track_mid) = self.current_track_data().map(|track| track.mid.clone()) else {
-            return;
-        };
-        let position = if self.playback.load.track.is_some() || !self.playback.started {
-            self.playback.position
-        } else {
-            self.playback
-                .audio
-                .as_ref()
-                .map(AudioPlayer::position)
-                .unwrap_or(self.playback.position)
-        };
-        self.playback.position = position;
-        let current_playback = PersistedPlayback {
-            account_id,
-            playlist_id,
-            track_mid,
-            position_ms: position.as_millis().min(u64::MAX as u128) as u64,
-            queue_tracks: self
-                .playback
-                .queue
-                .as_ref()
-                .map(|queue| queue.tracks.clone())
-                .unwrap_or_default(),
-            queue_modified: self
-                .playback
-                .queue
-                .as_ref()
-                .is_some_and(|queue| queue.modified),
-            queue_continuation: self
-                .playback
-                .queue
-                .as_ref()
-                .and_then(|queue| queue.continuation),
         };
         if self.settings.current_playback.as_ref() != Some(&current_playback) {
             self.settings.current_playback = Some(current_playback);
@@ -530,22 +478,5 @@ impl LyruneView {
             self.persist_settings();
         }
         self.playback.last_persisted_at = Instant::now();
-    }
-
-    pub(super) fn current_track_data(&self) -> Option<&Track> {
-        self.playback
-            .current_track
-            .and_then(|index| {
-                self.playback
-                    .queue
-                    .as_ref()
-                    .and_then(|queue| queue.tracks.get(index))
-            })
-            .map(Arc::as_ref)
-    }
-
-    pub(super) fn current_duration(&self) -> Option<Duration> {
-        self.current_track_data()
-            .map(|track| Duration::from_secs(track.duration_seconds))
     }
 }

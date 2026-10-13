@@ -50,7 +50,8 @@ impl LyruneView {
         }
 
         let current_is_same_track = self
-            .current_track_data()
+            .playback
+            .track()
             .is_some_and(|current| current.mid == mid);
         if !current_is_same_track && let Some(pending) = self.pending_lyrics_cache.remove(&mid) {
             self.lyrics_cache.insert(mid.clone(), pending);
@@ -145,7 +146,8 @@ impl LyruneView {
                                     Ok(lyrics) => {
                                         this.lyrics_errors.remove(&mid);
                                         let is_current = this
-                                            .current_track_data()
+                                            .playback
+                                            .track()
                                             .is_some_and(|track| track.mid == mid);
                                         let unchanged = this
                                             .lyrics_cache

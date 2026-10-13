@@ -579,10 +579,7 @@ impl LyruneView {
                         this.liked_tracks.insert(mid.clone(), liked);
                     }
                     Err(error) => {
-                        if this
-                            .current_track_data()
-                            .is_some_and(|track| track.mid == mid)
-                        {
+                        if this.playback.track().is_some_and(|track| track.mid == mid) {
                             this.notify_error(format!("读取当前歌曲的喜欢状态失败：{error:#}"), cx);
                         }
                     }
@@ -594,7 +591,7 @@ impl LyruneView {
     }
 
     pub(super) fn toggle_current_track_liked(&mut self, cx: &mut Context<Self>) {
-        let Some(track) = self.current_track_data().cloned() else {
+        let Some(track) = self.playback.track().cloned() else {
             return;
         };
         let Some(liked) = self.liked_tracks.get(&track.mid).copied() else {

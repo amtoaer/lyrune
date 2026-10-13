@@ -1022,7 +1022,7 @@ impl LyruneView {
         self.lyric_animation_frame_pending = true;
         cx.on_next_frame(window, |this, window, cx| {
             this.lyric_animation_frame_pending = false;
-            if !this.cover_backdrop_visible || !this.playback_is_advancing() {
+            if !this.cover_backdrop_visible || !this.playback.is_advancing() {
                 this.reset_lyric_animation_frames();
                 return;
             }
@@ -1262,7 +1262,7 @@ impl LyruneView {
             let active = Some(anchor);
             let now = cx.background_executor().now();
             let motion_enabled =
-                self.cover_backdrop_visible && self.playback_is_advancing() && !cx.reduce_motion();
+                self.cover_backdrop_visible && self.playback.is_advancing() && !cx.reduce_motion();
             let (scroll_anchor, style_anchor) =
                 self.lyric_motion_anchors(mid, anchor, motion_enabled, now);
             let scroll_offset = row_height * scroll_anchor;
@@ -1272,7 +1272,7 @@ impl LyruneView {
                 self.playback.position,
                 self.settings.lyric_highlight_frame_rate,
             );
-            let track_duration = self.current_duration();
+            let track_duration = self.playback.duration();
             let rows = lyrics
                 .lines
                 .iter()
@@ -1383,7 +1383,8 @@ impl LyruneView {
     ) -> AnyElement {
         let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
         let track_mid = self
-            .current_track_data()
+            .playback
+            .track()
             .map(|track| track.mid.clone())
             .unwrap_or_default();
         let defer_new_lyrics = self.defer_new_lyrics_until_next_frame(&track_mid, window, cx);
@@ -1414,7 +1415,8 @@ impl LyruneView {
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
 
         match self
-            .current_track_data()
+            .playback
+            .track()
             .and_then(|track| track.cover_url.clone())
         {
             Some(url) => {

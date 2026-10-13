@@ -1,5 +1,6 @@
 //! 音源解析、解码准备和播放控制；队列组成在 queue，外部状态同步在 playback_sync。
 
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -65,6 +66,58 @@ impl Playback {
             pending_restore,
             last_persisted_at: Instant::now(),
         }
+    }
+
+    pub(super) fn replace_queue(&mut self, queue: PlaybackQueue) -> u64 {
+        // 队列补全与音源加载有不同的寿命；换队列不代替随后 start_playback 的音源失效。
+        self.queue_generation = self.queue_generation.wrapping_add(1);
+        self.recommendation_loading = false;
+        self.waiting_for_recommendation = false;
+        self.queue = Some(queue);
+        self.queue_generation
+    }
+
+    pub(super) fn track(&self) -> Option<&Track> {
+        self.queue
+            .as_ref()?
+            .tracks
+            .get(self.current_track?)
+            .map(Arc::as_ref)
+    }
+
+    pub(super) fn duration(&self) -> Option<Duration> {
+        self.track()
+            .map(|track| Duration::from_secs(track.duration_seconds))
+    }
+
+    pub(super) fn is_advancing(&self) -> bool {
+        self.started
+            && self.load.track.is_none()
+            && self.audio.as_ref().is_some_and(AudioPlayer::is_playing)
+    }
+
+    pub(super) fn snapshot(&mut self, account_id: u64) -> Option<PersistedPlayback> {
+        let queue = self.queue.as_ref()?;
+        let track = queue.tracks.get(self.current_track?)?;
+        // 加载/停止时设备时钟可能仍属于上一音源；保存显式位置，不能用设备位置覆盖。
+        let position = if self.load.track.is_some() || !self.started {
+            self.position
+        } else {
+            self.audio
+                .as_ref()
+                .map(AudioPlayer::position)
+                .unwrap_or(self.position)
+        };
+        self.position = position;
+        Some(PersistedPlayback {
+            account_id,
+            playlist_id: queue.playlist_id.clone(),
+            track_mid: track.mid.clone(),
+            position_ms: position.as_millis().min(u64::MAX as u128) as u64,
+            queue_tracks: queue.tracks.clone(),
+            queue_modified: queue.modified,
+            queue_continuation: queue.continuation,
+        })
     }
 }
 
@@ -488,7 +541,8 @@ impl LyruneView {
             return;
         };
         let target = self
-            .current_duration()
+            .playback
+            .duration()
             .map_or(target, |duration| target.min(duration));
         let autoplay = self
             .playback
@@ -513,7 +567,7 @@ impl LyruneView {
         if self.playback.load.track.is_some() || !self.playback.started {
             return;
         }
-        let Some(duration) = self.current_duration() else {
+        let Some(duration) = self.playback.duration() else {
             return;
         };
         let position = self
@@ -541,7 +595,7 @@ impl LyruneView {
         if self.playback.load.track.is_some() || !self.playback.started {
             return;
         }
-        let Some(track) = self.current_track_data() else {
+        let Some(track) = self.playback.track() else {
             return;
         };
         if track_id != mpris_track_id(&track.mid) || position_micros < 0 {
@@ -622,7 +676,7 @@ impl LyruneView {
             self.playback.waiting_for_recommendation = true;
             self.maybe_load_queue_recommendations(true, cx);
         } else {
-            self.playback.position = self.current_duration().unwrap_or_default();
+            self.playback.position = self.playback.duration().unwrap_or_default();
         }
         self.persist_current_playback();
         #[cfg(target_os = "linux")]

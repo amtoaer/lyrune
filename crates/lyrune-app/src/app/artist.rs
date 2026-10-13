@@ -607,7 +607,7 @@ impl LyruneView {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let monospace_font = self.fonts.monospace.clone();
-        let current_mid = self.current_track_data().map(|track| track.mid.clone());
+        let current_mid = self.playback.track().map(|track| track.mid.clone());
         let loading_mid = self
             .playback
             .load

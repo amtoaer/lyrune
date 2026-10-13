@@ -464,13 +464,15 @@ impl LyruneView {
                     SliderEvent::Change(value) => {
                         // 拖动时仅预览，Release 才真正 seek；音频进度同步不能覆盖预览。
                         this.seek_preview = this
-                            .current_duration()
+                            .playback
+                            .duration()
                             .map(|duration| duration.mul_f32(value.end().clamp(0., 1.)));
                         cx.notify();
                     }
                     SliderEvent::Release(value) => {
                         let target = this
-                            .current_duration()
+                            .playback
+                            .duration()
                             .map(|duration| duration.mul_f32(value.end().clamp(0., 1.)));
                         this.seek_preview = None;
                         if let Some(target) = target {
@@ -1026,7 +1028,7 @@ impl LyruneView {
     }
 
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.cover_backdrop_visible && self.playback_is_advancing() {
+        if self.cover_backdrop_visible && self.playback.is_advancing() {
             if self.seek_preview.is_none() {
                 self.playback.position = self
                     .playback

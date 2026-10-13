@@ -8,7 +8,7 @@ use super::navigation::{
     ArtistResource, NavigationPage, PlaylistResource, SearchMoreResults, SearchResource,
     resolved_playlist_scroll_row,
 };
-use super::playback::PlaybackLoad;
+use super::playback::{Playback, PlaybackLoad};
 use super::player_view::format_playback_time;
 use super::playlists::playlist_title_is_long;
 use super::queue::{
@@ -16,10 +16,13 @@ use super::queue::{
     insert_track_after_current,
 };
 use super::{NavigationHistory, PlaylistScrollPosition, SearchCategory, SearchVisibleCounts};
-use crate::settings::{DEFAULT_NAVIGATION_HISTORY_LIMIT, LyricFrameRate};
+use crate::settings::{
+    DEFAULT_NAVIGATION_HISTORY_LIMIT, LyricFrameRate, PersistedQueueContinuation,
+};
 use gpui::{Pixels, Rgba, black, px, rgb};
 use qqmusic_api::integration::{
-    PlaylistPage, SearchAlbum, SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId,
+    PlaylistPage, Quality, SearchAlbum, SearchPage, SearchResults, Track, UserPlaylist,
+    UserPlaylistId,
 };
 use std::{
     sync::Arc,
@@ -51,6 +54,79 @@ fn track(mid: &str) -> Track {
 
 fn mids(tracks: &[Arc<Track>]) -> Vec<&str> {
     tracks.iter().map(|track| track.mid.as_str()).collect()
+}
+
+#[test]
+fn test_replace_playback_queue() {
+    let queue = |mid: &str| PlaybackQueue {
+        playlist_id: UserPlaylistId::Search {
+            query: mid.to_owned(),
+        },
+        tracks: vec![Arc::new(track(mid))],
+        modified: false,
+        continuation: None,
+    };
+    let mut playback = Playback::new(None, Quality::Standard, None);
+    let first = playback.replace_queue(queue("first"));
+    playback.recommendation_loading = true;
+    playback.waiting_for_recommendation = true;
+    playback.current_track = Some(0);
+    playback.position = Duration::from_secs(42);
+    let audio_request = playback.load.invalidate();
+    playback.load.track = Some(0);
+    playback.load.autoplay = true;
+
+    let replacement = playback.replace_queue(queue("replacement"));
+    assert_ne!(replacement, first);
+    assert!(!playback.recommendation_loading);
+    assert!(!playback.waiting_for_recommendation);
+    assert_eq!(
+        playback.track().map(|track| track.mid.as_str()),
+        Some("replacement")
+    );
+    // 换队列只结束旧补页/推荐周期；音源失效和停止仍由播放入口按原顺序完成。
+    assert!(playback.load.is_current(audio_request));
+    assert_eq!(playback.load.track, Some(0));
+    assert!(playback.load.autoplay);
+    assert_eq!(playback.position, Duration::from_secs(42));
+}
+
+#[test]
+fn test_playback_snapshot() {
+    let mut playback = Playback::new(None, Quality::High, None);
+    playback.position = Duration::from_micros(123_456);
+    assert!(playback.snapshot(123).is_none());
+    playback.queue = Some(PlaybackQueue {
+        playlist_id: UserPlaylistId::Search {
+            query: "saved".to_owned(),
+        },
+        tracks: vec![Arc::new(track("first")), Arc::new(track("second"))],
+        modified: true,
+        continuation: Some(PersistedQueueContinuation::Guess),
+    });
+    assert!(playback.snapshot(123).is_none());
+    playback.current_track = Some(2);
+    assert!(playback.snapshot(123).is_none());
+    playback.current_track = Some(1);
+    playback.load.track = Some(1);
+
+    let snapshot = playback.snapshot(123).expect("valid selected queue track");
+    assert_eq!(snapshot.account_id, 123);
+    assert_eq!(
+        snapshot.playlist_id,
+        UserPlaylistId::Search {
+            query: "saved".to_owned()
+        }
+    );
+    assert_eq!(snapshot.track_mid, "second");
+    assert_eq!(snapshot.position_ms, 123);
+    assert_eq!(mids(&snapshot.queue_tracks), vec!["first", "second"]);
+    assert!(snapshot.queue_modified);
+    assert_eq!(
+        snapshot.queue_continuation,
+        Some(PersistedQueueContinuation::Guess)
+    );
+    assert_eq!(playback.position, Duration::from_micros(123_456));
 }
 
 #[test]

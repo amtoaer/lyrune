@@ -18,11 +18,30 @@ use super::{LyruneView, RepeatMode, progress_fraction, progress_slider_state};
 
 #[derive(Default)]
 pub(super) struct PlaybackLoad {
-    pub(super) generation: u64,
+    generation: u64,
     // 属于播放队列，不是当前页面表格中的行号。
     pub(super) track: Option<usize>,
     // 加载中再次切换音质时沿用原来的播放意图，此时不能从已停止的音频设备推断。
     pub(super) autoplay: bool,
+}
+
+impl PlaybackLoad {
+    // 只使旧结果失效，不取消任务或清除加载标记。
+    // 停止和退出需要先失效，再停止设备，最后清除加载标记。
+    pub(super) fn invalidate(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    pub(super) fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
+    pub(super) fn clear(&mut self) {
+        // 保留版本，不能用 Default 重置；重新登录后的新请求仍须排除退出前的结果。
+        self.track = None;
+        self.autoplay = false;
+    }
 }
 
 #[derive(Clone)]
@@ -203,8 +222,7 @@ impl LyruneView {
             track.as_ref().clone(),
             cx,
         );
-        self.playback_load.generation = self.playback_load.generation.wrapping_add(1);
-        let generation = self.playback_load.generation;
+        let generation = self.playback_load.invalidate();
         self.current_track = Some(index);
         self.playback_load.track = Some(index);
         self.ensure_track_like_state(track.mid.clone(), cx);
@@ -261,7 +279,7 @@ impl LyruneView {
                 let seeked = matches!(&event, PlaybackLoadEvent::Finished(Ok(_)));
                 let _ = this.update(cx, |this, cx| {
                     // 切歌、切音质或停止后，旧任务仍可能发来结果；不能据此替换当前音源。
-                    if this.playback_load.generation != generation {
+                    if !this.playback_load.is_current(generation) {
                         return;
                     }
                     match event {
@@ -271,8 +289,7 @@ impl LyruneView {
                             this.available_qualities = available_qualities;
                         }
                         PlaybackLoadEvent::Finished(result) => {
-                            this.playback_load.track = None;
-                            this.playback_load.autoplay = false;
+                            this.playback_load.clear();
                             let playback_result = match result {
                                 Ok((playback, location, available_qualities)) => {
                                     let quality = location.quality;
@@ -385,12 +402,11 @@ impl LyruneView {
         if self.current_track.is_none() {
             return;
         }
-        self.playback_load.generation = self.playback_load.generation.wrapping_add(1);
+        self.playback_load.invalidate();
         if let Some(audio) = &self.audio {
             audio.stop();
         }
-        self.playback_load.track = None;
-        self.playback_load.autoplay = false;
+        self.playback_load.clear();
         self.playback_started = false;
         self.wake_playback_ticks();
         self.position = Duration::ZERO;

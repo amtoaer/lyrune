@@ -269,7 +269,7 @@ impl LyruneView {
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home_generation = self.home_generation.wrapping_add(1);
         self.queue_generation = self.queue_generation.wrapping_add(1);
-        self.playback_load.generation = self.playback_load.generation.wrapping_add(1);
+        self.playback_load.invalidate();
         if let Some(audio) = &self.audio {
             audio.stop();
         }
@@ -301,8 +301,7 @@ impl LyruneView {
         self.queue_recommendation_loading = false;
         self.queue_waiting_for_recommendation = false;
         self.current_track = None;
-        self.playback_load.track = None;
-        self.playback_load.autoplay = false;
+        self.playback_load.clear();
         self.playback_started = false;
         self.wake_playback_ticks();
         self.playback_location = None;

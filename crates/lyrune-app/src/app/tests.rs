@@ -8,6 +8,7 @@ use super::navigation::{
     ArtistResource, NavigationPage, PlaylistResource, SearchMoreResults, SearchResource,
     resolved_playlist_scroll_row,
 };
+use super::playback::PlaybackLoad;
 use super::player_view::format_playback_time;
 use super::playlists::playlist_title_is_long;
 use super::queue::{
@@ -51,6 +52,48 @@ fn track(mid: &str) -> Track {
 
 fn mids(tracks: &[Arc<Track>]) -> Vec<&str> {
     tracks.iter().map(|track| track.mid.as_str()).collect()
+}
+
+#[test]
+fn playback_load_preserves_intent_until_cleared() {
+    for autoplay in [true, false] {
+        let mut load = PlaybackLoad::default();
+        let original = load.invalidate();
+        load.track = Some(2);
+        load.autoplay = autoplay;
+
+        // 同一首歌在加载中切换音质，索引未变也必须拒绝旧结果。
+        let replacement = load.invalidate();
+        assert!(!load.is_current(original));
+        assert!(load.is_current(replacement));
+        assert_eq!(load.track, Some(2));
+        assert_eq!(load.autoplay, autoplay);
+
+        load.clear();
+        assert_eq!(load.track, None);
+        assert!(!load.autoplay);
+        assert!(!load.is_current(original));
+        assert!(load.is_current(replacement));
+    }
+}
+
+#[test]
+fn playback_load_rejects_requests_across_restarts() {
+    let mut load = PlaybackLoad::default();
+    let original = load.invalidate();
+    load.track = Some(0);
+    load.autoplay = true;
+
+    // 停止或退出先使请求失效，之后清理；下一次开始不能复用旧版本。
+    load.invalidate();
+    load.clear();
+    assert!(!load.is_current(original));
+
+    let restarted = load.invalidate();
+    load.track = Some(0);
+    assert!(!load.is_current(original));
+    assert!(load.is_current(restarted));
+    assert!(!load.autoplay);
 }
 
 #[test]

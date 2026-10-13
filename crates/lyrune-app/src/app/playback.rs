@@ -311,17 +311,16 @@ impl LyruneView {
         if self.loading_track.is_some() {
             return;
         }
-        if self.current_track.is_none() {
+        let Some(index) = self.current_track else {
             if !self.track_table.read(cx).delegate().tracks().is_empty() {
                 self.select_track(0, cx);
             }
             return;
-        }
+        };
         let Some(audio) = &self.audio else {
             return;
         };
         if !self.playback_started || audio.is_empty() {
-            let index = self.current_track.expect("current track was checked above");
             self.start_playback(index, Duration::ZERO, None, true, cx);
             return;
         }

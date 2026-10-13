@@ -6,6 +6,7 @@ mod lyrics_loading;
 mod lyrics_view;
 mod navigation;
 mod playback;
+mod playback_sync;
 mod player_view;
 mod playlists;
 mod queue;
@@ -17,10 +18,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use account::AccountState;
-use futures_util::{
-    future::{Either, select},
-    pin_mut,
-};
 use gpui::{prelude::*, *};
 use gpui_base::motion::{Transition, transition};
 use gpui_component::{
@@ -50,14 +47,12 @@ use crate::library::{
 };
 use crate::lyrics_cache::LyricDiskCache;
 #[cfg(target_os = "linux")]
-use crate::mpris::{
-    MprisCommand, MprisHandle, MprisLoopStatus, MprisPlaybackStatus, MprisSnapshot, MprisTrack,
-};
+use crate::mpris::MprisHandle;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 use crate::settings::{
     AppSettings, CdnCacheStore, LibraryCache, MIN_SCALE_PERCENT, PersistedPlayback,
-    PersistedQueueContinuation, PersistedWindowSize, SettingsStore, WindowDecoration,
+    PersistedWindowSize, SettingsStore, WindowDecoration,
 };
 use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
@@ -77,15 +72,11 @@ use qqmusic_api::integration::{
     UserPlaylist, UserProfile,
 };
 use queue::{PlaybackQueue, RepeatMode};
-#[cfg(target_os = "linux")]
-use xxhash_rust::xxh3::xxh3_128;
 
 const PAGE_SIZE: u64 = 100;
 const ARTIST_PAGE_SIZE: u64 = 5;
 const ARTIST_ALBUM_PAGE_SIZE: u64 = 10;
 const SEARCH_PAGE_SIZE: usize = 20;
-const PROGRESS_TICK: Duration = Duration::from_millis(250);
-const PLAYBACK_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
 const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
@@ -116,19 +107,6 @@ fn progress_fraction(position: Duration, duration: Duration) -> f32 {
     } else {
         (position.as_secs_f32() / duration.as_secs_f32()).clamp(0., 1.)
     }
-}
-
-#[cfg(target_os = "linux")]
-fn duration_micros(duration: Duration) -> i64 {
-    duration.as_micros().min(i64::MAX as u128) as i64
-}
-
-#[cfg(target_os = "linux")]
-fn mpris_track_id(track_mid: &str) -> String {
-    format!(
-        "/dev/lyrune/track/id_{:032x}",
-        xxh3_128(track_mid.as_bytes())
-    )
 }
 
 fn unix_timestamp_secs() -> u64 {
@@ -850,159 +828,12 @@ impl LyruneView {
         });
     }
 
-    fn start_window_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (wake_sender, mut wake_receiver) = mpsc::channel(1);
-        self.window_tick_wake = Some(wake_sender);
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let playback_advancing =
-                    match this.read_with(cx, |this, _| this.playback_is_advancing()) {
-                        Ok(playback_advancing) => playback_advancing,
-                        Err(_) => break,
-                    };
-                if !playback_advancing {
-                    if this
-                        .update_in(cx, |this, window, cx| this.sync_progress_slider(window, cx))
-                        .is_err()
-                        || wake_receiver.recv().await.is_none()
-                    {
-                        break;
-                    }
-                    continue;
-                }
-
-                let timer = cx.background_executor().timer(PROGRESS_TICK);
-                let wake = wake_receiver.recv();
-                pin_mut!(timer, wake);
-                match select(timer, wake).await {
-                    Either::Left(_) => {
-                        if this
-                            .update_in(cx, |this, window, cx| this.sync_progress_slider(window, cx))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Either::Right((Some(()), _)) => {}
-                    Either::Right((None, _)) => break,
-                }
-            }
-        })
-        .detach();
-    }
-
-    pub(crate) fn start_background_tick(&mut self, cx: &mut Context<Self>) {
-        let (wake_sender, mut wake_receiver) = mpsc::channel(1);
-        self.background_tick_wake = Some(wake_sender);
-        cx.spawn(async move |this, cx| {
-            loop {
-                let interval = match this.read_with(cx, |this, _| {
-                    if !this.playback_is_advancing() {
-                        None
-                    } else {
-                        Some(PROGRESS_TICK)
-                    }
-                }) {
-                    Ok(interval) => interval,
-                    Err(_) => break,
-                };
-                let Some(interval) = interval else {
-                    if wake_receiver.recv().await.is_none() {
-                        break;
-                    }
-                    continue;
-                };
-
-                let timer = cx.background_executor().timer(interval);
-                let wake = wake_receiver.recv();
-                pin_mut!(timer, wake);
-                match select(timer, wake).await {
-                    Either::Left(_) => {
-                        if this.update(cx, |this, cx| this.tick(cx)).is_err() {
-                            break;
-                        }
-                    }
-                    Either::Right((Some(()), _)) => {}
-                    Either::Right((None, _)) => break,
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn playback_is_advancing(&self) -> bool {
-        self.playback_started
-            && self.loading_track.is_none()
-            && self.audio.as_ref().is_some_and(AudioPlayer::is_playing)
-    }
-
-    fn wake_playback_ticks(&self) {
-        if let Some(wake) = &self.window_tick_wake {
-            let _ = wake.try_send(());
-        }
-        if let Some(wake) = &self.background_tick_wake {
-            let _ = wake.try_send(());
-        }
-    }
-
     pub(crate) fn window_size(&self) -> Option<PersistedWindowSize> {
         self.settings.window_size
     }
 
     pub(crate) fn window_decoration(&self) -> WindowDecoration {
         self.settings.window_decoration
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn attach_mpris(&mut self, mpris: MprisHandle) {
-        self.mpris = Some(mpris);
-        self.sync_mpris(false);
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn attach_inhibit(&mut self, inhibit: InhibitHandle) {
-        self.inhibit = Some(inhibit);
-        self.sync_inhibit();
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn handle_mpris_command(&mut self, command: MprisCommand, cx: &mut Context<Self>) {
-        match command {
-            MprisCommand::Raise | MprisCommand::Quit => {}
-            MprisCommand::Next => self.play_next(false, cx),
-            MprisCommand::Previous => self.play_previous(cx),
-            MprisCommand::Pause => self.pause_playback(cx),
-            MprisCommand::PlayPause => self.toggle_playback(cx),
-            MprisCommand::Stop => self.stop_playback(cx),
-            MprisCommand::Play => self.play(cx),
-            MprisCommand::Seek(offset) => self.seek_by(offset, cx),
-            MprisCommand::SetPosition { track_id, position } => {
-                self.set_mpris_position(&track_id, position, cx);
-            }
-            MprisCommand::SetLoopStatus(status) => {
-                self.repeat_mode = match status {
-                    MprisLoopStatus::None => RepeatMode::Off,
-                    MprisLoopStatus::Track => RepeatMode::One,
-                    MprisLoopStatus::Playlist => RepeatMode::All,
-                };
-                self.sync_mpris(false);
-                cx.notify();
-            }
-            MprisCommand::SetShuffle(shuffle) => {
-                self.shuffle = shuffle;
-                self.sync_mpris(false);
-                cx.notify();
-            }
-            MprisCommand::SetVolume(volume) => {
-                let volume = volume.clamp(0., 1.) as f32;
-                self.volume_slider.update(cx, |slider, cx| {
-                    *slider = volume_slider_state(volume);
-                    cx.notify();
-                });
-                self.set_volume(volume, cx);
-                self.persist_settings();
-            }
-        }
     }
 
     fn start_cdn_maintenance(&mut self) {
@@ -1051,151 +882,6 @@ impl LyruneView {
 
     fn persist_settings(&self) {
         let _ = SettingsStore::save(&self.settings);
-    }
-
-    #[cfg(target_os = "linux")]
-    fn mpris_snapshot(&self) -> MprisSnapshot {
-        let audio_available = self.audio.is_some();
-        let loading = self.loading_track.is_some();
-        let playback_status = if loading {
-            MprisPlaybackStatus::Playing
-        } else if !self.playback_started {
-            MprisPlaybackStatus::Stopped
-        } else if self.audio.as_ref().is_some_and(AudioPlayer::is_playing) {
-            MprisPlaybackStatus::Playing
-        } else {
-            MprisPlaybackStatus::Paused
-        };
-        let (queue_len, current_index) = self
-            .playback_queue
-            .as_ref()
-            .map_or((0, None), |queue| (queue.tracks.len(), self.current_track));
-        let can_extend = self
-            .playback_queue
-            .as_ref()
-            .and_then(|queue| queue.continuation)
-            .is_some_and(PersistedQueueContinuation::can_load_more);
-        let can_go_next = audio_available
-            && current_index.is_some_and(|index| {
-                can_extend
-                    || (self.shuffle && queue_len > 1)
-                    || index + 1 < queue_len
-                    || (self.repeat_mode == RepeatMode::All && queue_len > 0)
-            });
-        let can_go_previous = audio_available
-            && current_index.is_some_and(|index| {
-                self.position >= Duration::from_secs(3)
-                    || index > 0
-                    || (self.repeat_mode == RepeatMode::All && queue_len > 0)
-            });
-        let track = self.current_track_data().map(|track| MprisTrack {
-            id: mpris_track_id(&track.mid),
-            title: track.title.clone(),
-            artists: if track.artists.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![track.artists.clone()]
-            },
-            album: (!track.album.trim().is_empty()).then(|| track.album.clone()),
-            art_url: track.cover_url.clone().filter(|url| !url.trim().is_empty()),
-            length_micros: track
-                .duration_seconds
-                .saturating_mul(1_000_000)
-                .min(i64::MAX as u64) as i64,
-        });
-        let has_track = track.is_some();
-        MprisSnapshot {
-            playback_status,
-            loop_status: match self.repeat_mode {
-                RepeatMode::Off => MprisLoopStatus::None,
-                RepeatMode::All => MprisLoopStatus::Playlist,
-                RepeatMode::One => MprisLoopStatus::Track,
-            },
-            shuffle: self.shuffle,
-            volume: self.settings.volume as f64,
-            position_micros: duration_micros(self.position),
-            track,
-            can_go_next,
-            can_go_previous,
-            can_play: has_track && audio_available && !loading,
-            can_pause: has_track && audio_available && !loading && self.playback_started,
-            can_seek: has_track && audio_available && !loading && self.playback_started,
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn sync_mpris(&self, seeked: bool) {
-        if let Some(mpris) = &self.mpris {
-            let snapshot = self.mpris_snapshot();
-            if seeked {
-                mpris.seeked(snapshot);
-            } else {
-                mpris.update(snapshot);
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn sync_inhibit(&self) {
-        if let Some(inhibit) = &self.inhibit {
-            inhibit.set_active(self.playback_is_advancing());
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn sync_mpris_position(&self) {
-        if let Some(mpris) = &self.mpris {
-            mpris.update_position(duration_micros(self.position));
-        }
-    }
-
-    fn sync_progress_slider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.seek_preview.is_none() {
-            let progress = self
-                .current_duration()
-                .map_or(0., |duration| progress_fraction(self.position, duration));
-            self.progress_slider.update(cx, |slider, cx| {
-                if slider.value().end() != progress {
-                    slider.set_value(progress, window, cx);
-                }
-            });
-        }
-    }
-
-    fn tick(&mut self, cx: &mut Context<Self>) {
-        let previous_position = self.position;
-        if self.seek_preview.is_none() && self.loading_track.is_none() && self.playback_started {
-            self.position = self
-                .audio
-                .as_ref()
-                .map(AudioPlayer::position)
-                .unwrap_or_default();
-        }
-
-        let ended = self.playback_started
-            && self.loading_track.is_none()
-            && self.audio.as_ref().is_some_and(AudioPlayer::is_empty);
-        if ended {
-            self.playback_started = false;
-            self.play_next(true, cx);
-        }
-        if self.current_track.is_some()
-            && self.last_playback_persisted_at.elapsed() >= PLAYBACK_PERSIST_INTERVAL
-        {
-            self.persist_current_playback();
-        }
-        #[cfg(target_os = "linux")]
-        if self.current_track.is_some()
-            && self.loading_track.is_none()
-            && self.last_mpris_position_sync.elapsed() >= PROGRESS_TICK
-        {
-            self.sync_mpris_position();
-            self.last_mpris_position_sync = Instant::now();
-        }
-
-        if self.position != previous_position && self.progress_hovered {
-            cx.notify();
-        }
     }
 
     fn render_sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {

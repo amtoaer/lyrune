@@ -10,9 +10,9 @@ use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::runtime::RUNTIME;
 use crate::settings::PersistedQueueContinuation;
 
-use super::{LyruneView, RepeatMode, progress_fraction, progress_slider_state};
 #[cfg(target_os = "linux")]
-use super::{duration_micros, mpris_track_id};
+use super::playback_sync::{duration_micros, mpris_track_id};
+use super::{LyruneView, RepeatMode, progress_fraction, progress_slider_state};
 
 #[derive(Clone)]
 pub(super) struct PlaybackLocation {

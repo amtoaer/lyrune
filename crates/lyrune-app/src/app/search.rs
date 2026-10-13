@@ -315,7 +315,7 @@ impl LyruneView {
         let mut content = v_flex().w_full();
         let mut is_empty = false;
         if let Some(results) = results {
-            match self.search_category {
+            let card_results = match self.search_category {
                 SearchCategory::Songs => {
                     is_empty = results.songs.items.is_empty();
                     let playing_mid = self.current_track_data().map(|track| track.mid.as_str());
@@ -350,112 +350,69 @@ impl LyruneView {
                             .stripe(false)
                             .with_size(px(64.)),
                     );
+                    None
                 }
-                SearchCategory::Artists => {
-                    is_empty = results.artists.items.is_empty();
-                    let cover_size = if compact { px(132.) } else { px(148.) };
-                    let card_width = cover_size + px(16.);
-                    let available_width =
-                        (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
-                    let columns = ((f32::from(available_width) + 16.)
-                        / (f32::from(card_width) + 16.))
-                        .floor() as usize;
-                    self.search_card_grid.update(cx, |list, cx| {
-                        if list.delegate_mut().set_cards(
-                            results
-                                .artists
-                                .items
-                                .iter()
-                                .cloned()
-                                .map(SearchCard::Artist)
-                                .collect(),
-                            columns,
-                            card_width,
-                            cover_size + px(62.),
-                            cover_size,
-                            scale_factor,
-                            results.artists.has_more,
-                            search_loading_more,
-                        ) {
-                            cx.notify();
-                        }
-                    });
-                    content = v_flex().w_full().flex_1().min_h_0().child(
-                        List::new(&self.search_card_grid)
-                            .size_full()
-                            .scrollbar_visible(false),
-                    );
-                }
-                SearchCategory::Albums => {
-                    is_empty = results.albums.items.is_empty();
-                    let cover_size = if compact { px(132.) } else { px(148.) };
-                    let card_width = cover_size + px(16.);
-                    let available_width =
-                        (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
-                    let columns = ((f32::from(available_width) + 16.)
-                        / (f32::from(card_width) + 16.))
-                        .floor() as usize;
-                    self.search_card_grid.update(cx, |list, cx| {
-                        if list.delegate_mut().set_cards(
-                            results
-                                .albums
-                                .items
-                                .iter()
-                                .cloned()
-                                .map(SearchCard::Album)
-                                .collect(),
-                            columns,
-                            card_width,
-                            cover_size + px(74.),
-                            cover_size,
-                            scale_factor,
-                            results.albums.has_more,
-                            search_loading_more,
-                        ) {
-                            cx.notify();
-                        }
-                    });
-                    content = v_flex().w_full().flex_1().min_h_0().child(
-                        List::new(&self.search_card_grid)
-                            .size_full()
-                            .scrollbar_visible(false),
-                    );
-                }
-                SearchCategory::Playlists => {
-                    is_empty = results.playlists.items.is_empty();
-                    let cover_size = if compact { px(132.) } else { px(148.) };
-                    let card_width = cover_size + px(16.);
-                    let available_width =
-                        (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
-                    let columns = ((f32::from(available_width) + 16.)
-                        / (f32::from(card_width) + 16.))
-                        .floor() as usize;
-                    self.search_card_grid.update(cx, |list, cx| {
-                        if list.delegate_mut().set_cards(
-                            results
-                                .playlists
-                                .items
-                                .iter()
-                                .cloned()
-                                .map(SearchCard::Playlist)
-                                .collect(),
-                            columns,
-                            card_width,
-                            cover_size + px(74.),
-                            cover_size,
-                            scale_factor,
-                            results.playlists.has_more,
-                            search_loading_more,
-                        ) {
-                            cx.notify();
-                        }
-                    });
-                    content = v_flex().w_full().flex_1().min_h_0().child(
-                        List::new(&self.search_card_grid)
-                            .size_full()
-                            .scrollbar_visible(false),
-                    );
-                }
+                SearchCategory::Artists => Some((
+                    results
+                        .artists
+                        .items
+                        .iter()
+                        .cloned()
+                        .map(SearchCard::Artist)
+                        .collect::<Vec<_>>(),
+                    results.artists.has_more,
+                    px(62.),
+                )),
+                SearchCategory::Albums => Some((
+                    results
+                        .albums
+                        .items
+                        .iter()
+                        .cloned()
+                        .map(SearchCard::Album)
+                        .collect::<Vec<_>>(),
+                    results.albums.has_more,
+                    px(74.),
+                )),
+                SearchCategory::Playlists => Some((
+                    results
+                        .playlists
+                        .items
+                        .iter()
+                        .cloned()
+                        .map(SearchCard::Playlist)
+                        .collect::<Vec<_>>(),
+                    results.playlists.has_more,
+                    px(74.),
+                )),
+            };
+            if let Some((cards, has_more, caption_height)) = card_results {
+                is_empty = cards.is_empty();
+                let cover_size = if compact { px(132.) } else { px(148.) };
+                let card_width = cover_size + px(16.);
+                let available_width =
+                    (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
+                let columns = ((f32::from(available_width) + 16.) / (f32::from(card_width) + 16.))
+                    .floor() as usize;
+                self.search_card_grid.update(cx, |list, cx| {
+                    if list.delegate_mut().set_cards(
+                        cards,
+                        columns,
+                        card_width,
+                        cover_size + caption_height,
+                        cover_size,
+                        scale_factor,
+                        has_more,
+                        search_loading_more,
+                    ) {
+                        cx.notify();
+                    }
+                });
+                content = v_flex().w_full().flex_1().min_h_0().child(
+                    List::new(&self.search_card_grid)
+                        .size_full()
+                        .scrollbar_visible(false),
+                );
             }
         }
         let song_list_active = active_category == SearchCategory::Songs

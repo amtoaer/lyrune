@@ -12,11 +12,10 @@ use gpui_component::{
     spinner::Spinner,
     v_flex,
 };
-use qqmusic_api::integration::{SearchAlbum, SearchArtist, SearchPage, Track, UserPlaylist};
+use qqmusic_api::integration::{SearchAlbum, SearchArtist, SearchPage, Track};
 
 use super::navigation::{
-    MainContent, NavigationPage, SearchCategory, SharedArtistResource, append_shared_search_page,
-    lock_resource,
+    MainContent, NavigationPage, SharedArtistResource, append_shared_search_page, lock_resource,
 };
 use super::queue::canonical_queue_track_index;
 use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, LyruneView, page_horizontal_padding};
@@ -544,15 +543,7 @@ impl LyruneView {
                 .into_any_element()
         } else if let Some(albums) = albums.filter(|page| !page.items.is_empty()) {
             let visible = self.artist_visible_album_count.min(albums.items.len());
-            self.render_artist_cards(
-                SearchCategory::Albums,
-                Vec::new(),
-                albums.items[..visible].to_vec(),
-                Vec::new(),
-                compact,
-                scale_factor,
-                cx,
-            )
+            self.render_artist_albums(albums.items[..visible].to_vec(), compact, scale_factor, cx)
         } else {
             h_flex()
                 .h(px(72.))
@@ -803,15 +794,9 @@ impl LyruneView {
         v_flex().w_full().gap_1().children(rows).into_any_element()
     }
 
-    // 这里保留原有的多类别渲染分支；目前歌手页只传入 Albums，
-    // 搜索页本身使用虚拟列表。收窄这个接口应另行验证各类别的交互与布局。
-    #[allow(clippy::too_many_arguments)]
-    fn render_artist_cards(
+    fn render_artist_albums(
         &mut self,
-        category: SearchCategory,
-        artists: Vec<Arc<SearchArtist>>,
         albums: Vec<Arc<SearchAlbum>>,
-        playlists: Vec<Arc<UserPlaylist>>,
         compact: bool,
         scale_factor: f32,
         cx: &mut Context<Self>,
@@ -819,156 +804,57 @@ impl LyruneView {
         let theme = cx.theme().clone();
         let cover_size = if compact { px(132.) } else { px(148.) };
         let card_width = cover_size + px(16.);
-        let cards = match category {
-            SearchCategory::Artists => artists
-                .into_iter()
-                .enumerate()
-                .map(|(index, artist)| {
-                    let title = artist.name.clone();
-                    let cover = self.render_artist_cover(
-                        artist.cover_url.clone(),
-                        MediaIcon::Artist,
-                        cover_size,
-                        px(999.),
-                        scale_factor,
-                        cx,
-                    );
-                    Button::new(format!("search-artist-{index}"))
-                        .ghost()
-                        .w(card_width)
-                        .h(cover_size + px(62.))
-                        .p_2()
-                        .rounded(px(12.))
-                        .tooltip(title.clone())
-                        .child(
-                            v_flex()
-                                .size_full()
-                                .items_center()
-                                .gap_3()
-                                .child(cover)
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .truncate()
-                                        .text_center()
-                                        .font_medium()
-                                        .text_color(theme.foreground)
-                                        .child(title),
-                                ),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_search_artist(artist.as_ref().clone(), window, cx)
-                        }))
-                        .into_any_element()
-                })
-                .collect::<Vec<_>>(),
-            SearchCategory::Albums => albums
-                .into_iter()
-                .enumerate()
-                .map(|(index, album)| {
-                    let title = album.title.clone();
-                    let subtitle = album.artist.clone();
-                    let cover = self.render_artist_cover(
-                        album.cover_url.clone(),
-                        MediaIcon::Album,
-                        cover_size,
-                        px(12.),
-                        scale_factor,
-                        cx,
-                    );
-                    let playlist = album.as_ref().clone().into_playlist();
-                    Button::new(format!("search-album-{index}"))
-                        .ghost()
-                        .w(card_width)
-                        .h(cover_size + px(74.))
-                        .p_2()
-                        .rounded(px(12.))
-                        .tooltip(title.clone())
-                        .child(
-                            v_flex()
-                                .size_full()
-                                .items_start()
-                                .gap_2()
-                                .child(cover)
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .truncate()
-                                        .font_medium()
-                                        .text_color(theme.foreground)
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(subtitle),
-                                ),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_home_playlist(playlist.clone(), window, cx)
-                        }))
-                        .into_any_element()
-                })
-                .collect::<Vec<_>>(),
-            SearchCategory::Playlists => playlists
-                .into_iter()
-                .enumerate()
-                .map(|(index, playlist)| {
-                    let title = playlist.title.clone();
-                    let subtitle = if playlist.owner.is_empty() {
-                        "QQ 音乐歌单".to_owned()
-                    } else {
-                        playlist.owner.clone()
-                    };
-                    let cover = self.render_artist_cover(
-                        playlist.cover_url.clone(),
-                        MediaIcon::Playlist,
-                        cover_size,
-                        px(12.),
-                        scale_factor,
-                        cx,
-                    );
-                    Button::new(format!("search-playlist-{index}"))
-                        .ghost()
-                        .w(card_width)
-                        .h(cover_size + px(74.))
-                        .p_2()
-                        .rounded(px(12.))
-                        .tooltip(title.clone())
-                        .child(
-                            v_flex()
-                                .size_full()
-                                .items_start()
-                                .gap_2()
-                                .child(cover)
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .truncate()
-                                        .font_medium()
-                                        .text_color(theme.foreground)
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(subtitle),
-                                ),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_home_playlist(playlist.as_ref().clone(), window, cx)
-                        }))
-                        .into_any_element()
-                })
-                .collect::<Vec<_>>(),
-            SearchCategory::Songs => Vec::new(),
-        };
+        let cards = albums
+            .into_iter()
+            .enumerate()
+            .map(|(index, album)| {
+                let title = album.title.clone();
+                let subtitle = album.artist.clone();
+                let cover = self.render_artist_cover(
+                    album.cover_url.clone(),
+                    MediaIcon::Album,
+                    cover_size,
+                    px(12.),
+                    scale_factor,
+                    cx,
+                );
+                let playlist = album.as_ref().clone().into_playlist();
+                Button::new(format!("search-album-{index}"))
+                    .ghost()
+                    .w(card_width)
+                    .h(cover_size + px(74.))
+                    .p_2()
+                    .rounded(px(12.))
+                    .tooltip(title.clone())
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .items_start()
+                            .gap_2()
+                            .child(cover)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .font_medium()
+                                    .text_color(theme.foreground)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(subtitle),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_home_playlist(playlist.clone(), window, cx)
+                    }))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         h_flex()
             .w_full()
             .items_start()

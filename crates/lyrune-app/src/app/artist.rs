@@ -18,10 +18,8 @@ use super::navigation::{
     MainContent, NavigationPage, SearchCategory, SharedArtistResource, append_shared_search_page,
     lock_resource,
 };
-use super::{
-    ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, LyruneView, canonical_queue_track_index,
-    page_horizontal_padding,
-};
+use super::queue::canonical_queue_track_index;
+use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, LyruneView, page_horizontal_padding};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
 use crate::library::format_duration;

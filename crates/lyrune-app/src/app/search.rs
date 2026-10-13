@@ -21,10 +21,8 @@ use super::navigation::{
     SearchCategory, SearchMoreResults, SharedSearchResource, append_shared_search_page,
     lock_resource,
 };
-use super::{
-    LyruneView, PlaybackQueue, SEARCH_PAGE_SIZE, insert_external_track_after_current,
-    page_horizontal_padding,
-};
+use super::queue::{PlaybackQueue, insert_external_track_after_current};
+use super::{LyruneView, SEARCH_PAGE_SIZE, page_horizontal_padding};
 use crate::icons::media_icon_hsla;
 use crate::library::SearchCard;
 use crate::player::AudioPlayer;

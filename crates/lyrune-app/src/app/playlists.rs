@@ -22,9 +22,9 @@ use super::navigation::{
     SharedPlaylistResource, lock_resource, resolved_playlist_scroll_row, share_items,
     update_liked_playlist_resource,
 };
+use super::queue::canonical_queue_track_index;
 use super::{
-    LIBRARY_CACHE_TTL, LyruneView, PAGE_SIZE, canonical_queue_track_index, page_horizontal_padding,
-    unix_timestamp_secs,
+    LIBRARY_CACHE_TTL, LyruneView, PAGE_SIZE, page_horizontal_padding, unix_timestamp_secs,
 };
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon};

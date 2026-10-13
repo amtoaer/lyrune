@@ -17,13 +17,37 @@ use gpui_component::{
 };
 use qqmusic_api::integration::UserPlaylistId;
 
-use super::navigation::{SearchCategory, SearchMoreResults, SharedSearchResource, lock_resource};
+use super::navigation::{
+    SearchCategory, SearchMoreResults, SearchVisibleCounts, SharedSearchResource, lock_resource,
+};
 use super::queue::{PlaybackQueue, insert_external_track_after_current};
 use super::{LyruneView, SEARCH_PAGE_SIZE, page_horizontal_padding};
 use crate::icons::media_icon_hsla;
 use crate::library::SearchCard;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
+
+pub(super) struct SearchPageState {
+    pub(super) query: String,
+    pub(super) resource: Option<SharedSearchResource>,
+    pub(super) visible_counts: SearchVisibleCounts,
+    pub(super) category: SearchCategory,
+    pub(super) scroll_offsets: [Pixels; 4],
+    pub(super) pending_scroll: bool,
+}
+
+impl Default for SearchPageState {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            resource: None,
+            visible_counts: SearchVisibleCounts::default(),
+            category: SearchCategory::Songs,
+            scroll_offsets: [px(0.); 4],
+            pending_scroll: false,
+        }
+    }
+}
 
 impl LyruneView {
     pub(super) fn start_search(
@@ -71,7 +95,8 @@ impl LyruneView {
                 // 离开页面后仍保存结果，返回历史页面时可直接复用；仅当前资源需要刷新界面。
                 lock_resource(&resource).apply_results(result);
                 if this
-                    .search_resource
+                    .search
+                    .resource
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &resource))
                 {
@@ -83,11 +108,11 @@ impl LyruneView {
     }
 
     pub(super) fn load_more_search(&mut self, cx: &mut Context<Self>) {
-        let Some(resource) = self.search_resource.clone() else {
+        let Some(resource) = self.search.resource.clone() else {
             return;
         };
-        let category = self.search_category;
-        let target_count = self.search_visible_counts.get(category) + SEARCH_PAGE_SIZE;
+        let category = self.search.category;
+        let target_count = self.search.visible_counts.get(category) + SEARCH_PAGE_SIZE;
         let Some(credential) = self.account.credential.clone() else {
             return;
         };
@@ -128,7 +153,7 @@ impl LyruneView {
             };
             // 可见数量属于页面历史，已加载数量属于共享资源；返回旧页面时不重复拉取已有数据。
             if len >= target_count || !has_more {
-                *self.search_visible_counts.get_mut(category) = target_count;
+                *self.search.visible_counts.get_mut(category) = target_count;
                 cx.notify();
                 return;
             }
@@ -136,8 +161,8 @@ impl LyruneView {
             state.error = None;
             offset
         };
-        *self.search_visible_counts.get_mut(category) = target_count;
-        let query = self.search_query.clone();
+        *self.search.visible_counts.get_mut(category) = target_count;
+        let query = self.search.query.clone();
         cx.notify();
 
         let task = RUNTIME.spawn(async move {
@@ -168,7 +193,8 @@ impl LyruneView {
             let _ = this.update(cx, |this, cx| {
                 lock_resource(&resource).apply_more_results(category, result);
                 if this
-                    .search_resource
+                    .search
+                    .resource
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &resource))
                 {
@@ -180,7 +206,7 @@ impl LyruneView {
     }
 
     pub(super) fn select_search_track(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(resource) = self.search_resource.as_ref() else {
+        let Some(resource) = self.search.resource.as_ref() else {
             return;
         };
         let Some(track) = lock_resource(resource)
@@ -203,7 +229,7 @@ impl LyruneView {
         }
 
         self.playback.pending_restore = None;
-        self.home_recommendation_loading = None;
+        self.home.recommendation_loading = None;
         let current_index = self.playback.current_track;
         // 搜索插队保留队列版本；已启动的同队列补页仍可追加，不等同于换歌单。
         let queue_index = if let Some(queue) = &mut self.playback.queue {
@@ -211,7 +237,7 @@ impl LyruneView {
         } else {
             self.playback.queue = Some(PlaybackQueue {
                 playlist_id: UserPlaylistId::Search {
-                    query: self.search_query.clone(),
+                    query: self.search.query.clone(),
                 },
                 tracks: vec![track],
                 modified: false,
@@ -231,7 +257,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let active_category = self.search_category;
+        let active_category = self.search.category;
         let tabs = SearchCategory::ALL
             .into_iter()
             .map(|category| {
@@ -257,16 +283,16 @@ impl LyruneView {
                             .child(category.label()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.search_scroll_offsets = this.current_search_scroll_offsets(cx);
-                        this.search_category = category;
-                        this.pending_search_scroll = true;
+                        this.search.scroll_offsets = this.current_search_scroll_offsets(cx);
+                        this.search.category = category;
+                        this.search.pending_scroll = true;
                         cx.notify();
                     }))
             })
             .collect::<Vec<_>>();
 
         let (results, search_loading, search_loading_more, search_error) =
-            self.search_resource.as_ref().map_or_else(
+            self.search.resource.as_ref().map_or_else(
                 || (None, false, false, None),
                 |resource| {
                     let state = lock_resource(resource);
@@ -282,7 +308,7 @@ impl LyruneView {
         let mut content = v_flex().w_full();
         let mut is_empty = false;
         if let Some(results) = results {
-            let card_results = match self.search_category {
+            let card_results = match self.search.category {
                 SearchCategory::Songs => {
                     is_empty = results.songs.items.is_empty();
                     let (playing_index, loading_index) =
@@ -391,8 +417,8 @@ impl LyruneView {
             && search_error.is_none();
         let virtual_list_active = song_list_active || card_results_active;
 
-        if virtual_list_active && self.pending_search_scroll {
-            let offset = point(px(0.), self.search_scroll_offsets[active_category.index()]);
+        if virtual_list_active && self.search.pending_scroll {
+            let offset = point(px(0.), self.search.scroll_offsets[active_category.index()]);
             if song_list_active {
                 self.search_track_table.update(cx, |table, cx| {
                     let scroll = &mut *table.vertical_scroll_handle.0.borrow_mut();
@@ -406,7 +432,7 @@ impl LyruneView {
                     cx.notify();
                 });
             }
-            self.pending_search_scroll = false;
+            self.search.pending_scroll = false;
         }
 
         let body_content = v_flex()
@@ -446,10 +472,10 @@ impl LyruneView {
                                     .px_4()
                                     .label("重新搜索")
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        let Some(resource) = this.search_resource.clone() else {
+                                        let Some(resource) = this.search.resource.clone() else {
                                             return;
                                         };
-                                        this.start_search(resource, this.search_query.clone(), cx)
+                                        this.start_search(resource, this.search.query.clone(), cx)
                                     })),
                             ),
                     )
@@ -463,7 +489,7 @@ impl LyruneView {
                         .items_center()
                         .justify_center()
                         .text_color(theme.muted_foreground)
-                        .child(format!("没有找到相关{}", self.search_category.label())),
+                        .child(format!("没有找到相关{}", self.search.category.label())),
                 )
             })
             .when(!search_loading && has_results && !is_empty, |this| {

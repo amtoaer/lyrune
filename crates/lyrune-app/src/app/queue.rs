@@ -177,7 +177,7 @@ impl LyruneView {
             cx.notify();
             return;
         };
-        self.home_recommendation_loading = Some(kind);
+        self.home.recommendation_loading = Some(kind);
         cx.notify();
 
         let task = RUNTIME.spawn(async move {
@@ -209,10 +209,10 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.home_recommendation_loading != Some(kind) {
+                if this.home.recommendation_loading != Some(kind) {
                     return;
                 }
-                this.home_recommendation_loading = None;
+                this.home.recommendation_loading = None;
                 match result {
                     Ok((tracks, continuation)) if !tracks.is_empty() => {
                         this.playback.pending_restore = None;
@@ -358,9 +358,10 @@ impl LyruneView {
         has_more: bool,
         cx: &mut Context<Self>,
     ) {
-        self.home_recommendation_loading = None;
+        self.home.recommendation_loading = None;
         let playlist_resource = self
-            .selected_playlist_resource
+            .playlist
+            .resource
             .as_ref()
             .filter(|resource| lock_resource(resource).playlist.id == playlist.id)
             .cloned();
@@ -434,7 +435,8 @@ impl LyruneView {
                     if let Some(resource) = playlist_resource {
                         let state = lock_resource(&resource);
                         let active = this
-                            .selected_playlist_resource
+                            .playlist
+                            .resource
                             .as_ref()
                             .is_some_and(|current| Arc::ptr_eq(current, &resource));
                         let snapshot = active.then(|| (state.tracks.clone(), state.has_more));

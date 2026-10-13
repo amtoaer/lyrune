@@ -314,7 +314,7 @@ impl LyruneView {
         // 这些计数器阻止晚到结果覆盖新状态，并不取消已发出的网络请求。
         self.account.invalidate_login();
         self.library_generation = self.library_generation.wrapping_add(1);
-        self.home_generation = self.home_generation.wrapping_add(1);
+        self.home.generation = self.home.generation.wrapping_add(1);
         self.playback.queue_generation = self.playback.queue_generation.wrapping_add(1);
         self.playback.load.invalidate();
         if let Some(audio) = &self.playback.audio {
@@ -329,17 +329,17 @@ impl LyruneView {
         self.library_loading = false;
         self.main_content = MainContent::Home;
         self.navigation_history.clear();
-        self.home_playlists.clear();
-        self.home_loading = false;
-        self.home_loaded = false;
-        self.home_error = None;
-        self.home_recommendation_loading = None;
-        self.search_resource = None;
-        self.selected_artist = None;
-        self.artist_resource = None;
-        self.selected_playlist_index = None;
-        self.selected_playlist = None;
-        self.selected_playlist_resource = None;
+        self.home.playlists.clear();
+        self.home.loading = false;
+        self.home.loaded = false;
+        self.home.error = None;
+        self.home.recommendation_loading = None;
+        self.search.resource = None;
+        self.artist.selected = None;
+        self.artist.resource = None;
+        self.playlist.selected_index = None;
+        self.playlist.selected = None;
+        self.playlist.resource = None;
         self.page_resource_cache = PageResourceCache::default();
         self.playback.queue = None;
         self.playback.recommendation_loading = false;

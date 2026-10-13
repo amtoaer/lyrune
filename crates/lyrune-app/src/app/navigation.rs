@@ -628,9 +628,9 @@ impl LyruneView {
     }
 
     pub(super) fn current_search_scroll_offsets(&self, cx: &App) -> [Pixels; 4] {
-        let mut offsets = self.search_scroll_offsets;
-        if !self.pending_search_scroll {
-            offsets[self.search_category.index()] = match self.search_category {
+        let mut offsets = self.search.scroll_offsets;
+        if !self.search.pending_scroll {
+            offsets[self.search.category.index()] = match self.search.category {
                 SearchCategory::Songs => {
                     self.search_track_table
                         .read(cx)
@@ -652,23 +652,24 @@ impl LyruneView {
             MainContent::Home => Some(NavigationPage::Home),
             MainContent::Settings => Some(NavigationPage::Settings),
             MainContent::Search => Some(NavigationPage::Search {
-                query: self.search_query.clone(),
-                category: self.search_category,
-                visible_counts: self.search_visible_counts,
+                query: self.search.query.clone(),
+                category: self.search.category,
+                visible_counts: self.search.visible_counts,
                 scroll_offsets: self.current_search_scroll_offsets(cx),
-                resource: self.search_resource.clone(),
+                resource: self.search.resource.clone(),
             }),
             MainContent::Artist => {
-                self.selected_artist
+                self.artist
+                    .selected
                     .clone()
                     .map(|artist| NavigationPage::Artist {
                         artist,
-                        visible_song_count: self.artist_visible_song_count,
-                        visible_album_count: self.artist_visible_album_count,
-                        resource: self.artist_resource.clone(),
+                        visible_song_count: self.artist.visible_song_count,
+                        visible_album_count: self.artist.visible_album_count,
+                        resource: self.artist.resource.clone(),
                     })
             }
-            MainContent::Playlist => self.selected_playlist.clone().map(|playlist| {
+            MainContent::Playlist => self.playlist.selected.clone().map(|playlist| {
                 let table = self.track_table.read(cx);
                 let scroll_position = PlaylistScrollPosition {
                     row: table.visible_range().rows().start,
@@ -682,9 +683,9 @@ impl LyruneView {
                 };
                 NavigationPage::Playlist {
                     playlist,
-                    selected_index: self.selected_playlist_index,
+                    selected_index: self.playlist.selected_index,
                     scroll_position,
-                    resource: self.selected_playlist_resource.clone(),
+                    resource: self.playlist.resource.clone(),
                 }
             }),
         }
@@ -706,22 +707,22 @@ impl LyruneView {
         match page {
             NavigationPage::Home => {
                 self.main_content = MainContent::Home;
-                self.search_resource = None;
-                self.artist_resource = None;
-                self.selected_playlist_resource = None;
+                self.search.resource = None;
+                self.artist.resource = None;
+                self.playlist.resource = None;
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(None, window, cx);
                 });
-                if !self.home_loaded && !self.home_loading {
+                if !self.home.loaded && !self.home.loading {
                     self.load_home(cx);
                 }
                 cx.notify();
             }
             NavigationPage::Settings => {
                 self.main_content = MainContent::Settings;
-                self.search_resource = None;
-                self.artist_resource = None;
-                self.selected_playlist_resource = None;
+                self.search.resource = None;
+                self.artist.resource = None;
+                self.playlist.resource = None;
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(None, window, cx);
                 });
@@ -735,21 +736,21 @@ impl LyruneView {
                 resource,
             } => {
                 self.main_content = MainContent::Search;
-                self.search_category = category;
-                self.search_visible_counts = visible_counts;
-                self.search_scroll_offsets = scroll_offsets;
-                self.pending_search_scroll = true;
-                self.artist_resource = None;
-                self.selected_playlist_resource = None;
+                self.search.category = category;
+                self.search.visible_counts = visible_counts;
+                self.search.scroll_offsets = scroll_offsets;
+                self.search.pending_scroll = true;
+                self.artist.resource = None;
+                self.playlist.resource = None;
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(None, window, cx);
                 });
                 self.search_input.update(cx, |input, cx| {
                     input.set_value(query.clone(), window, cx);
                 });
-                self.search_query = query.clone();
+                self.search.query = query.clone();
                 let resource = resource.unwrap_or_else(|| self.shared_search_resource(&query));
-                self.search_resource = Some(resource.clone());
+                self.search.resource = Some(resource.clone());
                 self.start_search(resource, query, cx);
             }
             NavigationPage::Artist {
@@ -761,10 +762,10 @@ impl LyruneView {
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(None, window, cx);
                 });
-                self.search_resource = None;
-                self.selected_playlist_resource = None;
-                self.artist_visible_song_count = visible_song_count;
-                self.artist_visible_album_count = visible_album_count;
+                self.search.resource = None;
+                self.playlist.resource = None;
+                self.artist.visible_song_count = visible_song_count;
+                self.artist.visible_album_count = visible_album_count;
                 let resource =
                     resource.unwrap_or_else(|| self.shared_artist_resource(artist.mid.as_str()));
                 self.open_artist(artist, resource, cx);

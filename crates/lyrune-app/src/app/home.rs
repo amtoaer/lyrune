@@ -12,32 +12,54 @@ use gpui_component::{
     spinner::Spinner,
     v_flex,
 };
-use qqmusic_api::integration::RecommendationKind;
+use qqmusic_api::integration::{RecommendationKind, UserPlaylist};
 
 use super::{LyruneView, page_horizontal_padding};
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::library::playlist_cover;
 use crate::runtime::RUNTIME;
 
+pub(super) struct HomePageState {
+    pub(super) playlists: Vec<UserPlaylist>,
+    pub(super) loading: bool,
+    pub(super) loaded: bool,
+    pub(super) error: Option<String>,
+    pub(super) generation: u64,
+    pub(super) recommendation_loading: Option<RecommendationKind>,
+}
+
+impl Default for HomePageState {
+    fn default() -> Self {
+        Self {
+            playlists: Vec::new(),
+            loading: false,
+            loaded: false,
+            error: None,
+            generation: 0,
+            recommendation_loading: None,
+        }
+    }
+}
+
 impl LyruneView {
     pub(super) fn load_home(&mut self, cx: &mut Context<Self>) {
-        if self.home_loading {
+        if self.home.loading {
             return;
         }
         let Some(credential) = self.account.credential.clone() else {
-            self.home_error = Some("请先登录 QQ 音乐".to_owned());
+            self.home.error = Some("请先登录 QQ 音乐".to_owned());
             cx.notify();
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
-            self.home_error = Some("QQ 音乐客户端不可用".to_owned());
+            self.home.error = Some("QQ 音乐客户端不可用".to_owned());
             cx.notify();
             return;
         };
-        self.home_generation = self.home_generation.wrapping_add(1);
-        let generation = self.home_generation;
-        self.home_loading = true;
-        self.home_error = None;
+        self.home.generation = self.home.generation.wrapping_add(1);
+        let generation = self.home.generation;
+        self.home.loading = true;
+        self.home.error = None;
         cx.notify();
 
         let task = RUNTIME.spawn(async move {
@@ -55,18 +77,18 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.home_generation != generation {
+                if this.home.generation != generation {
                     return;
                 }
-                this.home_loading = false;
+                this.home.loading = false;
                 match result {
                     Ok(page) => {
-                        this.home_loaded = true;
-                        this.home_playlists = page.items;
-                        this.home_error = None;
+                        this.home.loaded = true;
+                        this.home.playlists = page.items;
+                        this.home.error = None;
                     }
                     Err(error) => {
-                        this.home_error = Some(format!("加载主页推荐失败：{error:#}"));
+                        this.home.error = Some(format!("加载主页推荐失败：{error:#}"));
                     }
                 }
                 cx.notify();
@@ -83,7 +105,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        if self.home_loading && self.home_playlists.is_empty() {
+        if self.home.loading && self.home.playlists.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -94,8 +116,8 @@ impl LyruneView {
                 .child("正在加载主页推荐…")
                 .into_any_element();
         }
-        if self.home_playlists.is_empty()
-            && let Some(error) = self.home_error.clone()
+        if self.home.playlists.is_empty()
+            && let Some(error) = self.home.error.clone()
         {
             return v_flex()
                 .flex_1()
@@ -114,7 +136,7 @@ impl LyruneView {
                 )
                 .into_any_element();
         }
-        if self.home_loaded && self.home_playlists.is_empty() {
+        if self.home.loaded && self.home.playlists.is_empty() {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -147,7 +169,8 @@ impl LyruneView {
             px(784.)
         };
         let cards = self
-            .home_playlists
+            .home
+            .playlists
             .clone()
             .into_iter()
             .enumerate()
@@ -194,7 +217,7 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
-        let recommendation_loading = self.home_recommendation_loading.is_some();
+        let recommendation_loading = self.home.recommendation_loading.is_some();
         let radar_icon = media_icon_hsla(MediaIcon::Radar, theme.primary, px(25.));
         let guess_icon = media_icon_hsla(MediaIcon::Headphones, theme.primary, px(25.));
         let recommendation_cards = [
@@ -337,7 +360,7 @@ impl LyruneView {
                                                 .font_semibold()
                                                 .child("今日歌单"),
                                         )
-                                        .when_some(self.home_error.clone(), |header, error| {
+                                        .when_some(self.home.error.clone(), |header, error| {
                                             header.child(
                                                 div()
                                                     .text_xs()

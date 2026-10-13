@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use account::{Account, AccountState};
+use artist::ArtistPageState;
 use gpui::{prelude::*, *};
 use gpui_base::motion::{Transition, transition};
 use gpui_component::{
@@ -39,6 +40,9 @@ use gpui_component::{
     table::{TableEvent, TableState},
     v_flex,
 };
+use home::HomePageState;
+use playlists::PlaylistPageState;
+use search::SearchPageState;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -67,15 +71,10 @@ use lyrics_view::{
     CachedLyricsPanel, LYRIC_BACKGROUND_OVERLAY_OPACITY, LYRIC_EXPANSION_DURATION,
     LyricLayoutCache, LyricMotionState, interpolate_color,
 };
-use navigation::{
-    MainContent, NavigationHistory, PageResourceCache, PlaylistScrollPosition, SearchCategory,
-    SearchVisibleCounts, SharedArtistResource, SharedPlaylistResource, SharedSearchResource,
-};
+use navigation::{MainContent, NavigationHistory, PageResourceCache};
 use playback::Playback;
 use playlists::PlaylistPageKey;
-use qqmusic_api::integration::{
-    PlaylistPage, ProtocolClient, RecommendationKind, SearchArtist, UserPlaylist,
-};
+use qqmusic_api::integration::{PlaylistPage, ProtocolClient};
 
 const PAGE_SIZE: u64 = 100;
 const ARTIST_PAGE_SIZE: u64 = 5;
@@ -124,31 +123,14 @@ pub struct LyruneView {
     // 账号和浏览状态；当前浏览的歌单可以与下面的播放队列不同。
     account: Account,
     library_loading: bool,
-    selected_playlist_index: Option<usize>,
-    selected_playlist: Option<UserPlaylist>,
-    selected_playlist_resource: Option<SharedPlaylistResource>,
-    pending_playlist_scroll_position: Option<PlaylistScrollPosition>,
+    playlist: PlaylistPageState,
     library_generation: u64,
-    playlist_force_refresh: bool,
     playlist_page_requests: SingleFlight<PlaylistPageKey, PlaylistPage>,
     main_content: MainContent,
     navigation_history: NavigationHistory,
-    home_playlists: Vec<UserPlaylist>,
-    home_loading: bool,
-    home_loaded: bool,
-    home_error: Option<String>,
-    home_generation: u64,
-    home_recommendation_loading: Option<RecommendationKind>,
-    search_query: String,
-    search_resource: Option<SharedSearchResource>,
-    search_visible_counts: SearchVisibleCounts,
-    search_category: SearchCategory,
-    search_scroll_offsets: [Pixels; 4],
-    pending_search_scroll: bool,
-    selected_artist: Option<SearchArtist>,
-    artist_resource: Option<SharedArtistResource>,
-    artist_visible_song_count: usize,
-    artist_visible_album_count: usize,
+    home: HomePageState,
+    search: SearchPageState,
+    artist: ArtistPageState,
 
     // GPUI 控件由实体持有，子模块更新它们；订阅句柄保存在下方，不能创建后立即丢弃。
     playlist_list: Entity<ListState<PlaylistListDelegate>>,
@@ -524,31 +506,14 @@ impl LyruneView {
         let mut view = Self {
             account: Account::default(),
             library_loading: false,
-            selected_playlist_index: None,
-            selected_playlist: None,
-            selected_playlist_resource: None,
-            pending_playlist_scroll_position: None,
+            playlist: PlaylistPageState::default(),
             library_generation: 0,
-            playlist_force_refresh: false,
             playlist_page_requests: SingleFlight::default(),
             main_content: MainContent::Home,
             navigation_history: NavigationHistory::new(settings.navigation_history_limit),
-            home_playlists: Vec::new(),
-            home_loading: false,
-            home_loaded: false,
-            home_error: None,
-            home_generation: 0,
-            home_recommendation_loading: None,
-            search_query: String::new(),
-            search_resource: None,
-            search_visible_counts: SearchVisibleCounts::default(),
-            search_category: SearchCategory::Songs,
-            search_scroll_offsets: [px(0.); 4],
-            pending_search_scroll: false,
-            selected_artist: None,
-            artist_resource: None,
-            artist_visible_song_count: ARTIST_PAGE_SIZE as usize,
-            artist_visible_album_count: ARTIST_ALBUM_PAGE_SIZE as usize,
+            home: HomePageState::default(),
+            search: SearchPageState::default(),
+            artist: ArtistPageState::default(),
             playlist_list,
             track_table,
             search_track_table,

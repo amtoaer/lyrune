@@ -78,6 +78,26 @@ pub(super) async fn request_playlist_page(
         .await
 }
 
+pub(super) struct PlaylistPageState {
+    pub(super) selected_index: Option<usize>,
+    pub(super) selected: Option<UserPlaylist>,
+    pub(super) resource: Option<SharedPlaylistResource>,
+    pub(super) pending_scroll_position: Option<PlaylistScrollPosition>,
+    pub(super) force_refresh: bool,
+}
+
+impl Default for PlaylistPageState {
+    fn default() -> Self {
+        Self {
+            selected_index: None,
+            selected: None,
+            resource: None,
+            pending_scroll_position: None,
+            force_refresh: false,
+        }
+    }
+}
+
 impl LyruneView {
     pub(super) fn load_library(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
         let Some(credential) = self.account.credential.clone() else {
@@ -294,7 +314,7 @@ impl LyruneView {
     }
 
     pub(super) fn restore_pending_playlist_scroll(&mut self, cx: &mut Context<Self>) {
-        let Some(position) = self.pending_playlist_scroll_position else {
+        let Some(position) = self.playlist.pending_scroll_position else {
             return;
         };
         let target_row = {
@@ -309,7 +329,7 @@ impl LyruneView {
         let Some(target_row) = target_row else {
             return;
         };
-        self.pending_playlist_scroll_position = None;
+        self.playlist.pending_scroll_position = None;
         self.track_table.update(cx, |table, cx| {
             if target_row == position.row {
                 let scroll_state = &mut *table.vertical_scroll_handle.0.borrow_mut();
@@ -337,12 +357,12 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) {
         self.main_content = MainContent::Playlist;
-        self.search_resource = None;
-        self.artist_resource = None;
+        self.search.resource = None;
+        self.artist.resource = None;
 
-        self.playlist_force_refresh = force_refresh;
-        self.selected_playlist_index = selected_index;
-        self.pending_playlist_scroll_position = Some(scroll_position);
+        self.playlist.force_refresh = force_refresh;
+        self.playlist.selected_index = selected_index;
+        self.playlist.pending_scroll_position = Some(scroll_position);
         if let Some(index) = selected_index {
             self.playlist_list.update(cx, |list, cx| {
                 list.delegate_mut().set_selected(index);
@@ -370,9 +390,9 @@ impl LyruneView {
                 state.fetched_at_secs != 0,
             )
         };
-        self.selected_playlist_resource = Some(resource);
-        self.selected_playlist = Some(playlist.clone());
-        if let Some(index) = self.selected_playlist_index {
+        self.playlist.resource = Some(resource);
+        self.playlist.selected = Some(playlist.clone());
+        if let Some(index) = self.playlist.selected_index {
             self.playlist_list.update(cx, |list, cx| {
                 list.delegate_mut().update_playlist(index, playlist.clone());
                 cx.notify();
@@ -388,7 +408,7 @@ impl LyruneView {
         self.sync_table_playback_state(cx);
         cx.notify();
         self.prune_page_resources();
-        if !loaded || self.pending_playlist_scroll_position.is_some() {
+        if !loaded || self.playlist.pending_scroll_position.is_some() {
             self.load_playlist_page(cx);
         }
     }
@@ -397,7 +417,7 @@ impl LyruneView {
         let Some(credential) = self.account.credential.clone() else {
             return;
         };
-        let Some(resource) = self.selected_playlist_resource.clone() else {
+        let Some(resource) = self.playlist.resource.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -414,8 +434,8 @@ impl LyruneView {
             state.loading = true;
             (state.playlist.clone(), state.next_offset)
         };
-        let force_refresh = offset == 0 && self.playlist_force_refresh;
-        self.playlist_force_refresh = false;
+        let force_refresh = offset == 0 && self.playlist.force_refresh;
+        self.playlist.force_refresh = false;
         let requests = self.playlist_page_requests.clone();
         self.track_table.update(cx, |table, cx| {
             table.delegate_mut().set_loading(true);
@@ -437,7 +457,8 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 let active = this
-                    .selected_playlist_resource
+                    .playlist
+                    .resource
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &resource));
                 let mut state = lock_resource(&resource);
@@ -459,8 +480,8 @@ impl LyruneView {
                     active.then(|| (state.playlist.clone(), state.tracks.clone(), state.has_more));
                 drop(state);
                 if let Some((playlist, tracks, has_more)) = snapshot {
-                    this.selected_playlist = Some(playlist.clone());
-                    if let Some(index) = this.selected_playlist_index {
+                    this.playlist.selected = Some(playlist.clone());
+                    if let Some(index) = this.playlist.selected_index {
                         this.playlist_list.update(cx, |list, cx| {
                             list.delegate_mut().update_playlist(index, playlist.clone());
                             cx.notify();
@@ -476,7 +497,7 @@ impl LyruneView {
                         this.notify_error(error, cx);
                     }
                     this.restore_pending_playlist_scroll(cx);
-                    if this.pending_playlist_scroll_position.is_some() {
+                    if this.playlist.pending_scroll_position.is_some() {
                         this.load_playlist_page(cx);
                     }
                     this.sync_table_playback_state(cx);
@@ -495,7 +516,7 @@ impl LyruneView {
                 table.delegate().has_more(),
             )
         };
-        let Some(playlist) = self.selected_playlist.clone() else {
+        let Some(playlist) = self.playlist.selected.clone() else {
             return;
         };
         self.select_playlist_track(playlist, tracks, has_more, index, cx);
@@ -702,13 +723,9 @@ impl LyruneView {
             .playlists
             .get(&(account_id, UserPlaylistId::Liked))
             .and_then(Weak::upgrade);
-        let active_resource = self
-            .selected_playlist_resource
-            .as_ref()
-            .and_then(|resource| {
-                (lock_resource(resource).playlist.id == UserPlaylistId::Liked)
-                    .then(|| resource.clone())
-            });
+        let active_resource = self.playlist.resource.as_ref().and_then(|resource| {
+            (lock_resource(resource).playlist.id == UserPlaylistId::Liked).then(|| resource.clone())
+        });
         // 喜欢歌单可能同时被当前页和多条历史记录持有；逐个更新，并按 Arc 身份去重。
         let mut resources = self
             .navigation_history
@@ -734,7 +751,7 @@ impl LyruneView {
         let Some((playlist, tracks, has_more)) = active_snapshot else {
             return;
         };
-        self.selected_playlist = Some(playlist);
+        self.playlist.selected = Some(playlist);
         self.track_table.update(cx, |table, cx| {
             table.delegate_mut().set_tracks(tracks, has_more, false);
             table.clear_selection(cx);
@@ -751,7 +768,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let Some(playlist) = self.selected_playlist.clone() else {
+        let Some(playlist) = self.playlist.selected.clone() else {
             return div()
                 .h(px(220.))
                 .flex()

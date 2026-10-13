@@ -4,9 +4,10 @@ use super::lyrics_view::{
     lyric_edge_opacity, lyric_frame_is_due, lyric_horizontal_scroll_offset,
     lyric_position_for_frame_rate, readable_lyric_color,
 };
+use super::navigation::NavigationHistory;
 use super::navigation::{
-    ArtistResource, NavigationPage, PlaylistResource, SearchMoreResults, SearchResource,
-    resolved_playlist_scroll_row,
+    ArtistResource, NavigationPage, PlaylistResource, PlaylistScrollPosition, SearchCategory,
+    SearchMoreResults, SearchResource, SearchVisibleCounts, resolved_playlist_scroll_row,
 };
 use super::playback::{Playback, PlaybackLoad};
 use super::player_view::format_playback_time;
@@ -15,7 +16,6 @@ use super::queue::{
     PlaybackQueue, canonical_queue_track_index, insert_external_track_after_current,
     insert_track_after_current,
 };
-use super::{NavigationHistory, PlaylistScrollPosition, SearchCategory, SearchVisibleCounts};
 use crate::settings::{
     DEFAULT_NAVIGATION_HISTORY_LIMIT, LyricFrameRate, PersistedQueueContinuation,
 };

@@ -21,6 +21,24 @@ use crate::library::format_duration;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 
+pub(super) struct ArtistPageState {
+    pub(super) selected: Option<SearchArtist>,
+    pub(super) resource: Option<SharedArtistResource>,
+    pub(super) visible_song_count: usize,
+    pub(super) visible_album_count: usize,
+}
+
+impl Default for ArtistPageState {
+    fn default() -> Self {
+        Self {
+            selected: None,
+            resource: None,
+            visible_song_count: ARTIST_PAGE_SIZE as usize,
+            visible_album_count: ARTIST_ALBUM_PAGE_SIZE as usize,
+        }
+    }
+}
+
 impl LyruneView {
     pub(super) fn open_search_artist(
         &mut self,
@@ -46,8 +64,8 @@ impl LyruneView {
         resource: SharedArtistResource,
         cx: &mut Context<Self>,
     ) {
-        self.selected_artist = Some(artist);
-        self.artist_resource = Some(resource.clone());
+        self.artist.selected = Some(artist);
+        self.artist.resource = Some(resource.clone());
         self.main_content = MainContent::Artist;
         let (load_songs, load_albums) = {
             let state = lock_resource(&resource);
@@ -66,10 +84,10 @@ impl LyruneView {
     }
 
     fn load_artist_songs(&mut self, append: bool, cx: &mut Context<Self>) {
-        let Some(resource) = self.artist_resource.clone() else {
+        let Some(resource) = self.artist.resource.clone() else {
             return;
         };
-        let Some(artist) = self.selected_artist.clone() else {
+        let Some(artist) = self.artist.selected.clone() else {
             return;
         };
         let Some(credential) = self.account.credential.clone() else {
@@ -81,11 +99,12 @@ impl LyruneView {
             return;
         };
         if append {
-            self.artist_visible_song_count = self
-                .artist_visible_song_count
+            self.artist.visible_song_count = self
+                .artist
+                .visible_song_count
                 .saturating_add(ARTIST_PAGE_SIZE as usize);
         }
-        let target_count = self.artist_visible_song_count;
+        let target_count = self.artist.visible_song_count;
         let offset = {
             let mut state = lock_resource(&resource);
             if state.songs_loading || state.songs_loading_more {
@@ -124,7 +143,8 @@ impl LyruneView {
             let _ = this.update(cx, |this, cx| {
                 lock_resource(&resource).apply_songs(offset, result);
                 if this
-                    .artist_resource
+                    .artist
+                    .resource
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &resource))
                 {
@@ -136,10 +156,10 @@ impl LyruneView {
     }
 
     fn load_artist_albums(&mut self, append: bool, cx: &mut Context<Self>) {
-        let Some(resource) = self.artist_resource.clone() else {
+        let Some(resource) = self.artist.resource.clone() else {
             return;
         };
-        let Some(artist) = self.selected_artist.clone() else {
+        let Some(artist) = self.artist.selected.clone() else {
             return;
         };
         let Some(credential) = self.account.credential.clone() else {
@@ -151,11 +171,12 @@ impl LyruneView {
             return;
         };
         if append {
-            self.artist_visible_album_count = self
-                .artist_visible_album_count
+            self.artist.visible_album_count = self
+                .artist
+                .visible_album_count
                 .saturating_add(ARTIST_ALBUM_PAGE_SIZE as usize);
         }
-        let target_count = self.artist_visible_album_count;
+        let target_count = self.artist.visible_album_count;
         let offset = {
             let mut state = lock_resource(&resource);
             if state.albums_loading || state.albums_loading_more {
@@ -193,7 +214,8 @@ impl LyruneView {
             let _ = this.update(cx, |this, cx| {
                 lock_resource(&resource).apply_albums(offset, result);
                 if this
-                    .artist_resource
+                    .artist
+                    .resource
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &resource))
                 {
@@ -205,10 +227,10 @@ impl LyruneView {
     }
 
     fn select_artist_track(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(artist) = self.selected_artist.clone() else {
+        let Some(artist) = self.artist.selected.clone() else {
             return;
         };
-        let Some(resource) = self.artist_resource.as_ref() else {
+        let Some(resource) = self.artist.resource.as_ref() else {
             return;
         };
         let (tracks, has_more, track_count) = {
@@ -232,7 +254,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let Some(artist) = self.selected_artist.clone() else {
+        let Some(artist) = self.artist.selected.clone() else {
             return div().into_any_element();
         };
         let cover_size = if narrow {
@@ -254,7 +276,8 @@ impl LyruneView {
                 cx,
             ));
         let (track_count, has_tracks) =
-            self.artist_resource
+            self.artist
+                .resource
                 .as_ref()
                 .map_or((0, false), |resource| {
                     let state = lock_resource(resource);
@@ -389,7 +412,7 @@ impl LyruneView {
             albums_loading,
             albums_loading_more,
             album_error,
-        ) = self.artist_resource.as_ref().map_or_else(
+        ) = self.artist.resource.as_ref().map_or_else(
             || (None, false, false, None, None, false, false, None),
             |resource| {
                 let state = lock_resource(resource);
@@ -407,7 +430,7 @@ impl LyruneView {
         );
         let song_has_more = songs
             .as_ref()
-            .is_some_and(|page| page.items.len() > self.artist_visible_song_count || page.has_more);
+            .is_some_and(|page| page.items.len() > self.artist.visible_song_count || page.has_more);
         let song_body = if songs_loading && songs.is_none() {
             h_flex()
                 .h(px(92.))
@@ -436,7 +459,7 @@ impl LyruneView {
                 )
                 .into_any_element()
         } else if let Some(songs) = songs.filter(|page| !page.items.is_empty()) {
-            let visible = self.artist_visible_song_count.min(songs.items.len());
+            let visible = self.artist.visible_song_count.min(songs.items.len());
             self.render_artist_song_rows(songs.items[..visible].to_vec(), narrow, scale_factor, cx)
         } else {
             h_flex()
@@ -448,7 +471,7 @@ impl LyruneView {
         };
 
         let album_has_more = albums.as_ref().is_some_and(|page| {
-            page.items.len() > self.artist_visible_album_count || page.has_more
+            page.items.len() > self.artist.visible_album_count || page.has_more
         });
         let album_body = if albums_loading && albums.is_none() {
             h_flex()
@@ -478,7 +501,7 @@ impl LyruneView {
                 )
                 .into_any_element()
         } else if let Some(albums) = albums.filter(|page| !page.items.is_empty()) {
-            let visible = self.artist_visible_album_count.min(albums.items.len());
+            let visible = self.artist.visible_album_count.min(albums.items.len());
             self.render_artist_albums(albums.items[..visible].to_vec(), compact, scale_factor, cx)
         } else {
             h_flex()

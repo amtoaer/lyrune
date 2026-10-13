@@ -168,7 +168,7 @@ impl LyruneView {
         kind: RecommendationKind,
         cx: &mut Context<Self>,
     ) {
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             self.notify_error("请先登录 QQ 音乐", cx);
             cx.notify();
             return;
@@ -258,7 +258,7 @@ impl LyruneView {
         if !continuation.can_load_more() || (!force && remaining > 2) {
             return;
         }
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -390,7 +390,7 @@ impl LyruneView {
         if !has_more {
             return;
         }
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {

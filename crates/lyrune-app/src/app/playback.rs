@@ -166,7 +166,7 @@ impl LyruneView {
         autoplay: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             self.notify_error("请先登录 QQ 音乐", cx);
             cx.notify();
             return;

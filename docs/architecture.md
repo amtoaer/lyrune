@@ -8,11 +8,11 @@
 
 `app/` 中的 `impl LyruneView` 都作用于同一个 GPUI 实体。字段集中在入口，方法按职责放置；关闭窗口后，主程序仍可持有这个实体，继续播放。拆分状态所有者之前，需要同时考虑窗口重开、订阅和后台任务的寿命。
 
-当前阶段已确认保留文件布局和单个 `LyruneView`，先完善现有资源类型的职责，再由 `playback::PlaybackLoad` 归拢音源加载的请求版本、队列索引和自动播放意图。音频设备、队列、播放位置和 GPUI 任务仍由原处持有；更大范围的状态划分留待具体设计时确认。
+前一轮已由 `playback::PlaybackLoad` 归拢音源加载的请求版本、队列索引和自动播放意图。本轮允许重新划分内部状态与生命周期所有权，同时保留 GPUI 实体和窗口的现有寿命语义；实施清单与验证记录见 [refactor-progress.md](refactor-progress.md)。
 
 | 模块 | 负责什么 |
 | --- | --- |
-| [account](../crates/lyrune-app/src/app/account.rs) | 扫码登录、凭据恢复和刷新、退出及会话失效 |
+| [account](../crates/lyrune-app/src/app/account.rs) | `Account` 持有账号、凭据、二维码及登录版本；扫码登录、凭据恢复和刷新、退出及会话失效 |
 | [navigation](../crates/lyrune-app/src/app/navigation.rs) | 页面快照、前进后退、资源共享、结果应用与淘汰 |
 | [home](../crates/lyrune-app/src/app/home.rs)、[search](../crates/lyrune-app/src/app/search.rs)、[artist](../crates/lyrune-app/src/app/artist.rs) | 各页面的加载、分页和显示 |
 | [playlists](../crates/lyrune-app/src/app/playlists.rs) | 用户歌单、分页浏览、喜欢状态及页面同步 |

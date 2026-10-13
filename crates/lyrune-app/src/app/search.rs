@@ -32,7 +32,7 @@ impl LyruneView {
         query: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             lock_resource(&resource).error = Some("请先登录 QQ 音乐".to_owned());
             cx.notify();
             return;
@@ -88,7 +88,7 @@ impl LyruneView {
         };
         let category = self.search_category;
         let target_count = self.search_visible_counts.get(category) + SEARCH_PAGE_SIZE;
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {

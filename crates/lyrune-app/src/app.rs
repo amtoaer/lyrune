@@ -21,10 +21,9 @@ mod settings;
 mod tests;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use account::AccountState;
+use account::{Account, AccountState};
 use gpui::{prelude::*, *};
 use gpui_base::motion::{Transition, transition};
 use gpui_component::{
@@ -75,8 +74,7 @@ use navigation::{
 use playback::{PlaybackLoad, PlaybackLocation};
 use playlists::PlaylistPageKey;
 use qqmusic_api::integration::{
-    CredentialSession, PlaylistPage, ProtocolClient, Quality, RecommendationKind, SearchArtist,
-    UserPlaylist, UserProfile,
+    PlaylistPage, ProtocolClient, Quality, RecommendationKind, SearchArtist, UserPlaylist,
 };
 use queue::{PlaybackQueue, RepeatMode};
 
@@ -125,10 +123,7 @@ fn unix_timestamp_secs() -> u64 {
 
 pub struct LyruneView {
     // 账号和浏览状态；当前浏览的歌单可以与下面的播放队列不同。
-    account_state: AccountState,
-    credential: Option<CredentialSession>,
-    profile: Option<UserProfile>,
-    qr_image: Option<Arc<Image>>,
+    account: Account,
     library_loading: bool,
     selected_playlist_index: Option<usize>,
     selected_playlist: Option<UserPlaylist>,
@@ -234,10 +229,7 @@ pub struct LyruneView {
     pending_playback_restore: Option<PersistedPlayback>,
     last_playback_persisted_at: Instant,
 
-    login_message: String,
     window_handle: AnyWindowHandle,
-    login_generation: u64,
-    account_menu_open: bool,
     // 保存控件订阅句柄；下方两个窗口观察句柄由 attach_window 在窗口重开时替换。
     _subscriptions: Vec<Subscription>,
     _window_subscription: Option<Subscription>,
@@ -548,10 +540,7 @@ impl LyruneView {
 
         let color_theme = settings.active_color_theme(cx.window_appearance());
         let mut view = Self {
-            account_state: AccountState::Restoring,
-            credential: None,
-            profile: None,
-            qr_image: None,
+            account: Account::default(),
             library_loading: false,
             selected_playlist_index: None,
             selected_playlist: None,
@@ -646,10 +635,7 @@ impl LyruneView {
             repeat_mode: RepeatMode::Off,
             pending_playback_restore,
             last_playback_persisted_at: Instant::now(),
-            login_message: "正在读取已保存的登录状态…".to_owned(),
             window_handle: window.window_handle(),
-            login_generation: 0,
-            account_menu_open: false,
             _subscriptions: subscriptions,
             _window_subscription: None,
             _appearance_subscription: None,
@@ -865,8 +851,8 @@ impl LyruneView {
     }
 
     fn dismiss_popovers(&mut self, cx: &mut Context<Self>) {
-        if self.account_menu_open || self.quality_menu_open {
-            self.account_menu_open = false;
+        if self.account.menu_open || self.quality_menu_open {
+            self.account.menu_open = false;
             self.quality_menu_open = false;
             cx.notify();
         }
@@ -1091,7 +1077,7 @@ impl LyruneView {
         let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);
         let scale_factor = window.scale_factor();
-        let popover_open = self.account_menu_open || self.quality_menu_open;
+        let popover_open = self.account.menu_open || self.quality_menu_open;
         if self.cover_backdrop_fully_expanded {
             return v_flex()
                 .relative()
@@ -1392,7 +1378,7 @@ impl Render for LyruneView {
             .flex()
             .justify_center()
             .child(div().relative().left(px(-42.)).child(notification_list));
-        if self.account_state == AccountState::SignedIn {
+        if self.account.state == AccountState::SignedIn {
             div()
                 .relative()
                 .size_full()

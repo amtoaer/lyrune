@@ -72,7 +72,7 @@ impl LyruneView {
         let Some(artist) = self.selected_artist.clone() else {
             return;
         };
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -142,7 +142,7 @@ impl LyruneView {
         let Some(artist) = self.selected_artist.clone() else {
             return;
         };
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {

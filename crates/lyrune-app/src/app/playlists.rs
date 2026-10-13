@@ -80,7 +80,7 @@ pub(super) async fn request_playlist_page(
 
 impl LyruneView {
     pub(super) fn load_library(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             return;
         };
         let Some(account_id) = credential.snapshot().map(|credential| credential.music_id) else {
@@ -155,7 +155,7 @@ impl LyruneView {
         force_refresh: bool,
         cx: &mut Context<Self>,
     ) {
-        self.profile = Some(profile);
+        self.account.profile = Some(profile);
         let count = playlists.len();
         let viewed_index = self
             .settings
@@ -393,7 +393,7 @@ impl LyruneView {
     }
 
     pub(super) fn load_playlist_page(&mut self, cx: &mut Context<Self>) {
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             return;
         };
         let Some(resource) = self.selected_playlist_resource.clone() else {
@@ -524,7 +524,7 @@ impl LyruneView {
         if self.liked_tracks.contains_key(&mid) || self.liked_state_loading.contains(&mid) {
             return;
         }
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             return;
         };
         let Some(account_id) = credential.snapshot().map(|credential| credential.music_id) else {
@@ -612,7 +612,7 @@ impl LyruneView {
         if self.liked_toggle_loading.contains(&mid) {
             return;
         }
-        let Some(credential) = self.credential.clone() else {
+        let Some(credential) = self.account.credential.clone() else {
             return;
         };
         let Some(account_id) = credential.snapshot().map(|credential| credential.music_id) else {
@@ -781,7 +781,8 @@ impl LyruneView {
             .then(|| playlist.owner.clone())
             .or_else(|| {
                 if owned_by_profile {
-                    self.profile
+                    self.account
+                        .profile
                         .as_ref()
                         .map(|profile| profile.nickname.clone())
                 } else {
@@ -790,7 +791,7 @@ impl LyruneView {
             });
         let owner_avatar_url = playlist.owner_avatar_url.clone().or_else(|| {
             owned_by_profile
-                .then(|| self.profile.as_ref()?.avatar_url.clone())
+                .then(|| self.account.profile.as_ref()?.avatar_url.clone())
                 .flatten()
         });
         let owner_identity = owner.zip(owner_avatar_url);

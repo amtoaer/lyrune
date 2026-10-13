@@ -822,7 +822,7 @@ impl LyruneView {
         let target = NavigationPage::Settings;
         let current = self.current_navigation_page(cx);
         self.record_navigation(current, &target, window, cx);
-        self.account_menu_open = false;
+        self.account.menu_open = false;
         self.apply_navigation_page(target, window, cx);
     }
 

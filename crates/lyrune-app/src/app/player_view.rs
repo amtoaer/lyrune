@@ -87,7 +87,7 @@ impl LyruneView {
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.quality_menu_open = !this.quality_menu_open;
-                        this.account_menu_open = false;
+                        this.account.menu_open = false;
                         cx.notify();
                     })),
             )

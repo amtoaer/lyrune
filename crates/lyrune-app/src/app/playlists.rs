@@ -221,7 +221,7 @@ impl LyruneView {
             return;
         };
 
-        if let Some(account_id) = self.account_id() {
+        if let Some(account_id) = self.account.id() {
             let view = PersistedLibraryView {
                 account_id,
                 playlist_id: playlist.id.clone(),
@@ -566,7 +566,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 this.liked_state_loading.remove(&mid);
-                if this.account_id().is_none_or(|id| id != account_id) {
+                if this.account.id().is_none_or(|id| id != account_id) {
                     return;
                 }
                 match result {
@@ -648,7 +648,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 this.liked_toggle_loading.remove(&mid);
-                if this.account_id().is_none_or(|id| id != account_id) {
+                if this.account.id().is_none_or(|id| id != account_id) {
                     return;
                 }
                 match result {

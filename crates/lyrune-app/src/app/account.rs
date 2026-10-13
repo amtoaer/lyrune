@@ -24,7 +24,7 @@ use crate::runtime::RUNTIME;
 use super::LyruneView;
 use super::navigation::{MainContent, PageResourceCache};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AccountState {
     Restoring,
     SignedOut,
@@ -53,6 +53,54 @@ impl Default for Account {
             generation: 0,
             message: "正在读取已保存的登录状态…".to_owned(),
             menu_open: false,
+        }
+    }
+}
+
+impl Account {
+    fn begin_login(&mut self) -> Option<u64> {
+        if matches!(
+            self.state,
+            AccountState::Restoring | AccountState::SigningIn
+        ) {
+            return None;
+        }
+
+        let generation = self.invalidate_login();
+        self.state = AccountState::SigningIn;
+        self.qr_image = None;
+        self.message = "正在向 QQ 音乐申请二维码…".to_owned();
+        Some(generation)
+    }
+
+    fn invalidate_login(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.generation
+    }
+
+    fn is_current_session(&self, generation: u64, credential: &CredentialSession) -> bool {
+        // 账号相同不代表会话相同。这里不检查 snapshot：当前会话被撤销时，
+        // 凭据监听仍要处理该会话的通知，才能清理界面并提示重新登录。
+        self.generation == generation
+            && self
+                .credential
+                .as_ref()
+                .is_some_and(|current| current.ptr_eq(credential))
+    }
+
+    fn snapshot(&self) -> Option<Arc<QqCredential>> {
+        self.credential.as_ref()?.snapshot()
+    }
+
+    pub(super) fn id(&self) -> Option<u64> {
+        self.snapshot().map(|credential| credential.music_id)
+    }
+
+    fn revoke(&mut self) {
+        // 版本失效和音频停止由跨领域退出流程先完成；这里不重置版本或删除钥匙串。
+        self.state = AccountState::SignedOut;
+        if let Some(credential) = self.credential.take() {
+            credential.revoke();
         }
     }
 }
@@ -92,18 +140,9 @@ impl LyruneView {
     }
 
     fn begin_login(&mut self, cx: &mut Context<Self>) {
-        if matches!(
-            self.account.state,
-            AccountState::Restoring | AccountState::SigningIn
-        ) {
+        let Some(generation) = self.account.begin_login() else {
             return;
-        }
-
-        self.account.generation = self.account.generation.wrapping_add(1);
-        let generation = self.account.generation;
-        self.account.state = AccountState::SigningIn;
-        self.account.qr_image = None;
-        self.account.message = "正在向 QQ 音乐申请二维码…".to_owned();
+        };
         cx.notify();
 
         let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -199,14 +238,7 @@ impl LyruneView {
             while updates.changed().await.is_ok() {
                 let keep_watching = this
                     .update(cx, |this, cx| {
-                        // 同一账号也可能建立新会话；版本和会话身份都匹配时才能处理凭据刷新。
-                        if this.account.generation != generation
-                            || this
-                                .account
-                                .credential
-                                .as_ref()
-                                .is_none_or(|current| !current.ptr_eq(&credential))
-                        {
+                        if !this.account.is_current_session(generation, &credential) {
                             return false;
                         }
                         let Some(current) = credential.snapshot() else {
@@ -249,13 +281,8 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.account.generation != generation
+                if !this.account.is_current_session(generation, &credential)
                     || credential.snapshot().is_none()
-                    || this
-                        .account
-                        .credential
-                        .as_ref()
-                        .is_none_or(|current| !current.ptr_eq(&credential))
                 {
                     return;
                 }
@@ -266,18 +293,9 @@ impl LyruneView {
         .detach();
     }
 
-    fn credential_snapshot(&self) -> Option<Arc<QqCredential>> {
-        self.account.credential.as_ref()?.snapshot()
-    }
-
-    pub(super) fn account_id(&self) -> Option<u64> {
-        self.credential_snapshot()
-            .map(|credential| credential.music_id)
-    }
-
     fn logout(&mut self, cx: &mut Context<Self>) {
         if let (Some(client), Some(credential)) =
-            (self.protocol_client.clone(), self.credential_snapshot())
+            (self.protocol_client.clone(), self.account.snapshot())
         {
             drop(RUNTIME.spawn(async move {
                 let _ = client.logout(&credential).await;
@@ -294,7 +312,7 @@ impl LyruneView {
 
     fn clear_account_session(&mut self, restart_login: bool, cx: &mut Context<Self>) {
         // 这些计数器阻止晚到结果覆盖新状态，并不取消已发出的网络请求。
-        self.account.generation = self.account.generation.wrapping_add(1);
+        self.account.invalidate_login();
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home_generation = self.home_generation.wrapping_add(1);
         self.queue_generation = self.queue_generation.wrapping_add(1);
@@ -302,10 +320,7 @@ impl LyruneView {
         if let Some(audio) = &self.audio {
             audio.stop();
         }
-        self.account.state = AccountState::SignedOut;
-        if let Some(credential) = self.account.credential.take() {
-            credential.revoke();
-        }
+        self.account.revoke();
         self.liked_tracks.clear();
         self.liked_state_loading.clear();
         self.liked_toggle_loading.clear();
@@ -533,5 +548,71 @@ impl LyruneView {
                 )
             })
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Account, AccountState};
+    use qqmusic_api::integration::{CredentialSession, QqCredential};
+
+    #[test]
+    fn test_login_attempts() {
+        let mut account = Account::default();
+        assert_eq!(account.begin_login(), None);
+
+        account.state = AccountState::SignedOut;
+        let first = account.begin_login().expect("start QR login");
+        assert_eq!(account.state, AccountState::SigningIn);
+        assert_eq!(account.begin_login(), None);
+        assert_eq!(account.generation, first);
+
+        // 失败或过期后可再次发起请求；退出后的请求也不能复用之前的版本。
+        account.state = AccountState::SignedOut;
+        let retry = account.begin_login().expect("retry QR login");
+        assert_ne!(retry, first);
+        account.invalidate_login();
+        account.revoke();
+        let next = account.begin_login().expect("login after logout");
+        assert_ne!(next, retry);
+    }
+
+    #[test]
+    fn test_session_identity() {
+        let credential: QqCredential = serde_json::from_value(serde_json::json!({
+            "music_id": 123,
+            "music_key": "music-key",
+            "refresh_token": "refresh-token",
+            "refresh_key": "refresh-key",
+            "login_type": 2,
+            "expires_at": null,
+            "client_guid": "client-guid"
+        }))
+        .expect("credential fixture");
+        let first = CredentialSession::new(credential.clone());
+        let replacement = CredentialSession::new(credential);
+        let mut account = Account {
+            state: AccountState::SignedIn,
+            credential: Some(first.clone()),
+            ..Account::default()
+        };
+        let generation = account.generation;
+        assert!(account.is_current_session(generation, &first));
+        assert_eq!(account.id(), Some(123));
+
+        account.credential = Some(replacement.clone());
+        assert!(!account.is_current_session(generation, &first));
+        assert!(account.is_current_session(generation, &replacement));
+        replacement.revoke();
+        assert_eq!(account.id(), None);
+        assert!(account.is_current_session(generation, &replacement));
+
+        account.invalidate_login();
+        assert!(!account.is_current_session(generation, &replacement));
+        account.credential = Some(first.clone());
+        account.revoke();
+        assert_eq!(account.state, AccountState::SignedOut);
+        assert!(account.credential.is_none());
+        assert!(first.snapshot().is_none());
     }
 }

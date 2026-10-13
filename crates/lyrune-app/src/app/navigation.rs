@@ -561,7 +561,7 @@ impl NavigationHistory {
 
 impl LyruneView {
     fn shared_search_resource(&mut self, query: &str) -> SharedSearchResource {
-        let account_id = self.account_id().unwrap_or(0);
+        let account_id = self.account.id().unwrap_or(0);
         let key = (account_id, query.to_owned());
         if let Some(resource) = self
             .page_resource_cache
@@ -579,7 +579,7 @@ impl LyruneView {
     }
 
     pub(super) fn shared_artist_resource(&mut self, artist_mid: &str) -> SharedArtistResource {
-        let account_id = self.account_id().unwrap_or(0);
+        let account_id = self.account.id().unwrap_or(0);
         let key = (account_id, artist_mid.to_owned());
         if let Some(resource) = self
             .page_resource_cache
@@ -602,7 +602,7 @@ impl LyruneView {
         force_refresh: bool,
         cache_policy: PlaylistCachePolicy,
     ) -> SharedPlaylistResource {
-        let account_id = self.account_id().unwrap_or(0);
+        let account_id = self.account.id().unwrap_or(0);
         let key = (account_id, playlist.id.clone());
         if !force_refresh
             && let Some(resource) = self

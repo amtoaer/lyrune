@@ -470,7 +470,7 @@ impl LyruneView {
     }
 
     pub(super) fn persist_current_playback(&mut self) {
-        let Some(account_id) = self.account_id() else {
+        let Some(account_id) = self.account.id() else {
             return;
         };
         let Some(playlist_id) = self

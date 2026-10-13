@@ -183,6 +183,7 @@ impl CachedImageCache {
     }
 
     fn evict_oldest(&mut self, window: &mut Window, cx: &mut App) {
+        // usages 与 items 同步增删，最近使用的键放在开头；这里的 expect 检查内部一致性。
         let oldest = self.usages.pop().expect("非空图片缓存应包含最旧条目");
         let mut item = self
             .items

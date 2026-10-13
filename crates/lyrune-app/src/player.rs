@@ -156,6 +156,8 @@ impl AudioPlayer {
 }
 
 fn position_since_replace(raw_position: Duration, origin: &mut Option<Duration>) -> Duration {
+    // 替换音源后底层时钟可能暂时仍属于上一首，先减去旧原点；
+    // 观察到时钟回落后才改用新音源的相对进度，避免短暂跳到上一首的位置。
     let Some(previous_position) = *origin else {
         return raw_position;
     };

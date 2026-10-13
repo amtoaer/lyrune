@@ -689,6 +689,8 @@ impl AudioCache {
         Ok(())
     }
 
+    // 测试入口跳过远端校验，直接验证 seek 发出的 Range 请求且不发送 HEAD；
+    // 正式播放仍通过 prepare_with_fallbacks 走远端校验流程。
     #[cfg(test)]
     pub async fn prepare_for_seek(
         &self,

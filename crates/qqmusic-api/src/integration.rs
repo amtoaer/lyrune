@@ -95,6 +95,7 @@ impl CredentialSession {
         }
 
         let _refresh = self.inner.refresh_gate.lock().await;
+        // 等锁期间其他请求可能已刷新或注销会话，需要重新读取并判断。
         let credential = self.snapshot().ok_or(CredentialError::Revoked)?;
         if !credential.is_expiring() {
             return Ok(credential);
@@ -109,6 +110,7 @@ impl CredentialSession {
                 return Err(error);
             }
         };
+        // 网络刷新期间仍可能注销；仅替换最初的凭据快照，避免让旧会话重新生效。
         let previous = self
             .inner
             .current

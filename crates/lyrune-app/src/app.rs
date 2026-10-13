@@ -184,15 +184,20 @@ pub struct LyruneView {
     audio_cache_maintenance: Option<JoinHandle<()>>,
     playback_queue: Option<PlaybackQueue>,
     queue_generation: u64,
+    // loading 可在当前歌曲播放时预取；waiting 表示已到队尾，结果到达后需要续播。
     queue_recommendation_loading: bool,
     queue_waiting_for_recommendation: bool,
     // 这两个索引属于 playback_queue，不是当前页面表格中的行号。
     current_track: Option<usize>,
     loading_track: Option<usize>,
+    // 加载中再次切换音质时沿用原来的播放意图，此时不能从已停止的音频设备推断。
     loading_autoplay: bool,
+    // 音质列表解析完成后仍可能在准备音频流/解码，因此不等同于 loading_track。
     resolving_qualities: bool,
+    // 表示音源已装入播放器；暂停时仍为 true，用于区分暂停与尚未开始/已经停止。
     playback_started: bool,
     playback_location: Option<PlaybackLocation>,
+    // 记录回退后实际采用的音质；用户偏好保存在 settings.playback_quality。
     active_quality: Quality,
     available_qualities: Vec<Quality>,
     quality_menu_open: bool,

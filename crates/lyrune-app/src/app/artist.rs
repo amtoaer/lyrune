@@ -46,7 +46,9 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let resource = self.shared_artist_resource(&artist.mid);
+        let resource = self
+            .page_resource_cache
+            .artist(self.account.id().unwrap_or(0), &artist.mid);
         let target = NavigationPage::Artist {
             artist,
             visible_song_count: ARTIST_PAGE_SIZE as usize,

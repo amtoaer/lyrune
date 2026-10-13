@@ -13,9 +13,9 @@
 | 模块 | 负责什么 |
 | --- | --- |
 | [account](../crates/lyrune-app/src/app/account.rs) | `Account` 持有账号、凭据、二维码及登录版本；扫码登录、凭据恢复和刷新、退出及会话失效 |
-| [navigation](../crates/lyrune-app/src/app/navigation.rs) | 页面快照、前进后退、资源共享、结果应用与淘汰 |
-| [home](../crates/lyrune-app/src/app/home.rs)、[search](../crates/lyrune-app/src/app/search.rs)、[artist](../crates/lyrune-app/src/app/artist.rs) | 各页面的加载、分页和显示 |
-| [playlists](../crates/lyrune-app/src/app/playlists.rs) | 用户歌单、分页浏览、喜欢状态及页面同步 |
+| [navigation](../crates/lyrune-app/src/app/navigation.rs) | 页面快照、前进后退；`PageResourceCache` 管账号隔离的弱引用索引、获取和淘汰；资源类型管理结果应用 |
+| [home](../crates/lyrune-app/src/app/home.rs)、[search](../crates/lyrune-app/src/app/search.rs)、[artist](../crates/lyrune-app/src/app/artist.rs) | 各页面的 `*PageState` 持有当前页状态，视图方法负责加载、分页和显示 |
+| [playlists](../crates/lyrune-app/src/app/playlists.rs) | `PlaylistPageState` 持有当前歌单与滚动恢复；用户歌单、分页浏览、喜欢状态及页面同步 |
 | [queue](../crates/lyrune-app/src/app/queue.rs) | 播放队列的建立、插入、补全、恢复和推荐续播 |
 | [playback](../crates/lyrune-app/src/app/playback.rs) | `Playback` 持有音频设备、队列、当前曲、位置、音质和恢复信息；音源加载、音源选择、音质回退、解码准备、播放/暂停/跳歌/seek |
 | [playback_sync](../crates/lyrune-app/src/app/playback_sync.rs) | 窗口进度、曲终处理、定期保存、MPRIS 和休眠抑制 |
@@ -56,6 +56,12 @@
 | 凭据刷新监听 | 安装会话时先订阅，再保存当前快照；刷新后保存新快照，撤销后清理账户并提示 | 登录版本与句柄身份同时匹配；同账号的新会话也会使旧监听失效；当前会话 snapshot 为空时仍必须接收撤销通知 |
 | 缓存凭据验证 | 使用缓存音乐库时进行 30 秒限时验证，仅失败时提示 | 版本和会话身份匹配且 snapshot 仍有效时才提示 |
 | 保存/删除凭据 | 保存捕获快照，删除在退出清理末尾启动；均通过阻塞线程执行 | 保留原独立后台任务与错误通知，不新增写入排序或版本过滤 |
+
+### 浏览状态和请求边界
+
+搜索、歌手、首页和歌单各自的 `*PageState` 保存当前页选择、可见数量或加载状态。它们没有自己的任务句柄；GPUI 实体在各页面模块编排任务。`NavigationPage` 是历史快照，保存资源强引用而不复制请求结果；控件仍由视图持有。页面切换只清除原来会清除的字段，不用整个页面 Default 代替，以免丢失历史选择或重用版本。
+
+搜索/歌手请求先更新共享资源，再比较当前页资源的 Arc 身份；离开页面不取消请求。歌单页面与播放补全通过既有 SingleFlight 共享请求，资源的 offset 规则拒绝重复回填。库目录和首页请求分别比较自己的版本；喜欢操作继续比较账号 ID。缓存保存策略、错误状态和这些过滤条件均不统一成通用框架。
 
 ### 播放任务的边界
 

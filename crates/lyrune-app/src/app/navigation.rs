@@ -378,13 +378,64 @@ pub(super) type SharedPlaylistResource = Arc<Mutex<PlaylistResource>>;
 #[derive(Default)]
 pub(super) struct PageResourceCache {
     // 强引用来自当前页、历史记录和未结束的请求；索引本身不延长页面资源的寿命。
-    pub(super) searches: HashMap<(u64, String), Weak<Mutex<SearchResource>>>,
-    pub(super) artists: HashMap<(u64, String), Weak<Mutex<ArtistResource>>>,
-    pub(super) playlists: HashMap<(u64, UserPlaylistId), Weak<Mutex<PlaylistResource>>>,
+    searches: HashMap<(u64, String), Weak<Mutex<SearchResource>>>,
+    artists: HashMap<(u64, String), Weak<Mutex<ArtistResource>>>,
+    playlists: HashMap<(u64, UserPlaylistId), Weak<Mutex<PlaylistResource>>>,
 }
 
 impl PageResourceCache {
-    fn prune(&mut self) {
+    pub(super) fn search(&mut self, account_id: u64, query: &str) -> SharedSearchResource {
+        let key = (account_id, query.to_owned());
+        if let Some(resource) = self.searches.get(&key).and_then(Weak::upgrade) {
+            return resource;
+        }
+        let resource = Arc::new(Mutex::new(SearchResource::default()));
+        self.searches.insert(key, Arc::downgrade(&resource));
+        resource
+    }
+
+    pub(super) fn artist(&mut self, account_id: u64, artist_mid: &str) -> SharedArtistResource {
+        let key = (account_id, artist_mid.to_owned());
+        if let Some(resource) = self.artists.get(&key).and_then(Weak::upgrade) {
+            return resource;
+        }
+        let resource = Arc::new(Mutex::new(ArtistResource::default()));
+        self.artists.insert(key, Arc::downgrade(&resource));
+        resource
+    }
+
+    pub(super) fn playlist(
+        &mut self,
+        account_id: u64,
+        playlist: UserPlaylist,
+        force_refresh: bool,
+        cache_policy: PlaylistCachePolicy,
+    ) -> SharedPlaylistResource {
+        let key = (account_id, playlist.id.clone());
+        if !force_refresh
+            && let Some(resource) = self.playlists.get(&key).and_then(Weak::upgrade)
+            && (matches!(cache_policy, PlaylistCachePolicy::AllowStale)
+                || lock_resource(&resource).is_fresh(unix_timestamp_secs()))
+        {
+            return resource;
+        }
+
+        let resource = Arc::new(Mutex::new(PlaylistResource::empty(playlist)));
+        self.playlists.insert(key, Arc::downgrade(&resource));
+        resource
+    }
+
+    pub(super) fn cached_playlist(
+        &self,
+        account_id: u64,
+        id: &UserPlaylistId,
+    ) -> Option<SharedPlaylistResource> {
+        self.playlists
+            .get(&(account_id, id.clone()))
+            .and_then(Weak::upgrade)
+    }
+
+    pub(super) fn prune(&mut self) {
         self.searches
             .retain(|_, resource| resource.strong_count() > 0);
         self.artists
@@ -560,73 +611,6 @@ impl NavigationHistory {
 }
 
 impl LyruneView {
-    fn shared_search_resource(&mut self, query: &str) -> SharedSearchResource {
-        let account_id = self.account.id().unwrap_or(0);
-        let key = (account_id, query.to_owned());
-        if let Some(resource) = self
-            .page_resource_cache
-            .searches
-            .get(&key)
-            .and_then(Weak::upgrade)
-        {
-            return resource;
-        }
-        let resource = Arc::new(Mutex::new(SearchResource::default()));
-        self.page_resource_cache
-            .searches
-            .insert(key, Arc::downgrade(&resource));
-        resource
-    }
-
-    pub(super) fn shared_artist_resource(&mut self, artist_mid: &str) -> SharedArtistResource {
-        let account_id = self.account.id().unwrap_or(0);
-        let key = (account_id, artist_mid.to_owned());
-        if let Some(resource) = self
-            .page_resource_cache
-            .artists
-            .get(&key)
-            .and_then(Weak::upgrade)
-        {
-            return resource;
-        }
-        let resource = Arc::new(Mutex::new(ArtistResource::default()));
-        self.page_resource_cache
-            .artists
-            .insert(key, Arc::downgrade(&resource));
-        resource
-    }
-
-    pub(super) fn shared_playlist_resource(
-        &mut self,
-        playlist: UserPlaylist,
-        force_refresh: bool,
-        cache_policy: PlaylistCachePolicy,
-    ) -> SharedPlaylistResource {
-        let account_id = self.account.id().unwrap_or(0);
-        let key = (account_id, playlist.id.clone());
-        if !force_refresh
-            && let Some(resource) = self
-                .page_resource_cache
-                .playlists
-                .get(&key)
-                .and_then(Weak::upgrade)
-            && (matches!(cache_policy, PlaylistCachePolicy::AllowStale)
-                || lock_resource(&resource).is_fresh(unix_timestamp_secs()))
-        {
-            return resource;
-        }
-
-        let resource = Arc::new(Mutex::new(PlaylistResource::empty(playlist)));
-        self.page_resource_cache
-            .playlists
-            .insert(key, Arc::downgrade(&resource));
-        resource
-    }
-
-    pub(super) fn prune_page_resources(&mut self) {
-        self.page_resource_cache.prune();
-    }
-
     pub(super) fn current_search_scroll_offsets(&self, cx: &App) -> [Pixels; 4] {
         let mut offsets = self.search.scroll_offsets;
         if !self.search.pending_scroll {
@@ -749,7 +733,10 @@ impl LyruneView {
                     input.set_value(query.clone(), window, cx);
                 });
                 self.search.query = query.clone();
-                let resource = resource.unwrap_or_else(|| self.shared_search_resource(&query));
+                let resource = resource.unwrap_or_else(|| {
+                    self.page_resource_cache
+                        .search(self.account.id().unwrap_or(0), &query)
+                });
                 self.search.resource = Some(resource.clone());
                 self.start_search(resource, query, cx);
             }
@@ -766,8 +753,10 @@ impl LyruneView {
                 self.playlist.resource = None;
                 self.artist.visible_song_count = visible_song_count;
                 self.artist.visible_album_count = visible_album_count;
-                let resource =
-                    resource.unwrap_or_else(|| self.shared_artist_resource(artist.mid.as_str()));
+                let resource = resource.unwrap_or_else(|| {
+                    self.page_resource_cache
+                        .artist(self.account.id().unwrap_or(0), artist.mid.as_str())
+                });
                 self.open_artist(artist, resource, cx);
             }
             NavigationPage::Playlist {
@@ -790,7 +779,7 @@ impl LyruneView {
                 );
             }
         }
-        self.prune_page_resources();
+        self.page_resource_cache.prune();
     }
 
     pub(super) fn record_navigation(
@@ -833,7 +822,9 @@ impl LyruneView {
             return;
         }
         window.blur();
-        let resource = self.shared_search_resource(&query);
+        let resource = self
+            .page_resource_cache
+            .search(self.account.id().unwrap_or(0), &query);
         let target = NavigationPage::Search {
             query,
             category: SearchCategory::Songs,

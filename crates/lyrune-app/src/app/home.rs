@@ -19,6 +19,7 @@ use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::library::playlist_cover;
 use crate::runtime::RUNTIME;
 
+#[derive(Default)]
 pub(super) struct HomePageState {
     pub(super) playlists: Vec<UserPlaylist>,
     pub(super) loading: bool,
@@ -26,19 +27,6 @@ pub(super) struct HomePageState {
     pub(super) error: Option<String>,
     pub(super) generation: u64,
     pub(super) recommendation_loading: Option<RecommendationKind>,
-}
-
-impl Default for HomePageState {
-    fn default() -> Self {
-        Self {
-            playlists: Vec::new(),
-            loading: false,
-            loaded: false,
-            error: None,
-            generation: 0,
-            recommendation_loading: None,
-        }
-    }
 }
 
 impl LyruneView {

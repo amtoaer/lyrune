@@ -207,7 +207,7 @@ impl LyruneView {
 
         self.settings.navigation_history_limit = value;
         self.navigation_history.set_limit(value);
-        self.prune_page_resources();
+        self.page_resource_cache.prune();
         self.persist_settings();
         cx.notify();
     }

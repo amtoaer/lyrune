@@ -1,6 +1,6 @@
 //! 用户歌单、分页浏览与喜欢状态。页面资源和播放队列可共享分页请求，但各自保存状态。
 
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -78,24 +78,13 @@ pub(super) async fn request_playlist_page(
         .await
 }
 
+#[derive(Default)]
 pub(super) struct PlaylistPageState {
     pub(super) selected_index: Option<usize>,
     pub(super) selected: Option<UserPlaylist>,
     pub(super) resource: Option<SharedPlaylistResource>,
     pub(super) pending_scroll_position: Option<PlaylistScrollPosition>,
     pub(super) force_refresh: bool,
-}
-
-impl Default for PlaylistPageState {
-    fn default() -> Self {
-        Self {
-            selected_index: None,
-            selected: None,
-            resource: None,
-            pending_scroll_position: None,
-            force_refresh: false,
-        }
-    }
 }
 
 impl LyruneView {
@@ -253,7 +242,8 @@ impl LyruneView {
             }
         }
 
-        let resource = self.shared_playlist_resource(
+        let resource = self.page_resource_cache.playlist(
+            self.account.id().unwrap_or(0),
             playlist.clone(),
             force_refresh,
             PlaylistCachePolicy::Fresh,
@@ -289,8 +279,12 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let resource =
-            self.shared_playlist_resource(playlist.clone(), false, PlaylistCachePolicy::Fresh);
+        let resource = self.page_resource_cache.playlist(
+            self.account.id().unwrap_or(0),
+            playlist.clone(),
+            false,
+            PlaylistCachePolicy::Fresh,
+        );
         let target = NavigationPage::Playlist {
             playlist: playlist.clone(),
             selected_index: None,
@@ -378,7 +372,12 @@ impl LyruneView {
             cx.notify();
         });
         let resource = resource.unwrap_or_else(|| {
-            self.shared_playlist_resource(playlist.clone(), force_refresh, cache_policy)
+            self.page_resource_cache.playlist(
+                self.account.id().unwrap_or(0),
+                playlist.clone(),
+                force_refresh,
+                cache_policy,
+            )
         });
         let (playlist, tracks, has_more, loading, loaded) = {
             let state = lock_resource(&resource);
@@ -407,7 +406,7 @@ impl LyruneView {
         self.restore_pending_playlist_scroll(cx);
         self.sync_table_playback_state(cx);
         cx.notify();
-        self.prune_page_resources();
+        self.page_resource_cache.prune();
         if !loaded || self.playlist.pending_scroll_position.is_some() {
             self.load_playlist_page(cx);
         }
@@ -558,9 +557,7 @@ impl LyruneView {
         };
         let liked = self
             .page_resource_cache
-            .playlists
-            .get(&(account_id, UserPlaylistId::Liked))
-            .and_then(Weak::upgrade)
+            .cached_playlist(account_id, &UserPlaylistId::Liked)
             .and_then(|resource| {
                 let state = lock_resource(&resource);
                 if !state.is_fresh(unix_timestamp_secs()) || state.fetched_at_secs == 0 {
@@ -720,9 +717,7 @@ impl LyruneView {
         });
         let cached_resource = self
             .page_resource_cache
-            .playlists
-            .get(&(account_id, UserPlaylistId::Liked))
-            .and_then(Weak::upgrade);
+            .cached_playlist(account_id, &UserPlaylistId::Liked);
         let active_resource = self.playlist.resource.as_ref().and_then(|resource| {
             (lock_resource(resource).playlist.id == UserPlaylistId::Liked).then(|| resource.clone())
         });

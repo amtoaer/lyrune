@@ -6,8 +6,9 @@ use super::lyrics_view::{
 };
 use super::navigation::NavigationHistory;
 use super::navigation::{
-    ArtistResource, NavigationPage, PlaylistResource, PlaylistScrollPosition, SearchCategory,
-    SearchMoreResults, SearchResource, SearchVisibleCounts, resolved_playlist_scroll_row,
+    ArtistResource, NavigationPage, PageResourceCache, PlaylistCachePolicy, PlaylistResource,
+    PlaylistScrollPosition, SearchCategory, SearchMoreResults, SearchResource, SearchVisibleCounts,
+    resolved_playlist_scroll_row,
 };
 use super::playback::{Playback, PlaybackLoad};
 use super::player_view::format_playback_time;
@@ -380,6 +381,52 @@ fn playlist_at_scroll_position(
         },
         resource: None,
     }
+}
+
+#[test]
+fn test_page_resource_lifetime() {
+    let mut cache = PageResourceCache::default();
+    let search = cache.search(7, "same query");
+    assert!(Arc::ptr_eq(&search, &cache.search(7, "same query")));
+    assert!(!Arc::ptr_eq(&search, &cache.search(8, "same query")));
+    let artist = cache.artist(7, "artist");
+    assert!(Arc::ptr_eq(&artist, &cache.artist(7, "artist")));
+    assert!(!Arc::ptr_eq(&artist, &cache.artist(8, "artist")));
+    let weak = Arc::downgrade(&search);
+    drop(search);
+    cache.prune();
+    assert!(weak.upgrade().is_none());
+    assert!(Arc::ptr_eq(&artist, &cache.artist(7, "artist")));
+
+    let NavigationPage::Playlist { playlist, .. } = playlist(1) else {
+        unreachable!();
+    };
+    let stale = cache.playlist(7, playlist.clone(), false, PlaylistCachePolicy::Fresh);
+    assert!(Arc::ptr_eq(
+        &stale,
+        &cache.playlist(7, playlist.clone(), false, PlaylistCachePolicy::AllowStale)
+    ));
+    let fresh = cache.playlist(7, playlist.clone(), false, PlaylistCachePolicy::Fresh);
+    assert!(!Arc::ptr_eq(&stale, &fresh));
+    fresh.lock().unwrap().fetched_at_secs = super::unix_timestamp_secs();
+    assert!(Arc::ptr_eq(
+        &fresh,
+        &cache.playlist(7, playlist.clone(), false, PlaylistCachePolicy::Fresh)
+    ));
+    let forced = cache.playlist(7, playlist.clone(), true, PlaylistCachePolicy::AllowStale);
+    assert!(!Arc::ptr_eq(&fresh, &forced));
+    assert!(Arc::ptr_eq(
+        &forced,
+        &cache.cached_playlist(7, &playlist.id).unwrap()
+    ));
+    assert!(cache.cached_playlist(8, &playlist.id).is_none());
+    // 更新索引不会清空历史页仍持有的旧资源。
+    assert_eq!(fresh.lock().unwrap().playlist.id, playlist.id);
+    let weak = Arc::downgrade(&forced);
+    drop(forced);
+    cache.prune();
+    assert!(weak.upgrade().is_none());
+    assert!(cache.cached_playlist(7, &playlist.id).is_none());
 }
 
 #[test]

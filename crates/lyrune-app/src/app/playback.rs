@@ -269,39 +269,34 @@ impl LyruneView {
                             this.loading_track = None;
                             this.loading_autoplay = false;
                             this.resolving_qualities = false;
-                            match result {
+                            let playback_result = match result {
                                 Ok((playback, location, available_qualities)) => {
                                     let quality = location.quality;
                                     this.playback_location = Some(location);
                                     this.active_quality = quality;
                                     this.available_qualities = available_qualities;
-                                    let result = this
-                                        .audio
+                                    this.audio
                                         .as_ref()
                                         .context("音频输出设备不可用")
-                                        .and_then(|audio| audio.replace(playback, autoplay));
-                                    match result {
-                                        Ok(()) => {
-                                            if let Some(audio) = &this.audio {
-                                                audio.set_volume(this.settings.volume);
-                                            }
-                                            this.playback_started = true;
-                                            this.wake_playback_ticks();
-                                        }
-                                        Err(error) => {
-                                            this.notify_error(
-                                                format!("播放歌曲“{}”失败：{error:#}", track_title),
-                                                cx,
-                                            );
-                                            this.play_next(false, cx);
-                                        }
-                                    }
+                                        .and_then(|audio| audio.replace(playback, autoplay))
+                                        .map_err(|error| {
+                                            format!("播放歌曲“{}”失败：{error:#}", track_title)
+                                        })
                                 }
                                 Err(error) => {
-                                    this.notify_error(
-                                        format!("获取歌曲“{}”失败：{error:#}", track_title),
-                                        cx,
-                                    );
+                                    Err(format!("获取歌曲“{}”失败：{error:#}", track_title))
+                                }
+                            };
+                            match playback_result {
+                                Ok(()) => {
+                                    if let Some(audio) = &this.audio {
+                                        audio.set_volume(this.settings.volume);
+                                    }
+                                    this.playback_started = true;
+                                    this.wake_playback_ticks();
+                                }
+                                Err(error) => {
+                                    this.notify_error(error, cx);
                                     this.play_next(false, cx);
                                 }
                             }

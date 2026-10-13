@@ -4,16 +4,16 @@ mod qrc_des;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use arc_swap::ArcSwapOption;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
 
-use crate::MusicClient;
 use crate::error::MusicClientError;
-use crate::models::{LoginStatus, LoginToken, Platform, TencentLoginToken};
+use crate::models::{LoginStatus, TencentLoginToken};
+use crate::platform::{TencentClient, TencentMqttLoginSession};
 
 pub use protocol::{CdnCache, ProtocolClient};
 
@@ -520,17 +520,16 @@ pub async fn run_qr_login(events: mpsc::UnboundedSender<LoginEvent>) {
 }
 
 async fn qr_login(events: &mpsc::UnboundedSender<LoginEvent>) -> Result<()> {
-    let client = MusicClient::new();
-    let session = client
-        .login()
-        .session()
-        .platform(Platform::Tencent)
-        .send()
+    let client = TencentClient::new();
+    let qr = client
+        .get_login_qrcode()
         .await
         .context("无法创建 QQ 音乐扫码会话")?;
+    // 扫码循环独占 MQTT 会话，状态随本次登录任务一起结束。
+    let mut session = TencentMqttLoginSession::new(&qr.qr_key);
 
-    let encoded = session
-        .qr_code()
+    let encoded = qr
+        .qr_code
         .strip_prefix(QR_DATA_PREFIX)
         .context("QQ 音乐返回了无法识别的二维码")?;
     let png = base64::engine::general_purpose::STANDARD
@@ -539,7 +538,11 @@ async fn qr_login(events: &mpsc::UnboundedSender<LoginEvent>) -> Result<()> {
     let _ = events.send(LoginEvent::QrReady(png));
 
     loop {
-        match session.status().await.context("QQ 音乐扫码状态查询失败")? {
+        match client
+            .get_login_token_with_mqtt_session(&qr.qr_key, &mut session)
+            .await
+            .context("QQ 音乐扫码状态查询失败")?
+        {
             LoginStatus::WaitingScan => {
                 let _ = events.send(LoginEvent::WaitingScan);
             }
@@ -550,7 +553,7 @@ async fn qr_login(events: &mpsc::UnboundedSender<LoginEvent>) -> Result<()> {
                 let _ = events.send(LoginEvent::Expired);
                 return Ok(());
             }
-            LoginStatus::Success(LoginToken::Tencent(token)) => {
+            LoginStatus::Success(token) => {
                 let credential = QqCredential::from_token(token)?;
                 let credential = ProtocolClient::new()?
                     .ensure_encrypted_uin(credential)
@@ -558,28 +561,18 @@ async fn qr_login(events: &mpsc::UnboundedSender<LoginEvent>) -> Result<()> {
                 let _ = events.send(LoginEvent::Succeeded(credential));
                 return Ok(());
             }
-            LoginStatus::Success(LoginToken::Netease(_)) => {
-                bail!("QQ 音乐登录返回了错误的平台凭据");
-            }
         }
     }
 }
 
 pub async fn refresh_credential(credential: QqCredential) -> Result<QqCredential> {
-    let client = MusicClient::new();
+    let client = TencentClient::new();
     let previous = credential.to_token();
-    let refreshed = client
-        .login()
-        .refresh()
-        .platform(Platform::Tencent)
-        .token(&previous)
-        .send()
+    let token = client
+        .refresh_login_token(&previous)
         .await
         .context("QQ 音乐凭据刷新失败")?;
 
-    let LoginToken::Tencent(token) = refreshed else {
-        bail!("QQ 音乐刷新返回了错误的平台凭据");
-    };
     let mut refreshed = QqCredential::from_token(token)?;
     if refreshed.encrypted_uin.is_empty() {
         refreshed.encrypted_uin = credential.encrypted_uin;

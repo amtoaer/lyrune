@@ -1,3 +1,5 @@
+//! LRC/QRC 解析及翻译、注音对齐；不读取缓存，也不参与 GPUI 的排版和动画。
+
 use std::ops::Range;
 use std::time::Duration;
 
@@ -9,6 +11,7 @@ const TRANSLATION_ALIGNMENT_TOLERANCE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct LyricWord {
+    // 范围以 UTF-8 字节计数，供原文切片和 GPUI TextRun 使用，不能当作字符下标。
     pub(super) range: Range<usize>,
     pub(super) start: Duration,
     pub(super) end: Duration,
@@ -69,6 +72,7 @@ fn align_lyric_lines(
     auxiliary: &[LyricLine],
     mut merge: impl FnMut(&mut LyricLine, &LyricLine),
 ) {
+    // 相同行数按顺序对齐，可容纳译文时间戳的取整偏差；行数不同时才做单向时间匹配。
     if original.len() == auxiliary.len() {
         for (line, auxiliary) in original.iter_mut().zip(auxiliary) {
             merge(line, auxiliary);
@@ -97,6 +101,7 @@ fn align_lyric_lines(
 }
 
 fn attach_ruby(line: &mut LyricLine, romanized: &LyricLine) {
+    // 原文分词和罗马音分词并不一一对应，按最大时间重叠归属，再拼接成汉字注音。
     let mut readings = vec![String::new(); line.words.len()];
     let mut word_index = 0;
     let mut romanized_index = 0;
@@ -192,6 +197,8 @@ fn extract_qrc_content(raw: &str) -> Option<String> {
         return Some(raw.to_owned());
     }
 
+    // 部分 QRC 把未转义的引号、& 或 < 写进属性；宽松分支保留这些原文。
+    // 严格与宽松路径都有回归样例，不能仅因存在 XML 解析器就删除后者。
     extract_qrc_content_strict(raw).or_else(|| extract_qrc_content_relaxed(raw))
 }
 

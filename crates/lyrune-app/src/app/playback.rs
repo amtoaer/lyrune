@@ -1,3 +1,5 @@
+//! 音源解析、解码准备和播放控制；队列组成在 queue，外部状态同步在 playback_sync。
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
@@ -235,6 +237,7 @@ impl LyruneView {
                 let finished = matches!(&event, PlaybackLoadEvent::Finished(_));
                 let seeked = matches!(&event, PlaybackLoadEvent::Finished(Ok(_)));
                 let _ = this.update(cx, |this, cx| {
+                    // 切歌、切音质或停止后，旧任务仍可能发来结果；不能据此替换当前音源。
                     if this.play_generation != generation {
                         return;
                     }

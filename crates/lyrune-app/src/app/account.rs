@@ -1,3 +1,5 @@
+//! 扫码登录、凭据恢复与会话失效。清理账号同时使旧账号的异步结果失效。
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -170,6 +172,7 @@ impl LyruneView {
             while updates.changed().await.is_ok() {
                 let keep_watching = this
                     .update(cx, |this, cx| {
+                        // 同一账号也可能建立新会话；版本和会话身份都匹配时才能处理凭据刷新。
                         if this.login_generation != generation
                             || this
                                 .credential
@@ -261,6 +264,7 @@ impl LyruneView {
     }
 
     fn clear_account_session(&mut self, restart_login: bool, cx: &mut Context<Self>) {
+        // 这些计数器阻止晚到结果覆盖新状态，并不取消已发出的网络请求。
         self.login_generation = self.login_generation.wrapping_add(1);
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home_generation = self.home_generation.wrapping_add(1);

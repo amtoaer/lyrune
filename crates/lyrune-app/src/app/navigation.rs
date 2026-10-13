@@ -1,3 +1,6 @@
+//! 页面历史保存浏览位置和资源强引用，弱引用索引只负责查找可复用的资源。
+//! 共享资源可在离开页面后完成加载；是否刷新当前控件由资源身份决定。
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
@@ -233,6 +236,7 @@ impl PlaylistResource {
         next_offset: u64,
         offset: u64,
     ) {
+        // 页面和队列可能同时拿到同一页；只有当前期待的 offset 可以追加，防止重复回填。
         if offset == 0 {
             self.tracks = tracks;
         } else if offset == self.next_offset {
@@ -277,12 +281,14 @@ pub(super) fn update_liked_playlist_resource(
     Some((state.playlist.clone(), state.tracks.clone(), state.has_more))
 }
 
+// 歌单补全也会在 Tokio 线程更新资源；锁保护共享数据，GPUI 控件仍由主线程访问。
 pub(super) type SharedSearchResource = Arc<Mutex<SearchResource>>;
 pub(super) type SharedArtistResource = Arc<Mutex<ArtistResource>>;
 pub(super) type SharedPlaylistResource = Arc<Mutex<PlaylistResource>>;
 
 #[derive(Default)]
 pub(super) struct PageResourceCache {
+    // 强引用来自当前页、历史记录和未结束的请求；索引本身不延长页面资源的寿命。
     pub(super) searches: HashMap<(u64, String), Weak<Mutex<SearchResource>>>,
     pub(super) artists: HashMap<(u64, String), Weak<Mutex<ArtistResource>>>,
     pub(super) playlists: HashMap<(u64, UserPlaylistId), Weak<Mutex<PlaylistResource>>>,
@@ -397,6 +403,7 @@ impl NavigationHistory {
     }
 
     pub(super) fn record(&mut self, current: Option<NavigationPage>, target: &NavigationPage) {
+        // 调用方先取得 target 的资源再记录导航；清空 forward 可能释放资源的最后一个旧持有者。
         if current
             .as_ref()
             .is_some_and(|current| current.same_destination(target))

@@ -1,3 +1,7 @@
+//! GPUI 应用实体：集中创建控件、连接事件和组合主窗口，各职责的实现放在子模块。
+//! 子模块中的 impl LyruneView 共享这个实体，保持现有订阅、任务及退出保存的寿命。
+//! 阅读顺序和跨模块约束见 docs/architecture.md。
+
 mod account;
 mod artist;
 mod home;
@@ -120,6 +124,7 @@ fn unix_timestamp_secs() -> u64 {
 }
 
 pub struct LyruneView {
+    // 账号和浏览状态；当前浏览的歌单可以与下面的播放队列不同。
     account_state: AccountState,
     credential: Option<CredentialSession>,
     profile: Option<UserProfile>,
@@ -151,6 +156,7 @@ pub struct LyruneView {
     artist_visible_song_count: usize,
     artist_visible_album_count: usize,
 
+    // GPUI 控件由实体持有，子模块更新它们；订阅句柄保存在下方，不能创建后立即丢弃。
     playlist_list: Entity<ListState<PlaylistListDelegate>>,
     track_table: Entity<TableState<TrackTableDelegate>>,
     search_track_table: Entity<TableState<TrackTableDelegate>>,
@@ -170,6 +176,7 @@ pub struct LyruneView {
     image_cache: Entity<CachedImageCache>,
     window_drag_pressed: bool,
 
+    // 音频、网络服务及维护任务。队列版本与单次音源加载版本分别失效。
     audio: Option<AudioPlayer>,
     audio_cache: Option<AudioCache>,
     protocol_client: Option<ProtocolClient>,
@@ -179,6 +186,7 @@ pub struct LyruneView {
     queue_generation: u64,
     queue_recommendation_loading: bool,
     queue_waiting_for_recommendation: bool,
+    // 这两个索引属于 playback_queue，不是当前页面表格中的行号。
     current_track: Option<usize>,
     loading_track: Option<usize>,
     loading_autoplay: bool,
@@ -192,12 +200,14 @@ pub struct LyruneView {
     seek_preview: Option<Duration>,
     progress_hovered: bool,
     progress_hover_fraction: Option<f32>,
+    // expanded 是用户目标，visible 包含过渡动画，fully_expanded 用于跳过被遮挡的主页面渲染。
     cover_backdrop_expanded: bool,
     cover_backdrop_visible: bool,
     cover_backdrop_fully_expanded: bool,
     backdrop_current_url: Option<String>,
     backdrop_previous_url: Option<String>,
     backdrop_crossfade_phase: bool,
+    // 歌词源数据、待下次播放采用的刷新结果、排版缓存和每帧显示缓存各有独立寿命。
     lyric_disk_cache: Option<LyricDiskCache>,
     lyrics_cache: HashMap<String, MemoryLyrics>,
     pending_lyrics_cache: HashMap<String, MemoryLyrics>,
@@ -228,6 +238,7 @@ pub struct LyruneView {
     login_generation: u64,
     play_generation: u64,
     account_menu_open: bool,
+    // 保存控件订阅句柄；下方两个窗口观察句柄由 attach_window 在窗口重开时替换。
     _subscriptions: Vec<Subscription>,
     _window_subscription: Option<Subscription>,
     _appearance_subscription: Option<Subscription>,
@@ -361,6 +372,7 @@ impl LyruneView {
         };
         let lyric_font_scale_input = scale_input(settings.lyric_font_scale, window, cx);
         let lyric_line_spacing_input = scale_input(settings.lyric_line_spacing, window, cx);
+        // Delegate 只发出交互/补页信号；这里把信号接回应用实体，避免控件直接管理网络状态。
         let (load_more_sender, mut load_more_receiver) = mpsc::channel(1);
         let (search_load_more_sender, mut search_load_more_receiver) = mpsc::channel(1);
         let (search_card_load_more_sender, mut search_card_load_more_receiver) = mpsc::channel(1);
@@ -483,6 +495,7 @@ impl LyruneView {
                 &progress_slider,
                 |this, _, event: &SliderEvent, cx| match event {
                     SliderEvent::Change(value) => {
+                        // 拖动时仅预览，Release 才真正 seek；音频进度同步不能覆盖预览。
                         this.seek_preview = this
                             .current_duration()
                             .map(|duration| duration.mul_f32(value.end().clamp(0., 1.)));

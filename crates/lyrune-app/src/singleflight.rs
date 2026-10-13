@@ -90,6 +90,7 @@ where
             .await
             .map_err(|error| anyhow::anyhow!(error.to_string()));
         let mut in_flight = self.in_flight.lock().await;
+        // force 会替换同一个 key 的任务；旧任务结束时不能移除后来登记的新任务。
         if in_flight.get(&key).is_some_and(|request| request.id == id) {
             in_flight.remove(&key);
         }

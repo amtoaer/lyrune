@@ -1,3 +1,5 @@
+//! 设置页面及偏好的即时生效；序列化格式、默认值和磁盘保存由 crate::settings 管理。
+
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Selectable as _, StyledExt as _,

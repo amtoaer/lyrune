@@ -3,10 +3,10 @@
 //! 本模块仅承载网易云接口响应结构体与 [`Into`] 转换逻辑；跨平台统一模型定义见
 //! [`crate::models`]。
 
-use std::collections::HashMap;
 use std::io::Cursor;
 
 use base64::Engine as _;
+use hashbrown::HashMap;
 use image::{DynamicImage, ImageFormat, Luma};
 use qrcode::QrCode;
 use serde::Deserialize;

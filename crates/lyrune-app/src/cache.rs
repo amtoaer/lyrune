@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -13,6 +13,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use bytes::Bytes;
 use directories::ProjectDirs;
 use futures_util::{Stream, StreamExt as _};
+use hashbrown::HashMap;
 use qmc_decrypt::{DecryptReader, QmcCipher};
 use qqmusic_api::integration::{Quality, Track};
 use reqwest::header::{
@@ -1693,13 +1694,13 @@ impl SourceStream for ResumeSource {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::fs;
     use std::io::{Read as _, Seek as _, SeekFrom};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use hashbrown::HashMap;
     use qqmusic_api::integration::{Quality, Track};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
@@ -1879,6 +1880,35 @@ mod tests {
         )
         .expect("parse rebuilt index");
         assert!(persisted.clean);
+        fs::remove_dir_all(root).expect("remove test cache directory");
+    }
+
+    #[tokio::test]
+    async fn test_cache_index_compatibility() {
+        let root = test_cache_dir();
+        fs::create_dir_all(&root).expect("create cache directory");
+        let original = serde_json::json!({
+            "schema_version": 1,
+            "clean": true,
+            "entries": {
+                "older": { "size_bytes": 6, "last_accessed_secs": 1 },
+                "newer": { "size_bytes": 7, "last_accessed_secs": 2 }
+            }
+        });
+        let index_path = root.join(CACHE_INDEX_FILE);
+        fs::write(&index_path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let cache = AudioCache::with_root(root.clone()).expect("create audio cache");
+
+        cache.maintain().await.expect("load existing cache index");
+
+        let index = cache.index.lock().await;
+        assert_eq!(index.total_size_bytes, 13);
+        assert_eq!(index.entries["older"].last_accessed_secs, 1);
+        assert_eq!(index.entries["newer"].size_bytes, 7);
+        drop(index);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(index_path).unwrap()).unwrap();
+        assert_eq!(saved, original);
         fs::remove_dir_all(root).expect("remove test cache directory");
     }
 

@@ -1,10 +1,11 @@
 //! 歌词的内存/磁盘缓存及后台刷新；解析在 lyrics，显示与动画在 lyrics_view。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::Context;
+use hashbrown::HashMap;
 use qqmusic_api::integration::{CredentialSession, ProtocolClient, Track};
 use tokio::sync::mpsc;
 

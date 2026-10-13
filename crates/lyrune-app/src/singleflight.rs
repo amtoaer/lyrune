@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
 use std::sync::{
@@ -8,6 +7,7 @@ use std::sync::{
 
 use anyhow::Result;
 use futures_util::future::{BoxFuture, FutureExt as _, Shared};
+use hashbrown::HashMap;
 use tokio::sync::Mutex;
 
 type SharedTask<V> = Shared<BoxFuture<'static, Result<V, Arc<str>>>>;

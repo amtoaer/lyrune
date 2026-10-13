@@ -1,11 +1,11 @@
 //! 页面历史保存浏览位置和资源强引用，弱引用索引只负责查找可复用的资源。
 //! 共享资源可在离开页面后完成加载；是否刷新当前控件由资源身份决定。
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use gpui::{App, Context, Pixels, Window, px};
 use gpui_component::IndexPath;
+use hashbrown::HashMap;
 use qqmusic_api::integration::{
     PlaylistPage, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist,
     UserPlaylistId,

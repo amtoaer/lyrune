@@ -20,7 +20,7 @@ mod settings;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{prelude::*, *};
@@ -38,6 +38,7 @@ use gpui_component::{
     table::{TableEvent, TableState},
     v_flex,
 };
+use hashbrown::HashMap;
 use qqmusic_api::integration::{PlaylistPage, ProtocolClient};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;

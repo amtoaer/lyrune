@@ -16,6 +16,7 @@ gpui.workspace = true
 gpui-base.workspace = true
 gpui-component.workspace = true
 gpui-platform.workspace = true
+hashbrown.workspace = true
 image.workspace = true
 keyring.workspace = true
 lru.workspace = true

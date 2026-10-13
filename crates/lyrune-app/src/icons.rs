@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui::{AnyElement, Hsla, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, img};
+use hashbrown::HashMap;
 
 use crate::design::ColorTheme;
 

@@ -3,10 +3,9 @@
 //! 本模块仅承载 QQ 音乐接口响应结构体与 [`Into`] 转换逻辑；跨平台统一模型定义见
 //! [`crate::models`]。
 
-use std::collections::HashMap;
-
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use hashbrown::HashMap;
 use serde::Deserialize;
 
 use super::super::collect_into;
@@ -1116,7 +1115,21 @@ fn login_server_error(code: i64, data: &TLoginInfoData) -> MusicClientError {
 mod tests {
     use serde_json::json;
 
-    use super::TLoginInfoResponse;
+    use super::{PlaylistCategoriesResult, TLoginInfoResponse};
+
+    #[test]
+    fn test_playlist_categories_json() {
+        let original = json!({
+            "group": { "0": "语种", "1": "风格" },
+            "categories": [{ "id": "1", "name": "国语", "category": 0 }]
+        });
+        let categories: PlaylistCategoriesResult =
+            serde_json::from_value(original.clone()).expect("valid categories JSON");
+
+        assert_eq!(categories.group[&0], "语种");
+        assert_eq!(categories.group[&1], "风格");
+        assert_eq!(serde_json::to_value(categories).unwrap(), original);
+    }
 
     #[test]
     fn login_response_preserves_encrypted_uin_without_debugging_secrets() {

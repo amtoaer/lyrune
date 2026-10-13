@@ -30,8 +30,9 @@
 //!
 //! - [`client`][`crate::client`]：typed builder 请求入口
 //! - [`MusicClientError`][`crate::error::MusicClientError`]：统一错误类型
-use std::{collections::HashMap, fmt};
+use std::fmt;
 
+use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 

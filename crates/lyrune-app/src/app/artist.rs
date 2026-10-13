@@ -1,7 +1,6 @@
 //! 歌手页面的歌曲、专辑分页及其展示；播放时将选中的页面数据交给独立队列。
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::{prelude::*, *};
 use gpui_component::{
@@ -17,7 +16,6 @@ use qqmusic_api::integration::{SearchAlbum, SearchArtist, SearchPage, Track};
 use super::navigation::{
     MainContent, NavigationPage, SharedArtistResource, append_shared_search_page, lock_resource,
 };
-use super::queue::canonical_queue_track_index;
 use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, LyruneView, page_horizontal_padding};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
@@ -250,42 +248,17 @@ impl LyruneView {
         let Some(resource) = self.artist_resource.as_ref() else {
             return;
         };
-        let (selected_track, tracks, has_more, track_count) = {
+        let (tracks, has_more, track_count) = {
             let state = lock_resource(resource);
             let Some(songs) = state.songs.as_ref() else {
                 return;
             };
-            let Some(selected_track) = songs.items.get(index).cloned() else {
-                return;
-            };
-            (
-                selected_track,
-                songs.items.clone(),
-                songs.has_more,
-                state.track_count,
-            )
+            (songs.items.clone(), songs.has_more, state.track_count)
         };
         let mut playlist = artist.into_playlist();
         playlist.track_count = track_count;
 
-        if let Some(queue_index) = self
-            .playback_queue
-            .as_ref()
-            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, &selected_track.mid))
-        {
-            if self.current_track == Some(queue_index) {
-                if self.loading_track.is_none() {
-                    self.toggle_playback(cx);
-                }
-            } else {
-                self.start_playback(queue_index, Duration::ZERO, None, true, cx);
-            }
-            return;
-        }
-
-        self.pending_playback_restore = None;
-        self.replace_playback_queue(playlist, tracks, has_more, cx);
-        self.start_playback(index, Duration::ZERO, None, true, cx);
+        self.select_playlist_track(playlist, tracks, has_more, index, cx);
     }
 
     fn render_artist_header(

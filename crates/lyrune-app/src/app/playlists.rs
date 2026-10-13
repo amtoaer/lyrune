@@ -22,7 +22,6 @@ use super::navigation::{
     SharedPlaylistResource, lock_resource, resolved_playlist_scroll_row, share_items,
     update_liked_playlist_resource,
 };
-use super::queue::canonical_queue_track_index;
 use super::{
     LIBRARY_CACHE_TTL, LyruneView, PAGE_SIZE, page_horizontal_padding, unix_timestamp_secs,
 };
@@ -495,30 +494,10 @@ impl LyruneView {
                 table.delegate().has_more(),
             )
         };
-        if index >= tracks.len() {
-            return;
-        }
         let Some(playlist) = self.selected_playlist.clone() else {
             return;
         };
-        let selected_mid = tracks[index].mid.as_str();
-        if let Some(queue_index) = self
-            .playback_queue
-            .as_ref()
-            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, selected_mid))
-        {
-            if self.current_track == Some(queue_index) {
-                if self.loading_track.is_none() {
-                    self.toggle_playback(cx);
-                }
-            } else {
-                self.start_playback(queue_index, Duration::ZERO, None, true, cx);
-            }
-            return;
-        }
-        self.pending_playback_restore = None;
-        self.replace_playback_queue(playlist, tracks, has_more, cx);
-        self.start_playback(index, Duration::ZERO, None, true, cx);
+        self.select_playlist_track(playlist, tracks, has_more, index, cx);
     }
 
     pub(super) fn sync_table_playback_state(&mut self, cx: &mut Context<Self>) {

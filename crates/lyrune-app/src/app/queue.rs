@@ -71,6 +71,22 @@ pub(super) struct PlaybackQueue {
     pub(super) continuation: Option<PersistedQueueContinuation>,
 }
 
+impl PlaybackQueue {
+    // 返回第一首新加入的歌曲，供队尾等待中的推荐续播使用；已有歌曲保留原位置和数据。
+    pub(super) fn append_tracks(
+        &mut self,
+        tracks: impl IntoIterator<Item = Arc<Track>>,
+    ) -> Option<usize> {
+        let first_added = self.tracks.len();
+        for track in tracks {
+            if !self.tracks.iter().any(|item| item.mid == track.mid) {
+                self.tracks.push(track);
+            }
+        }
+        (self.tracks.len() > first_added).then_some(first_added)
+    }
+}
+
 impl PersistedQueueContinuation {
     pub(super) fn can_load_more(self) -> bool {
         match self {
@@ -99,6 +115,37 @@ impl RepeatMode {
 }
 
 impl LyruneView {
+    pub(super) fn select_playlist_track(
+        &mut self,
+        playlist: UserPlaylist,
+        tracks: Vec<Arc<Track>>,
+        has_more: bool,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selected_track) = tracks.get(index) else {
+            return;
+        };
+        if let Some(queue_index) = self
+            .playback_queue
+            .as_ref()
+            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, &selected_track.mid))
+        {
+            if self.current_track == Some(queue_index) {
+                if self.loading_track.is_none() {
+                    self.toggle_playback(cx);
+                }
+            } else {
+                self.start_playback(queue_index, Duration::ZERO, None, true, cx);
+            }
+            return;
+        }
+
+        self.pending_playback_restore = None;
+        self.replace_playback_queue(playlist, tracks, has_more, cx);
+        self.start_playback(index, Duration::ZERO, None, true, cx);
+    }
+
     pub(super) fn start_home_recommendation(
         &mut self,
         kind: RecommendationKind,
@@ -243,12 +290,7 @@ impl LyruneView {
                         let mut first_added = None;
                         if let Some(queue) = &mut this.playback_queue {
                             queue.continuation = continuation;
-                            for track in tracks {
-                                if !queue.tracks.iter().any(|item| item.mid == track.mid) {
-                                    first_added.get_or_insert(queue.tracks.len());
-                                    queue.tracks.push(Arc::new(track));
-                                }
-                            }
+                            first_added = queue.append_tracks(tracks.into_iter().map(Arc::new));
                         }
                         this.persist_current_playback();
                         // 已播到队尾时，续播从第一首新加入的歌开始；去重后的空批次不能越界跳歌。
@@ -382,11 +424,7 @@ impl LyruneView {
                     return;
                 }
                 if let (Some(queue), Ok(tracks)) = (&mut this.playback_queue, result) {
-                    for track in &tracks {
-                        if !queue.tracks.iter().any(|item| item.mid == track.mid) {
-                            queue.tracks.push(track.clone());
-                        }
-                    }
+                    queue.append_tracks(tracks);
                     if let Some(resource) = playlist_resource {
                         let state = lock_resource(&resource);
                         let active = this

@@ -543,6 +543,37 @@ fn existing_search_track_is_moved_without_duplication() {
 }
 
 #[test]
+fn queue_append_preserves_order_and_existing_tracks() {
+    let mut queue = PlaybackQueue {
+        playlist_id: UserPlaylistId::Liked,
+        tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
+        modified: false,
+        continuation: None,
+    };
+    let mut duplicate = track("B");
+    duplicate.title = "different metadata".to_owned();
+
+    let first_added = queue.append_tracks([
+        Arc::new(duplicate),
+        Arc::new(track("C")),
+        Arc::new(track("C")),
+        Arc::new(track("D")),
+    ]);
+
+    assert_eq!(first_added, Some(2));
+    assert_eq!(mids(&queue.tracks), ["A", "B", "C", "D"]);
+    assert_eq!(queue.tracks[1].title, "B");
+    assert_eq!(
+        canonical_queue_track_index(&queue, &UserPlaylistId::Liked, "D"),
+        Some(3)
+    );
+
+    // 重复批次没有续播起点，也不能改变已有歌曲的顺序。
+    assert_eq!(queue.append_tracks([Arc::new(track("C"))]), None);
+    assert_eq!(mids(&queue.tracks), ["A", "B", "C", "D"]);
+}
+
+#[test]
 fn search_insertion_prevents_reusing_the_source_playlist_queue() {
     let playlist_id = UserPlaylistId::Liked;
     let mut queue = PlaybackQueue {

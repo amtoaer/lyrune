@@ -538,28 +538,23 @@ impl LyruneView {
         };
         if let Some(next) = next {
             self.start_playback(next, Duration::ZERO, None, true, cx);
-        } else if can_extend {
-            self.playback_started = false;
-            self.wake_playback_ticks();
+            return;
+        }
+
+        self.playback_started = false;
+        self.wake_playback_ticks();
+        if can_extend {
             self.queue_waiting_for_recommendation = true;
             self.maybe_load_queue_recommendations(true, cx);
-            self.persist_current_playback();
-            #[cfg(target_os = "linux")]
-            self.sync_mpris(false);
-            #[cfg(target_os = "linux")]
-            self.sync_inhibit();
-            cx.notify();
         } else {
-            self.playback_started = false;
-            self.wake_playback_ticks();
             self.position = self.current_duration().unwrap_or_default();
-            self.persist_current_playback();
-            #[cfg(target_os = "linux")]
-            self.sync_mpris(false);
-            #[cfg(target_os = "linux")]
-            self.sync_inhibit();
-            cx.notify();
         }
+        self.persist_current_playback();
+        #[cfg(target_os = "linux")]
+        self.sync_mpris(false);
+        #[cfg(target_os = "linux")]
+        self.sync_inhibit();
+        cx.notify();
     }
 
     fn random_track_index(&self, current: usize, len: usize) -> usize {

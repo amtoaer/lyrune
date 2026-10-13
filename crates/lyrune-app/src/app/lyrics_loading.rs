@@ -45,6 +45,59 @@ impl LyricsCache {
             errors: HashMap::new(),
         }
     }
+
+    fn adopt_pending(&mut self, mid: &str) -> bool {
+        let Some(pending) = self.pending.remove(mid) else {
+            return false;
+        };
+        self.adopted.insert(mid.to_owned(), pending);
+        true
+    }
+
+    fn apply(&mut self, mid: &str, event: LyricLoadEvent, is_current: bool) {
+        match event {
+            LyricLoadEvent::Disk { lyrics, fresh } => {
+                self.errors.remove(mid);
+                self.adopted.insert(mid.to_owned(), lyrics);
+                if fresh {
+                    self.loading.remove(mid);
+                }
+            }
+            LyricLoadEvent::Network { result, had_cached } => {
+                self.loading.remove(mid);
+                match result {
+                    Ok(lyrics) => {
+                        self.errors.remove(mid);
+                        let unchanged = self
+                            .adopted
+                            .get(mid)
+                            .is_some_and(|cached| cached.parsed == lyrics.parsed);
+                        // 正在播放的歌词保持本次显示内容，避免刷新后时间轴和排版突然跳变。
+                        // 有变化的新内容暂存到 pending，下次选择该曲时再启用。
+                        if had_cached && is_current {
+                            if unchanged {
+                                if let Some(cached) = self.adopted.get_mut(mid) {
+                                    cached.fetched_at_secs = lyrics.fetched_at_secs;
+                                }
+                                self.pending.remove(mid);
+                            } else {
+                                self.pending.insert(mid.to_owned(), lyrics);
+                            }
+                        } else {
+                            self.pending.remove(mid);
+                            self.adopted.insert(mid.to_owned(), lyrics);
+                        }
+                    }
+                    Err(error) if !had_cached => {
+                        self.errors.insert(mid.to_owned(), format!("{error:#}"));
+                    }
+                    Err(_) => {
+                        self.errors.remove(mid);
+                    }
+                }
+            }
+        }
+    }
 }
 
 enum LyricLoadEvent {
@@ -75,8 +128,7 @@ impl LyruneView {
             .playback
             .track()
             .is_some_and(|current| current.mid == mid);
-        if !current_is_same_track && let Some(pending) = self.lyrics.pending.remove(&mid) {
-            self.lyrics.adopted.insert(mid.clone(), pending);
+        if !current_is_same_track && self.lyrics.adopt_pending(&mid) {
             cx.notify();
         }
         let had_cached = self.lyrics.adopted.contains_key(&mid);
@@ -156,56 +208,9 @@ impl LyruneView {
             while let Some(event) = receiver.recv().await {
                 if this
                     .update(cx, |this, cx| {
-                        match event {
-                            LyricLoadEvent::Disk { lyrics, fresh } => {
-                                this.lyrics.errors.remove(&mid);
-                                this.lyrics.adopted.insert(mid.clone(), lyrics);
-                                if fresh {
-                                    this.lyrics.loading.remove(&mid);
-                                }
-                            }
-                            LyricLoadEvent::Network { result, had_cached } => {
-                                this.lyrics.loading.remove(&mid);
-                                match result {
-                                    Ok(lyrics) => {
-                                        this.lyrics.errors.remove(&mid);
-                                        let is_current = this
-                                            .playback
-                                            .track()
-                                            .is_some_and(|track| track.mid == mid);
-                                        let unchanged =
-                                            this.lyrics.adopted.get(&mid).is_some_and(|cached| {
-                                                cached.parsed == lyrics.parsed
-                                            });
-                                        // 正在播放的歌词保持本次显示内容，避免刷新后时间轴和排版突然跳变。
-                                        // 有变化的新内容暂存到 pending，下次选择该曲时再启用。
-                                        if had_cached && is_current {
-                                            if unchanged {
-                                                if let Some(cached) =
-                                                    this.lyrics.adopted.get_mut(&mid)
-                                                {
-                                                    cached.fetched_at_secs = lyrics.fetched_at_secs;
-                                                }
-                                                this.lyrics.pending.remove(&mid);
-                                            } else {
-                                                this.lyrics.pending.insert(mid.clone(), lyrics);
-                                            }
-                                        } else {
-                                            this.lyrics.pending.remove(&mid);
-                                            this.lyrics.adopted.insert(mid.clone(), lyrics);
-                                        }
-                                    }
-                                    Err(error) if !had_cached => {
-                                        this.lyrics
-                                            .errors
-                                            .insert(mid.clone(), format!("{error:#}"));
-                                    }
-                                    Err(_) => {
-                                        this.lyrics.errors.remove(&mid);
-                                    }
-                                }
-                            }
-                        }
+                        let is_current =
+                            this.playback.track().is_some_and(|track| track.mid == mid);
+                        this.lyrics.apply(&mid, event, is_current);
                         cx.notify();
                     })
                     .is_err()
@@ -214,11 +219,132 @@ impl LyruneView {
                 }
             }
             let _ = this.update(cx, |this, cx| {
+                // 保留原通道结束规则：只清理尚无内容的请求；不能把磁盘/网络两阶段改成统一 finally。
                 if !this.lyrics.adopted.contains_key(&mid) && this.lyrics.loading.remove(&mid) {
                     cx.notify();
                 }
             });
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cached(text: &str, fetched_at_secs: u64) -> MemoryLyrics {
+        MemoryLyrics {
+            parsed: Arc::new(parse_lyrics(text, None, None)),
+            fetched_at_secs,
+        }
+    }
+
+    #[test]
+    fn test_refresh_keeps_current_lyrics() {
+        let mut cache = LyricsCache::new(None);
+        let old = cached("[00:01.00]old", 1);
+        cache.loading.insert("song".to_owned());
+        cache.apply(
+            "song",
+            LyricLoadEvent::Disk {
+                lyrics: old.clone(),
+                fresh: false,
+            },
+            true,
+        );
+        assert!(cache.loading.contains("song"));
+
+        let changed = cached("[00:02.00]changed", 2);
+        cache.apply(
+            "song",
+            LyricLoadEvent::Network {
+                result: Ok(changed.clone()),
+                had_cached: true,
+            },
+            true,
+        );
+        assert!(!cache.loading.contains("song"));
+        assert!(Arc::ptr_eq(&cache.adopted["song"].parsed, &old.parsed));
+        assert_eq!(cache.pending["song"].parsed, changed.parsed);
+
+        // 相同内容只刷新时间，不替换当前渲染持有的 Arc，并清除之前待采用的不同内容。
+        cache.apply(
+            "song",
+            LyricLoadEvent::Network {
+                result: Ok(cached("[00:01.00]old", 3)),
+                had_cached: true,
+            },
+            true,
+        );
+        assert_eq!(cache.adopted["song"].fetched_at_secs, 3);
+        assert!(Arc::ptr_eq(&cache.adopted["song"].parsed, &old.parsed));
+        assert!(!cache.pending.contains_key("song"));
+
+        cache.apply(
+            "song",
+            LyricLoadEvent::Network {
+                result: Ok(changed.clone()),
+                had_cached: true,
+            },
+            true,
+        );
+        assert!(cache.adopt_pending("song"));
+        assert_eq!(cache.adopted["song"].parsed, changed.parsed);
+        assert!(!cache.adopt_pending("song"));
+    }
+
+    #[test]
+    fn test_lyric_cache_failure_and_background_result() {
+        let mut cache = LyricsCache::new(None);
+        cache.loading.insert("song".to_owned());
+        cache.apply(
+            "song",
+            LyricLoadEvent::Network {
+                result: Err(anyhow::anyhow!("offline")),
+                had_cached: false,
+            },
+            true,
+        );
+        assert_eq!(
+            cache.errors.get("song").map(String::as_str),
+            Some("offline")
+        );
+        assert!(!cache.loading.contains("song"));
+
+        let old = cached("[00:01.00]old", 1);
+        cache.loading.insert("song".to_owned());
+        cache.apply(
+            "song",
+            LyricLoadEvent::Disk {
+                lyrics: old.clone(),
+                fresh: true,
+            },
+            false,
+        );
+        assert!(!cache.loading.contains("song"));
+        assert!(!cache.errors.contains_key("song"));
+        cache.apply(
+            "song",
+            LyricLoadEvent::Network {
+                result: Err(anyhow::anyhow!("offline")),
+                had_cached: true,
+            },
+            true,
+        );
+        assert!(Arc::ptr_eq(&cache.adopted["song"].parsed, &old.parsed));
+        assert!(!cache.errors.contains_key("song"));
+
+        let changed = cached("[00:02.00]changed", 2);
+        cache.apply(
+            "song",
+            LyricLoadEvent::Network {
+                result: Ok(changed.clone()),
+                had_cached: true,
+            },
+            false,
+        );
+        assert_eq!(cache.adopted["song"].parsed, changed.parsed);
+        assert!(!cache.pending.contains_key("song"));
     }
 }

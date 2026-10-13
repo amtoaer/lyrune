@@ -5,7 +5,7 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, Selectable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputState, NumberInput},
+    input::{Input, InputState, MaskPattern, NumberInput},
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     v_flex,
@@ -16,11 +16,104 @@ use super::{LyricLayoutCache, LyruneView, page_horizontal_padding};
 use crate::cache::audio_cache_limit_bytes;
 use crate::design::{self, ColorTheme};
 use crate::settings::{
-    ColorThemeMode, LyricFrameRate, MAX_IMAGE_CACHE_CAPACITY, MAX_LYRIC_SCALE_PERCENT,
+    AppSettings, ColorThemeMode, LyricFrameRate, MAX_IMAGE_CACHE_CAPACITY, MAX_LYRIC_SCALE_PERCENT,
     MAX_NAVIGATION_HISTORY_LIMIT, MIN_SCALE_PERCENT, TrayIconStyle, WindowDecoration,
     default_lyric_font_families, default_monospace_font_families, default_ui_font_families,
     parse_font_families,
 };
+
+pub(super) struct SettingsInputs {
+    pub(super) ui_font: Entity<InputState>,
+    pub(super) monospace_font: Entity<InputState>,
+    pub(super) lyric_font: Entity<InputState>,
+    pub(super) audio_cache_limit: Entity<InputState>,
+    pub(super) image_cache_capacity: Entity<InputState>,
+    pub(super) navigation_history_limit: Entity<InputState>,
+    pub(super) lyric_font_scale: Entity<InputState>,
+    pub(super) lyric_line_spacing: Entity<InputState>,
+}
+
+impl SettingsInputs {
+    pub(super) fn new(
+        settings: &AppSettings,
+        window: &mut Window,
+        cx: &mut Context<LyruneView>,
+    ) -> Self {
+        let ui_font_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.ui_font_families.join(", "))
+                .placeholder("例如：Inter, Noto Sans CJK SC")
+        });
+        let monospace_font_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.monospace_font_families.join(", "))
+                .placeholder("例如：JetBrains Mono, Noto Sans Mono")
+        });
+        let lyric_font_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.lyric_font_families.join(", "))
+                .placeholder("例如：LXGW WenKai, Noto Sans CJK JP")
+        });
+        let audio_cache_limit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.audio_cache_limit_gb.to_string())
+                .mask_pattern(MaskPattern::Number {
+                    separator: None,
+                    fraction: None,
+                })
+                .validate(|value, _| value.parse::<u64>().is_ok_and(|value| value > 0))
+                .min(1.)
+                .step(1.)
+        });
+        let image_cache_capacity_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.image_cache_capacity.to_string())
+                .mask_pattern(MaskPattern::Number {
+                    separator: None,
+                    fraction: None,
+                })
+                .validate(|value, _| value.parse::<usize>().is_ok_and(|value| value > 0))
+                .min(1.)
+                .step(1.)
+        });
+        let navigation_history_limit_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.navigation_history_limit.to_string())
+                .mask_pattern(MaskPattern::Number {
+                    separator: None,
+                    fraction: None,
+                })
+                .validate(|value, _| value.parse::<usize>().is_ok_and(|value| value > 0))
+                .min(1.)
+                .step(1.)
+        });
+        let scale_input = |value: u32, window: &mut Window, cx: &mut Context<LyruneView>| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(value.to_string())
+                    .mask_pattern(MaskPattern::Number {
+                        separator: None,
+                        fraction: None,
+                    })
+                    .validate(|value, _| value.parse::<u32>().is_ok())
+                    .min(MIN_SCALE_PERCENT as f64)
+                    .step(10.)
+            })
+        };
+        let lyric_font_scale_input = scale_input(settings.lyric_font_scale, window, cx);
+        let lyric_line_spacing_input = scale_input(settings.lyric_line_spacing, window, cx);
+        Self {
+            ui_font: ui_font_input,
+            monospace_font: monospace_font_input,
+            lyric_font: lyric_font_input,
+            audio_cache_limit: audio_cache_limit_input,
+            image_cache_capacity: image_cache_capacity_input,
+            navigation_history_limit: navigation_history_limit_input,
+            lyric_font_scale: lyric_font_scale_input,
+            lyric_line_spacing: lyric_line_spacing_input,
+        }
+    }
+}
 
 impl LyruneView {
     pub(super) fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -131,16 +224,19 @@ impl LyruneView {
     pub(super) fn apply_audio_cache_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.settings.audio_cache_limit_gb;
         let value = self
-            .audio_cache_limit_input
+            .settings_inputs
+            .audio_cache_limit
             .read(cx)
             .value()
             .parse::<u64>()
             .ok()
             .filter(|value| *value > 0)
             .unwrap_or(current);
-        self.audio_cache_limit_input.update(cx, |input, cx| {
-            input.set_value(value.to_string(), window, cx)
-        });
+        self.settings_inputs
+            .audio_cache_limit
+            .update(cx, |input, cx| {
+                input.set_value(value.to_string(), window, cx)
+            });
         if value == current {
             return;
         }
@@ -161,7 +257,8 @@ impl LyruneView {
     ) {
         let current = self.settings.image_cache_capacity;
         let value = self
-            .image_cache_capacity_input
+            .settings_inputs
+            .image_cache_capacity
             .read(cx)
             .value()
             .parse::<usize>()
@@ -169,9 +266,11 @@ impl LyruneView {
             .filter(|value| *value > 0)
             .unwrap_or(current)
             .min(MAX_IMAGE_CACHE_CAPACITY);
-        self.image_cache_capacity_input.update(cx, |input, cx| {
-            input.set_value(value.to_string(), window, cx)
-        });
+        self.settings_inputs
+            .image_cache_capacity
+            .update(cx, |input, cx| {
+                input.set_value(value.to_string(), window, cx)
+            });
         if value == current {
             return;
         }
@@ -190,7 +289,8 @@ impl LyruneView {
     ) {
         let current = self.settings.navigation_history_limit;
         let value = self
-            .navigation_history_limit_input
+            .settings_inputs
+            .navigation_history_limit
             .read(cx)
             .value()
             .parse::<usize>()
@@ -198,9 +298,11 @@ impl LyruneView {
             .filter(|value| *value > 0)
             .unwrap_or(current)
             .min(MAX_NAVIGATION_HISTORY_LIMIT);
-        self.navigation_history_limit_input.update(cx, |input, cx| {
-            input.set_value(value.to_string(), window, cx)
-        });
+        self.settings_inputs
+            .navigation_history_limit
+            .update(cx, |input, cx| {
+                input.set_value(value.to_string(), window, cx)
+            });
         if value == current {
             return;
         }
@@ -221,20 +323,20 @@ impl LyruneView {
                 .map_or(current, |value| value.clamp(MIN_SCALE_PERCENT, max))
         };
         let lyric = read(
-            &self.lyric_font_scale_input,
+            &self.settings_inputs.lyric_font_scale,
             self.settings.lyric_font_scale,
             MAX_LYRIC_SCALE_PERCENT,
             cx,
         );
         let spacing = read(
-            &self.lyric_line_spacing_input,
+            &self.settings_inputs.lyric_line_spacing,
             self.settings.lyric_line_spacing,
             MAX_LYRIC_SCALE_PERCENT,
             cx,
         );
         for (input, value) in [
-            (&self.lyric_font_scale_input, lyric),
-            (&self.lyric_line_spacing_input, spacing),
+            (&self.settings_inputs.lyric_font_scale, lyric),
+            (&self.settings_inputs.lyric_line_spacing, spacing),
         ] {
             input.update(cx, |input, cx| {
                 input.set_value(value.to_string(), window, cx)
@@ -251,9 +353,15 @@ impl LyruneView {
     }
 
     fn apply_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ui = parse_font_families(self.ui_font_input.read(cx).value().as_ref());
-        let monospace = parse_font_families(self.monospace_font_input.read(cx).value().as_ref());
-        let lyrics = parse_font_families(self.lyric_font_input.read(cx).value().as_ref());
+        let ui = parse_font_families(self.settings_inputs.ui_font.read(cx).value().as_ref());
+        let monospace = parse_font_families(
+            self.settings_inputs
+                .monospace_font
+                .read(cx)
+                .value()
+                .as_ref(),
+        );
+        let lyrics = parse_font_families(self.settings_inputs.lyric_font.read(cx).value().as_ref());
         self.set_font_settings(
             if ui.is_empty() {
                 default_ui_font_families()
@@ -279,12 +387,13 @@ impl LyruneView {
         let ui = default_ui_font_families();
         let monospace = default_monospace_font_families();
         let lyrics = default_lyric_font_families();
-        self.ui_font_input
+        self.settings_inputs
+            .ui_font
             .update(cx, |input, cx| input.set_value(ui.join(", "), window, cx));
-        self.monospace_font_input.update(cx, |input, cx| {
+        self.settings_inputs.monospace_font.update(cx, |input, cx| {
             input.set_value(monospace.join(", "), window, cx)
         });
-        self.lyric_font_input.update(cx, |input, cx| {
+        self.settings_inputs.lyric_font.update(cx, |input, cx| {
             input.set_value(lyrics.join(", "), window, cx)
         });
     }
@@ -297,12 +406,13 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ui_font_input
+        self.settings_inputs
+            .ui_font
             .update(cx, |input, cx| input.set_value(ui.join(", "), window, cx));
-        self.monospace_font_input.update(cx, |input, cx| {
+        self.settings_inputs.monospace_font.update(cx, |input, cx| {
             input.set_value(monospace.join(", "), window, cx)
         });
-        self.lyric_font_input.update(cx, |input, cx| {
+        self.settings_inputs.lyric_font.update(cx, |input, cx| {
             input.set_value(lyrics.join(", "), window, cx)
         });
         self.settings.ui_font_families = ui;
@@ -705,17 +815,17 @@ impl LyruneView {
                                         .child(font_field(
                                             "UI 字体",
                                             "应用于整个界面",
-                                            &self.ui_font_input,
+                                            &self.settings_inputs.ui_font,
                                         ))
                                         .child(font_field(
                                             "等宽字体",
                                             "应用于时间等定宽文本",
-                                            &self.monospace_font_input,
+                                            &self.settings_inputs.monospace_font,
                                         ))
                                         .child(font_field(
                                             "歌词字体",
                                             "应用于主歌词、翻译与注音",
-                                            &self.lyric_font_input,
+                                            &self.settings_inputs.lyric_font,
                                         ))
                                         .child(
                                             h_flex()
@@ -769,21 +879,21 @@ impl LyruneView {
                                         .child(number_setting(
                                             "歌曲缓存上限",
                                             "超过上限时自动清理最久未播放的歌曲",
-                                            &self.audio_cache_limit_input,
+                                            &self.settings_inputs.audio_cache_limit,
                                             "GB",
                                             false,
                                         ))
                                         .child(number_setting(
                                             "图片内存缓存",
                                             "图片最大缓存数，缩小该数值可以减少内存占用，但同屏显示图片超过该数值会出现渲染问题",
-                                            &self.image_cache_capacity_input,
+                                            &self.settings_inputs.image_cache_capacity,
                                             "张",
                                             true,
                                         ))
                                         .child(number_setting(
                                             "页面历史上限",
                                             "最多保留的页面数量（包含当前页），缩小该数值会立即清理最早的历史页面",
-                                            &self.navigation_history_limit_input,
+                                            &self.settings_inputs.navigation_history_limit,
                                             "页",
                                             true,
                                         )),
@@ -798,14 +908,14 @@ impl LyruneView {
                                         .child(number_setting(
                                             "歌词字号缩放",
                                             "缩放主歌词、翻译与注音的文字大小，行高随之等比例调整",
-                                            &self.lyric_font_scale_input,
+                                            &self.settings_inputs.lyric_font_scale,
                                             "%",
                                             false,
                                         ))
                                         .child(number_setting(
                                             "歌词行间距",
                                             "调整歌词页相邻两行之间的距离",
-                                            &self.lyric_line_spacing_input,
+                                            &self.settings_inputs.lyric_line_spacing,
                                             "%",
                                             true,
                                         )),

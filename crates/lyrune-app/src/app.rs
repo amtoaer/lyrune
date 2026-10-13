@@ -23,6 +23,7 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use self::settings::SettingsInputs;
 use account::{Account, AccountState};
 use artist::ArtistPageState;
 use gpui::{prelude::*, *};
@@ -32,7 +33,7 @@ use gpui_component::{
     WindowExt as _,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex, h_resizable,
-    input::{Input, InputEvent, InputState, MaskPattern},
+    input::{Input, InputEvent, InputState},
     list::{List, ListEvent, ListState},
     notification::Notification,
     resizable_panel,
@@ -61,8 +62,7 @@ use crate::mpris::MprisHandle;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 use crate::settings::{
-    AppSettings, CdnCacheStore, LibraryCache, MIN_SCALE_PERCENT, PersistedWindowSize,
-    SettingsStore, WindowDecoration,
+    AppSettings, CdnCacheStore, LibraryCache, PersistedWindowSize, SettingsStore, WindowDecoration,
 };
 use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
@@ -138,14 +138,7 @@ pub struct LyruneView {
     search_track_table: Entity<TableState<TrackTableDelegate>>,
     search_card_grid: Entity<ListState<SearchCardGridDelegate>>,
     search_input: Entity<InputState>,
-    ui_font_input: Entity<InputState>,
-    monospace_font_input: Entity<InputState>,
-    lyric_font_input: Entity<InputState>,
-    audio_cache_limit_input: Entity<InputState>,
-    image_cache_capacity_input: Entity<InputState>,
-    navigation_history_limit_input: Entity<InputState>,
-    lyric_font_scale_input: Entity<InputState>,
-    lyric_line_spacing_input: Entity<InputState>,
+    settings_inputs: SettingsInputs,
     settings_scroll_handle: ScrollHandle,
     progress_slider: Entity<SliderState>,
     volume_slider: Entity<SliderState>,
@@ -259,69 +252,7 @@ impl LyruneView {
                 .placeholder("想播放什么？")
                 .context_menu(false)
         });
-        let ui_font_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.ui_font_families.join(", "))
-                .placeholder("例如：Inter, Noto Sans CJK SC")
-        });
-        let monospace_font_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.monospace_font_families.join(", "))
-                .placeholder("例如：JetBrains Mono, Noto Sans Mono")
-        });
-        let lyric_font_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.lyric_font_families.join(", "))
-                .placeholder("例如：LXGW WenKai, Noto Sans CJK JP")
-        });
-        let audio_cache_limit_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.audio_cache_limit_gb.to_string())
-                .mask_pattern(MaskPattern::Number {
-                    separator: None,
-                    fraction: None,
-                })
-                .validate(|value, _| value.parse::<u64>().is_ok_and(|value| value > 0))
-                .min(1.)
-                .step(1.)
-        });
-        let image_cache_capacity_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.image_cache_capacity.to_string())
-                .mask_pattern(MaskPattern::Number {
-                    separator: None,
-                    fraction: None,
-                })
-                .validate(|value, _| value.parse::<usize>().is_ok_and(|value| value > 0))
-                .min(1.)
-                .step(1.)
-        });
-        let navigation_history_limit_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.navigation_history_limit.to_string())
-                .mask_pattern(MaskPattern::Number {
-                    separator: None,
-                    fraction: None,
-                })
-                .validate(|value, _| value.parse::<usize>().is_ok_and(|value| value > 0))
-                .min(1.)
-                .step(1.)
-        });
-        let scale_input = |value: u32, window: &mut Window, cx: &mut Context<Self>| {
-            cx.new(|cx| {
-                InputState::new(window, cx)
-                    .default_value(value.to_string())
-                    .mask_pattern(MaskPattern::Number {
-                        separator: None,
-                        fraction: None,
-                    })
-                    .validate(|value, _| value.parse::<u32>().is_ok())
-                    .min(MIN_SCALE_PERCENT as f64)
-                    .step(10.)
-            })
-        };
-        let lyric_font_scale_input = scale_input(settings.lyric_font_scale, window, cx);
-        let lyric_line_spacing_input = scale_input(settings.lyric_line_spacing, window, cx);
+        let settings_inputs = SettingsInputs::new(&settings, window, cx);
         // Delegate 只发出交互/补页信号；这里把信号接回应用实体，避免控件直接管理网络状态。
         let (load_more_sender, load_more_receiver) = mpsc::channel(1);
         let (search_load_more_sender, search_load_more_receiver) = mpsc::channel(1);
@@ -392,7 +323,7 @@ impl LyruneView {
                 },
             ),
             cx.subscribe_in(
-                &audio_cache_limit_input,
+                &settings_inputs.audio_cache_limit,
                 window,
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
@@ -401,7 +332,7 @@ impl LyruneView {
                 },
             ),
             cx.subscribe_in(
-                &image_cache_capacity_input,
+                &settings_inputs.image_cache_capacity,
                 window,
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
@@ -410,7 +341,7 @@ impl LyruneView {
                 },
             ),
             cx.subscribe_in(
-                &navigation_history_limit_input,
+                &settings_inputs.navigation_history_limit,
                 window,
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
@@ -419,7 +350,7 @@ impl LyruneView {
                 },
             ),
             cx.subscribe_in(
-                &lyric_font_scale_input,
+                &settings_inputs.lyric_font_scale,
                 window,
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
@@ -428,7 +359,7 @@ impl LyruneView {
                 },
             ),
             cx.subscribe_in(
-                &lyric_line_spacing_input,
+                &settings_inputs.lyric_line_spacing,
                 window,
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
@@ -515,14 +446,7 @@ impl LyruneView {
             search_track_table,
             search_card_grid,
             search_input,
-            ui_font_input,
-            monospace_font_input,
-            lyric_font_input,
-            audio_cache_limit_input,
-            image_cache_capacity_input,
-            navigation_history_limit_input,
-            lyric_font_scale_input,
-            lyric_line_spacing_input,
+            settings_inputs,
             settings_scroll_handle: ScrollHandle::new(),
             progress_slider,
             volume_slider,

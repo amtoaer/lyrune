@@ -1,3 +1,14 @@
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use gpui::{Pixels, Rgba, black, px, rgb};
+use qqmusic_api::integration::{
+    PlaylistPage, Quality, SearchAlbum, SearchPage, SearchResults, Track, UserPlaylist,
+    UserPlaylistId,
+};
+
 use super::lyrics::parse_lyrics;
 use super::lyrics_view::{
     LYRIC_MINIMUM_CONTRAST, adjacent_lyric_timing, combined_lyric_frame_interval, contrast_ratio,
@@ -19,15 +30,6 @@ use super::queue::{
 };
 use crate::settings::{
     DEFAULT_NAVIGATION_HISTORY_LIMIT, LyricFrameRate, PersistedQueueContinuation,
-};
-use gpui::{Pixels, Rgba, black, px, rgb};
-use qqmusic_api::integration::{
-    PlaylistPage, Quality, SearchAlbum, SearchPage, SearchResults, Track, UserPlaylist,
-    UserPlaylistId,
-};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
 };
 
 fn track(mid: &str) -> Track {

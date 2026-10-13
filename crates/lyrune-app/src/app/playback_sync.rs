@@ -191,6 +191,7 @@ impl LyruneView {
     fn mpris_snapshot(&self) -> MprisSnapshot {
         let audio_available = self.playback.audio.is_some();
         let loading = self.playback.load.track.is_some();
+        // 系统媒体状态在加载期间沿用 Playing，区别于设备时钟是否实际推进。
         let playback_status = if loading {
             MprisPlaybackStatus::Playing
         } else if !self.playback.started {

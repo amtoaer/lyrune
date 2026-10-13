@@ -23,7 +23,7 @@
 | [lyrics_loading](../crates/lyrune-app/src/app/lyrics_loading.rs) | `LyricsCache` 持有歌词数据缓存并应用结果；视图编排磁盘读取、网络刷新与通知 |
 | [lyrics](../crates/lyrune-app/src/app/lyrics.rs) | LRC/QRC 解析、翻译和注音对齐 |
 | [lyrics_view](../crates/lyrune-app/src/app/lyrics_view.rs) | 歌词排版、逐字高亮、滚动、封面背景和动画帧调度 |
-| [app/settings](../crates/lyrune-app/src/app/settings.rs) | 设置页面及偏好的即时生效 |
+| [app/settings](../crates/lyrune-app/src/app/settings.rs) | `SettingsInputs` 创建和持有设置输入控件；设置页面及偏好的即时生效 |
 
 已有底层边界继续保留：`player.rs` 管音频设备与解码，`cache.rs` 管音频缓存与流，`http.rs` 管图片缓存，`settings.rs` 管设置和持久化数据格式，`credentials.rs` 管系统钥匙串，`library.rs` 管列表/表格 Delegate。QQ 协议实现仍在独立的 `qqmusic-api` crate。
 
@@ -56,6 +56,16 @@
 | 凭据刷新监听 | 安装会话时先订阅，再保存当前快照；刷新后保存新快照，撤销后清理账户并提示 | 登录版本与句柄身份同时匹配；同账号的新会话也会使旧监听失效；当前会话 snapshot 为空时仍必须接收撤销通知 |
 | 缓存凭据验证 | 使用缓存音乐库时进行 30 秒限时验证，仅失败时提示 | 版本和会话身份匹配且 snapshot 仍有效时才提示 |
 | 保存/删除凭据 | 保存捕获快照，删除在退出清理末尾启动；均通过阻塞线程执行 | 保留原独立后台任务与错误通知，不新增写入排序或版本过滤 |
+
+### 控件、设置与长任务
+
+`SettingsInputs` 拥有设置输入框及默认值、掩码和校验，`set_fonts` 仅回填三个字体输入框。“恢复默认”先改输入框，“应用字体”才更新字体、主题、排版缓存并保存。其他设置仍各自按原顺序读值、生效、保存和通知；持久化格式与同步文件保存由 `SettingsStore` 管理。
+
+`LyruneView::new` 创建领域状态、控件和订阅，随后 attach window、报告初始化错误、启动音频缓存/CDN 维护、恢复凭据、按设置安排更新检查。保留订阅句柄使回调持续有效，窗口观察句柄只在 `attach_window` 替换。补页事件接收器跟随实体；表格导航事件接收器使用原 `spawn_in` 窗口寿命，未借重构重新定义窗口重开行为。
+
+CDN 维护和音频缓存维护由视图保存 JoinHandle，重启维护或 Drop 时 abort。CDN 成功刷新后仍通过阻塞线程保存，失败仍按原间隔重试。更新检查延时启动并重新读取开关/进行中状态；完成后按原“手动/自动”区别通知。通知经当前记录的窗口句柄 defer，未改为跨窗口队列。
+
+Drop 先保存播放快照、停止音频，再保存其余偏好，最后 abort 两项维护。第一步可能因无账号/当前曲或快照没变化而不保存，所以不能删除第二次保存。
 
 ### 浏览状态和请求边界
 
@@ -106,7 +116,7 @@ MPRIS 在音源加载期间沿用 `Playing` 状态；它与 `Playback::is_advanc
 | --- | --- |
 | `ProtocolClient::playback_url` | 应用路径使用 `playback_options`；公共 API 不能仅凭当前应用无调用就删除，还需确认 crate 的外部使用和兼容要求。 |
 | `SearchCardGridDelegate::set_cards` 的参数列表 | Clippy 报告参数过多。参数分别描述数据、布局和分页状态，目前只剩一个调用点；暂未为消除提示引入参数对象，也未关闭提示。后续若布局需要独立复用，再评估其边界。 |
-| `LyruneView::new` 和设置页的长函数 | 初始化仍集中展示控件、订阅、默认值和启动顺序。三处相同的补页监听已合并；剩余长度本身不足以证明需要新的对象或更多单次调用的函数。 |
+| `LyruneView::new` 和设置页的长函数 | 设置输入的创建与状态已归入 `SettingsInputs`，领域默认值也已归入各自所有者；主构造仍集中展示其余控件、订阅和启动顺序。三处相同的补页监听已合并；剩余长度本身不足以证明需要新的对象或更多单次调用的函数。 |
 | `AudioCache::prepare_for_seek` | 仅在测试中使用，覆盖跳转 Range 请求且不发送 HEAD 的路径；删除前需要替代这项覆盖，并重新判断 `validate_remote` 的用途。 |
 | `LyruneView::drop` 的两次保存调用 | `persist_current_playback` 可能提前返回，且仅在播放快照变化时写设置；后面的 `persist_settings` 仍会保存其他偏好，不能直接作为重复调用删除。 |
 

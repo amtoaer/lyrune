@@ -113,6 +113,25 @@ impl SettingsInputs {
             lyric_line_spacing: lyric_line_spacing_input,
         }
     }
+
+    fn set_fonts(
+        &self,
+        ui: &[String],
+        monospace: &[String],
+        lyrics: &[String],
+        window: &mut Window,
+        cx: &mut Context<LyruneView>,
+    ) {
+        for (input, families) in [
+            (&self.ui_font, ui),
+            (&self.monospace_font, monospace),
+            (&self.lyric_font, lyrics),
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_value(families.join(", "), window, cx)
+            });
+        }
+    }
 }
 
 impl LyruneView {
@@ -384,18 +403,12 @@ impl LyruneView {
     }
 
     fn reset_font_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 重置按钮只回填输入框；应用/保存仍由用户点击应用字体触发。
         let ui = default_ui_font_families();
         let monospace = default_monospace_font_families();
         let lyrics = default_lyric_font_families();
         self.settings_inputs
-            .ui_font
-            .update(cx, |input, cx| input.set_value(ui.join(", "), window, cx));
-        self.settings_inputs.monospace_font.update(cx, |input, cx| {
-            input.set_value(monospace.join(", "), window, cx)
-        });
-        self.settings_inputs.lyric_font.update(cx, |input, cx| {
-            input.set_value(lyrics.join(", "), window, cx)
-        });
+            .set_fonts(&ui, &monospace, &lyrics, window, cx);
     }
 
     fn set_font_settings(
@@ -407,14 +420,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) {
         self.settings_inputs
-            .ui_font
-            .update(cx, |input, cx| input.set_value(ui.join(", "), window, cx));
-        self.settings_inputs.monospace_font.update(cx, |input, cx| {
-            input.set_value(monospace.join(", "), window, cx)
-        });
-        self.settings_inputs.lyric_font.update(cx, |input, cx| {
-            input.set_value(lyrics.join(", "), window, cx)
-        });
+            .set_fonts(&ui, &monospace, &lyrics, window, cx);
         self.settings.ui_font_families = ui;
         self.settings.monospace_font_families = monospace;
         self.settings.lyric_font_families = lyrics;

@@ -23,9 +23,6 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use self::settings::SettingsInputs;
-use account::{Account, AccountState};
-use artist::ArtistPageState;
 use gpui::{prelude::*, *};
 use gpui_base::motion::{Transition, transition};
 use gpui_component::{
@@ -41,12 +38,25 @@ use gpui_component::{
     table::{TableEvent, TableState},
     v_flex,
 };
-use home::HomePageState;
-use playlists::PlaylistPageState;
-use search::SearchPageState;
+use qqmusic_api::integration::{PlaylistPage, ProtocolClient};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use self::{
+    account::{Account, AccountState},
+    artist::ArtistPageState,
+    home::HomePageState,
+    lyrics_loading::LyricsCache,
+    lyrics_view::{
+        CachedLyricsPanel, LYRIC_BACKGROUND_OVERLAY_OPACITY, LYRIC_EXPANSION_DURATION,
+        LyricLayoutCache, LyricMotionState, interpolate_color,
+    },
+    navigation::{MainContent, NavigationHistory, PageResourceCache},
+    playback::Playback,
+    playlists::{PlaylistPageKey, PlaylistPageState},
+    search::SearchPageState,
+    settings::SettingsInputs,
+};
 use crate::cache::{AudioCache, audio_cache_limit_bytes};
 use crate::design::{AppFonts, ColorTheme};
 use crate::http::CachedImageCache;
@@ -66,15 +76,6 @@ use crate::settings::{
 };
 use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
-use lyrics_loading::LyricsCache;
-use lyrics_view::{
-    CachedLyricsPanel, LYRIC_BACKGROUND_OVERLAY_OPACITY, LYRIC_EXPANSION_DURATION,
-    LyricLayoutCache, LyricMotionState, interpolate_color,
-};
-use navigation::{MainContent, NavigationHistory, PageResourceCache};
-use playback::Playback;
-use playlists::PlaylistPageKey;
-use qqmusic_api::integration::{PlaylistPage, ProtocolClient};
 
 const PAGE_SIZE: u64 = 100;
 const ARTIST_PAGE_SIZE: u64 = 5;
@@ -1206,6 +1207,7 @@ impl Drop for LyruneView {
         if let Some(audio) = &self.playback.audio {
             audio.stop();
         }
+        // 播放快照未变化时上面的保存会跳过；这里仍需保存窗口大小等其他偏好。
         self.persist_settings();
         if let Some(task) = self.cdn_maintenance.take() {
             task.abort();

@@ -564,12 +564,16 @@ impl AudioCache {
             .as_ref()
             .is_some_and(|metadata| metadata.complete && expected_length == Some(existing_length))
         {
-            let source = open_validated_encrypted_file(
-                &paths.media,
-                ekey,
-                expected_length.context("QQ 音乐加密音频缺少长度")?,
-                format,
-            );
+            let path = paths.media;
+            let ekey = ekey.to_owned();
+            let length = expected_length.context("QQ 音乐加密音频缺少长度")?;
+            // 等待方取消时阻塞任务仍会继续；缓存锁随任务移动，避免探测途中被重写。
+            let (source, guard) = tokio::task::spawn_blocking(move || {
+                let source = open_validated_encrypted_file(&path, &ekey, length, format);
+                (source, guard)
+            })
+            .await
+            .context("QQ 音乐加密缓存解密探测任务异常退出")?;
             let source = source?;
             self.record_access(&key, existing_length).await;
             drop(guard);
@@ -778,7 +782,14 @@ impl AudioCache {
             && expected_length == Some(existing_length)
             && metadata.as_ref().is_some_and(|metadata| metadata.complete)
         {
-            let source = File::open(&paths.media).context("无法打开已缓存的歌曲")?;
+            let path = paths.media;
+            let (source, _guard) = tokio::task::spawn_blocking(move || {
+                let source = File::open(path);
+                (source, guard)
+            })
+            .await
+            .context("歌曲缓存打开任务异常退出")?;
+            let source = source.context("无法打开已缓存的歌曲")?;
             self.record_access(&key, existing_length).await;
             return Ok(PreparedStream {
                 source: CachedAudioSource::Complete {
@@ -1707,8 +1718,8 @@ mod tests {
 
     use super::{
         AudioCache, CACHE_INDEX_FILE, CACHE_INDEX_SCHEMA_VERSION, CacheIdentity, CacheIndex,
-        CachePaths, ContentRange, MAX_PREFETCH_BYTES, MIN_PREFETCH_BYTES, PersistedCacheIndex,
-        file_length, parse_content_range, prefetch_bytes,
+        CachePaths, CachedAudioSource, ContentRange, MAX_PREFETCH_BYTES, MIN_PREFETCH_BYTES,
+        PersistedCacheIndex, file_length, parse_content_range, prefetch_bytes,
     };
 
     fn track(mid: &str, media_mid: &str, title: &str) -> Track {
@@ -1999,6 +2010,28 @@ mod tests {
         assert_eq!(
             fs::read(&paths.media).expect("completed cache file"),
             payload.as_ref().as_slice()
+        );
+
+        let request_count = requested_ranges.lock().expect("requested range lock").len();
+        let cached = cache
+            .prepare(&url, &track, Quality::High)
+            .await
+            .expect("prepare completed cache");
+        assert!(matches!(&cached.source, CachedAudioSource::Complete { .. }));
+        let cached_bytes = tokio::task::spawn_blocking(move || {
+            let mut source = cached.source;
+            let mut bytes = Vec::new();
+            source
+                .read_to_end(&mut bytes)
+                .expect("read completed cache");
+            bytes
+        })
+        .await
+        .expect("cached reader task");
+        assert_eq!(cached_bytes, payload.as_ref().as_slice());
+        assert_eq!(
+            requested_ranges.lock().expect("requested range lock").len(),
+            request_count
         );
 
         server.abort();

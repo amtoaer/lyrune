@@ -373,9 +373,9 @@ impl LyruneView {
         let lyric_font_scale_input = scale_input(settings.lyric_font_scale, window, cx);
         let lyric_line_spacing_input = scale_input(settings.lyric_line_spacing, window, cx);
         // Delegate 只发出交互/补页信号；这里把信号接回应用实体，避免控件直接管理网络状态。
-        let (load_more_sender, mut load_more_receiver) = mpsc::channel(1);
-        let (search_load_more_sender, mut search_load_more_receiver) = mpsc::channel(1);
-        let (search_card_load_more_sender, mut search_card_load_more_receiver) = mpsc::channel(1);
+        let (load_more_sender, load_more_receiver) = mpsc::channel(1);
+        let (search_load_more_sender, search_load_more_receiver) = mpsc::channel(1);
+        let (search_card_load_more_sender, search_card_load_more_receiver) = mpsc::channel(1);
         let (track_event_sender, mut track_event_receiver) = mpsc::unbounded_channel();
         let track_table = cx.new(|cx| {
             TableState::new(
@@ -519,41 +519,9 @@ impl LyruneView {
             ),
         ];
 
-        cx.spawn(async move |this, cx| {
-            while load_more_receiver.recv().await.is_some() {
-                if this
-                    .update(cx, |this, cx| this.load_playlist_page(cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        cx.spawn(async move |this, cx| {
-            while search_load_more_receiver.recv().await.is_some() {
-                if this
-                    .update(cx, |this, cx| this.load_more_search(cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        cx.spawn(async move |this, cx| {
-            while search_card_load_more_receiver.recv().await.is_some() {
-                if this
-                    .update(cx, |this, cx| this.load_more_search(cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
+        Self::listen_for_load_more(load_more_receiver, Self::load_playlist_page, cx);
+        Self::listen_for_load_more(search_load_more_receiver, Self::load_more_search, cx);
+        Self::listen_for_load_more(search_card_load_more_receiver, Self::load_more_search, cx);
 
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = track_event_receiver.recv().await {
@@ -711,6 +679,22 @@ impl LyruneView {
             view.schedule_update_check(cx);
         }
         view
+    }
+
+    fn listen_for_load_more(
+        mut receiver: mpsc::Receiver<()>,
+        load_more: fn(&mut Self, &mut Context<Self>),
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            while receiver.recv().await.is_some() {
+                // 控件通道关闭或应用实体销毁后结束监听；窗口关闭本身不会结束实体的寿命。
+                if this.update(cx, load_more).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {

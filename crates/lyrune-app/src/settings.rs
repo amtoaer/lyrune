@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -416,7 +416,22 @@ impl SettingsStore {
         fs::create_dir_all(parent).context("无法创建应用设置目录")?;
         let serialized = serde_json::to_vec_pretty(&settings.clone().normalized())
             .context("无法序列化应用设置")?;
-        fs::write(path, serialized).context("无法保存应用设置")
+        // 单一写入者使用同目录临时文件；中断时保留旧配置，下次保存覆盖残留临时文件。
+        let temporary_path = path.with_extension("json.tmp");
+        let mut temporary =
+            fs::File::create(&temporary_path).context("无法创建应用设置临时文件")?;
+        temporary
+            .write_all(&serialized)
+            .context("无法写入应用设置临时文件")?;
+        temporary.sync_all().context("无法同步应用设置临时文件")?;
+        drop(temporary);
+        fs::rename(&temporary_path, path).context("无法替换应用设置")?;
+        // 同步文件内容不包含 rename 对目录项的更新。
+        #[cfg(unix)]
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .context("无法同步应用设置目录")?;
+        Ok(())
     }
 }
 
@@ -805,6 +820,59 @@ mod tests {
         assert_eq!(restored.window_size, expected.window_size);
         assert_eq!(restored.sidebar_width, expected.sidebar_width);
         fs::remove_dir_all(directory).expect("remove test settings directory");
+    }
+
+    #[test]
+    fn test_atomic_settings_save() -> Result<()> {
+        use std::io::Read as _;
+
+        let directory = std::env::temp_dir().join(format!(
+            "lyrune-settings-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let path = directory.join("settings.json");
+        let temporary_path = path.with_extension("json.tmp");
+        let mut settings = AppSettings::default();
+        SettingsStore::save_to(&path, &settings)?;
+        let original = fs::read(&path)?;
+        let mut original_file = fs::File::open(&path)?;
+
+        // 模拟写到一半后退出；启动只读取已提交的配置。
+        fs::write(&temporary_path, b"{\"volume\":")?;
+        assert_eq!(SettingsStore::load_from(&path)?.volume, settings.volume);
+        settings.volume = 0.37;
+        SettingsStore::save_to(&path, &settings)?;
+        assert_eq!(SettingsStore::load_from(&path)?.volume, settings.volume);
+        assert!(!temporary_path.exists());
+
+        // 已打开的旧文件内容不变，确认保存替换了文件而非截断重写。
+        let mut previous = Vec::new();
+        original_file.read_to_end(&mut previous)?;
+        assert_eq!(previous, original);
+        drop(original_file);
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_failed_settings_save_preserves_config() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "lyrune-settings-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let path = directory.join("settings.json");
+        let mut settings = AppSettings::default();
+        SettingsStore::save_to(&path, &settings)?;
+        let original = fs::read(&path)?;
+
+        fs::create_dir(path.with_extension("json.tmp"))?;
+        settings.volume = 0.37;
+        assert!(SettingsStore::save_to(&path, &settings).is_err());
+        assert_eq!(fs::read(&path)?, original);
+        fs::remove_dir_all(directory)?;
+        Ok(())
     }
 
     #[test]

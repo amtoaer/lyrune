@@ -32,7 +32,10 @@
 - Keep a small piece of logic inline when extracting it would only save a few lines or create a single-use function.
 - Do not create a function solely to make a module look more modular.
 - Prefer existing functions and local control flow when the behavior is simple and used once.
-- Before extracting a function, identify at least two concrete call sites or a meaningful ownership, lifecycle, or testing boundary.
+- Before extracting a function, identify at least two concrete call sites or a meaningful ownership, lifecycle, or testing boundary. Two similar call sites justify considering extraction, not extraction itself.
+- Before sharing logic, assess how much behavior is genuinely common at the proposed boundary and how much must remain specific to each caller. Weigh the duplication removed against added parameters, branches, conversions, and indirection; similar syntax alone is not evidence of a shared responsibility.
+- When caller-specific behavior dominates and the common part is mostly glue, prefer separate direct flows that reuse existing lower-level operations. Prefer consolidating repeated control flow in place when it avoids the need for a new abstraction.
+- Treat the shared proportion as a judgment aid, not a fixed percentage or line-count threshold. A small common part can still merit extraction when it enforces an important invariant or a clear lifecycle boundary; explain that concrete benefit rather than relying on code similarity alone.
 
 ## Proportional testing
 

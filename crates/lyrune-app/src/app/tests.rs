@@ -1,0 +1,562 @@
+use super::lyrics::parse_lyrics;
+use super::lyrics_view::{
+    LYRIC_MINIMUM_CONTRAST, adjacent_lyric_timing, combined_lyric_frame_interval, contrast_ratio,
+    lyric_edge_opacity, lyric_frame_is_due, lyric_horizontal_scroll_offset,
+    lyric_position_for_frame_rate, readable_lyric_color,
+};
+use super::navigation::{
+    NavigationPage, PlaylistResource, SearchResource, resolved_playlist_scroll_row,
+};
+use super::player_view::format_playback_time;
+use super::playlists::playlist_title_is_long;
+use super::queue::{
+    canonical_queue_track_index, insert_external_track_after_current, insert_track_after_current,
+};
+use super::{
+    NavigationHistory, PlaybackQueue, PlaylistScrollPosition, SearchCategory, SearchVisibleCounts,
+};
+use crate::settings::{DEFAULT_NAVIGATION_HISTORY_LIMIT, LyricFrameRate};
+use gpui::{Pixels, Rgba, black, px, rgb};
+use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+fn track(mid: &str) -> Track {
+    Track {
+        song_id: None,
+        song_type: 0,
+        mid: mid.to_owned(),
+        media_mid: None,
+        standard_size_bytes: None,
+        high_size_bytes: None,
+        lossless_size_bytes: None,
+        hi_res_size_bytes: None,
+        atmos_stereo_size_bytes: None,
+        atmos_surround_size_bytes: None,
+        master_size_bytes: None,
+        title: mid.to_owned(),
+        artists: String::new(),
+        artist_details: Vec::new(),
+        album: String::new(),
+        album_mid: String::new(),
+        cover_url: None,
+        duration_seconds: 180,
+    }
+}
+
+fn mids(tracks: &[Arc<Track>]) -> Vec<&str> {
+    tracks.iter().map(|track| track.mid.as_str()).collect()
+}
+
+#[test]
+fn lyric_foreground_preserves_a_readable_theme_color() {
+    let preferred = rgb(0x182030).into();
+    let result =
+        readable_lyric_color([0.95, 0.95, 0.95], black().opacity(0.28), preferred).to_rgb();
+    let preferred = preferred.to_rgb();
+
+    assert!((result.r - preferred.r).abs() < 1e-6);
+    assert!((result.g - preferred.g).abs() < 1e-6);
+    assert!((result.b - preferred.b).abs() < 1e-6);
+}
+
+#[test]
+fn lyric_foreground_minimally_corrects_insufficient_theme_contrast() {
+    let background = Rgba {
+        r: 0.5,
+        g: 0.5,
+        b: 0.5,
+        a: 1.,
+    };
+    let result = readable_lyric_color(
+        [background.r, background.g, background.b],
+        black().opacity(0.),
+        rgb(0x777777).into(),
+    )
+    .to_rgb();
+
+    assert!(contrast_ratio(result, background) >= LYRIC_MINIMUM_CONTRAST);
+    assert!(result.r > 0. && result.g > 0. && result.b > 0.);
+}
+
+#[test]
+fn horizontal_lyric_scroll_starts_at_the_anchor_and_stops_at_the_end() {
+    assert_eq!(
+        lyric_horizontal_scroll_offset(px(500.), px(600.), px(500.)),
+        px(0.)
+    );
+    assert_eq!(
+        lyric_horizontal_scroll_offset(px(1000.), px(600.), px(250.)),
+        px(0.)
+    );
+    assert_eq!(
+        lyric_horizontal_scroll_offset(px(1000.), px(600.), px(300.)),
+        px(48.)
+    );
+    assert_eq!(
+        lyric_horizontal_scroll_offset(px(1000.), px(600.), px(1000.)),
+        px(400.)
+    );
+}
+
+#[test]
+fn lyric_rows_fade_before_reaching_the_viewport_edge() {
+    assert_eq!(lyric_edge_opacity(px(100.), px(204.), px(0.), px(400.)), 1.);
+    assert!((lyric_edge_opacity(px(272.), px(376.), px(0.), px(400.)) - 0.5).abs() < 1e-6);
+    assert_eq!(lyric_edge_opacity(px(296.), px(400.), px(0.), px(400.)), 0.);
+    assert_eq!(lyric_edge_opacity(px(-10.), px(94.), px(0.), px(400.)), 0.);
+}
+
+#[test]
+fn lyric_frame_intervals_preserve_the_fastest_animation_requirement() {
+    assert_eq!(
+        combined_lyric_frame_interval(LyricFrameRate::Fps30, LyricFrameRate::Fps60),
+        LyricFrameRate::Fps60.frame_interval()
+    );
+    assert_eq!(
+        combined_lyric_frame_interval(LyricFrameRate::Display, LyricFrameRate::Fps60),
+        None
+    );
+    assert_eq!(
+        combined_lyric_frame_interval(LyricFrameRate::Fps30, LyricFrameRate::Display),
+        None
+    );
+}
+
+#[test]
+fn lyric_position_is_quantized_only_for_limited_highlight_rates() {
+    let position = Duration::from_millis(50);
+    assert_eq!(
+        lyric_position_for_frame_rate(position, LyricFrameRate::Fps30),
+        Duration::from_nanos(1_000_000_000 / 30)
+    );
+    assert_eq!(
+        lyric_position_for_frame_rate(position, LyricFrameRate::Display),
+        position
+    );
+}
+
+#[test]
+fn limited_lyric_frames_follow_one_stable_deadline() {
+    let now = Instant::now();
+    let interval = LyricFrameRate::Fps30.frame_interval().unwrap();
+    let mut next_frame = None;
+
+    assert!(!lyric_frame_is_due(
+        now,
+        LyricFrameRate::Fps30,
+        &mut next_frame
+    ));
+    assert_eq!(next_frame, Some(now + interval));
+    assert!(!lyric_frame_is_due(
+        now + Duration::from_millis(10),
+        LyricFrameRate::Fps30,
+        &mut next_frame
+    ));
+    assert!(lyric_frame_is_due(
+        now + interval,
+        LyricFrameRate::Fps30,
+        &mut next_frame
+    ));
+    assert!(lyric_frame_is_due(
+        now + interval,
+        LyricFrameRate::Display,
+        &mut next_frame
+    ));
+    assert_eq!(next_frame, None);
+}
+
+#[test]
+fn untimed_qrc_tail_extends_to_the_next_line() {
+    let timing = (Duration::from_millis(100), Duration::from_millis(600));
+
+    assert_eq!(
+        adjacent_lyric_timing(
+            Some(timing),
+            None,
+            Duration::ZERO,
+            Duration::from_millis(900)
+        ),
+        (Duration::from_millis(600), Duration::from_millis(900))
+    );
+}
+
+#[test]
+fn untimed_qrc_text_between_words_uses_the_timing_gap() {
+    let previous = (Duration::from_millis(100), Duration::from_millis(600));
+    let next = (Duration::from_millis(900), Duration::from_millis(1_200));
+
+    assert_eq!(
+        adjacent_lyric_timing(
+            Some(previous),
+            Some(next),
+            Duration::ZERO,
+            Duration::from_millis(1_500)
+        ),
+        (Duration::from_millis(600), Duration::from_millis(900))
+    );
+}
+
+#[test]
+fn prefers_qrc_word_timing_and_preserves_lyric_parentheses() {
+    let lyrics = parse_lyrics(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<QrcInfos><LyricInfo LyricCount="1"><Lyric_1 LyricType="1" LyricContent="[1000,700]青(1000,300)い(1300,150)空（そら）(1450,250)&#10;[2000,500]次(2000,500)"/></LyricInfo></QrcInfos>"#,
+        Some("[00:01.000]蓝色天空\n[00:02.000]下一句"),
+        None,
+    );
+
+    assert_eq!(lyrics.lines.len(), 2);
+    assert_eq!(lyrics.lines[0].start, Duration::from_secs(1));
+    assert_eq!(lyrics.lines[0].text, "青い空（そら）");
+    assert_eq!(lyrics.lines[0].words.len(), 3);
+    assert_eq!(
+        lyrics.lines[0].words[0].highlight_progress(Duration::from_millis(999)),
+        0.
+    );
+    assert!(
+        (lyrics.lines[0].words[0].highlight_progress(Duration::from_millis(1_100)) - 1. / 3.).abs()
+            < f32::EPSILON
+    );
+    assert_eq!(
+        lyrics.lines[0].words[2].highlight_progress(Duration::from_millis(1_700)),
+        1.
+    );
+    assert_eq!(lyrics.lines[0].translation.as_deref(), Some("蓝色天空"));
+    assert_eq!(lyrics.active_index(Duration::from_millis(1_999)), Some(0));
+    assert_eq!(lyrics.active_index(Duration::from_secs(2)), Some(1));
+}
+
+fn playlist(diss_id: u64) -> NavigationPage {
+    playlist_at_scroll_row(diss_id, 0)
+}
+
+fn playlist_at_scroll_row(diss_id: u64, scroll_row: usize) -> NavigationPage {
+    playlist_at_scroll_position(diss_id, scroll_row, px(0.))
+}
+
+fn playlist_at_scroll_position(
+    diss_id: u64,
+    scroll_row: usize,
+    offset_y: Pixels,
+) -> NavigationPage {
+    NavigationPage::Playlist {
+        playlist: UserPlaylist {
+            id: UserPlaylistId::Favorite { diss_id },
+            title: format!("playlist-{diss_id}"),
+            cover_url: None,
+            description: String::new(),
+            owner: String::new(),
+            owner_avatar_url: None,
+            track_count: 0,
+        },
+        selected_index: None,
+        scroll_position: PlaylistScrollPosition {
+            row: scroll_row,
+            offset_y,
+        },
+        resource: None,
+    }
+}
+
+#[test]
+fn new_navigation_after_back_clears_the_forward_branch() {
+    let first = playlist(1);
+    let second = playlist(2);
+    let home = NavigationPage::Home;
+    let mut history = NavigationHistory::default();
+
+    history.record(Some(first.clone()), &home);
+    let back = history.go_back(Some(home.clone())).unwrap();
+    assert!(back.same_destination(&first));
+
+    let forward = history.go_forward(Some(first.clone())).unwrap();
+    assert!(forward.same_destination(&home));
+
+    let back = history.go_back(Some(home)).unwrap();
+    assert!(back.same_destination(&first));
+    history.record(Some(first), &second);
+
+    assert!(history.forward.is_empty());
+    let back = history.go_back(Some(second)).unwrap();
+    assert!(back.same_destination(&playlist(1)));
+}
+
+#[test]
+fn new_navigation_can_claim_a_forward_resource_before_clearing_it() {
+    let NavigationPage::Playlist { playlist, .. } = playlist(1) else {
+        unreachable!();
+    };
+    let resource = Arc::new(std::sync::Mutex::new(PlaylistResource::empty(
+        playlist.clone(),
+    )));
+    let weak = Arc::downgrade(&resource);
+    let mut history = NavigationHistory {
+        limit: DEFAULT_NAVIGATION_HISTORY_LIMIT,
+        back: Vec::new(),
+        forward: vec![NavigationPage::Playlist {
+            playlist: playlist.clone(),
+            selected_index: None,
+            scroll_position: PlaylistScrollPosition::top(),
+            resource: Some(resource),
+        }],
+    };
+
+    let claimed = weak.upgrade().expect("forward resource remains available");
+    let target = NavigationPage::Playlist {
+        playlist,
+        selected_index: None,
+        scroll_position: PlaylistScrollPosition::top(),
+        resource: Some(claimed),
+    };
+    history.record(Some(NavigationPage::Home), &target);
+
+    assert!(history.forward.is_empty());
+    assert!(weak.upgrade().is_some());
+}
+
+#[test]
+fn navigation_history_keeps_at_most_ten_pages_including_the_current_page() {
+    let mut history = NavigationHistory::default();
+    let mut current = NavigationPage::Home;
+    for diss_id in 1..=DEFAULT_NAVIGATION_HISTORY_LIMIT as u64 + 2 {
+        let target = playlist(diss_id);
+        history.record(Some(current), &target);
+        current = target;
+    }
+
+    assert_eq!(history.back.len() + 1, DEFAULT_NAVIGATION_HISTORY_LIMIT);
+    assert!(history.back[0].same_destination(&playlist(3)));
+}
+
+#[test]
+fn shrinking_navigation_history_limit_evicts_the_oldest_pages_immediately() {
+    let mut history = NavigationHistory::new(4);
+    let mut current = NavigationPage::Home;
+    for diss_id in 1..=3 {
+        let target = playlist(diss_id);
+        history.record(Some(current), &target);
+        current = target;
+    }
+
+    history.set_limit(2);
+
+    assert_eq!(history.back.len() + history.forward.len() + 1, 2);
+    assert!(history.back[0].same_destination(&playlist(2)));
+}
+
+#[test]
+fn evicting_history_releases_its_shared_page_resource() {
+    let resource = Arc::new(std::sync::Mutex::new(SearchResource::default()));
+    let weak = Arc::downgrade(&resource);
+    let mut current = NavigationPage::Search {
+        query: "resource lifetime".to_owned(),
+        category: SearchCategory::Songs,
+        visible_counts: SearchVisibleCounts::default(),
+        scroll_offsets: [px(0.); 4],
+        resource: Some(resource.clone()),
+    };
+    drop(resource);
+
+    let mut history = NavigationHistory::default();
+    for diss_id in 1..=DEFAULT_NAVIGATION_HISTORY_LIMIT as u64 {
+        let target = playlist(diss_id);
+        history.record(Some(current), &target);
+        current = target;
+    }
+
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn playlist_history_keeps_its_exact_scroll_position() {
+    let playlist = playlist_at_scroll_position(1, 37, px(-18.));
+    let mut history = NavigationHistory::default();
+
+    history.record(Some(playlist), &NavigationPage::Home);
+    let restored = history
+        .go_back(Some(NavigationPage::Home))
+        .expect("playlist history entry");
+
+    let NavigationPage::Playlist {
+        scroll_position, ..
+    } = restored
+    else {
+        panic!("restored playlist history entry");
+    };
+    assert_eq!(scroll_position.row, 37);
+    assert_eq!(scroll_position.offset_y, px(-18.));
+}
+
+#[test]
+fn playlist_scroll_waits_until_the_requested_row_is_loaded() {
+    assert_eq!(resolved_playlist_scroll_row(120, 100, true), None);
+    assert_eq!(resolved_playlist_scroll_row(120, 200, true), Some(120));
+    assert_eq!(resolved_playlist_scroll_row(250, 200, false), Some(199));
+}
+
+#[test]
+fn shared_playlist_ignores_a_late_duplicate_page() {
+    let NavigationPage::Playlist { playlist, .. } = playlist(1) else {
+        unreachable!();
+    };
+    let mut resource = PlaylistResource::empty(playlist.clone());
+    resource.apply_page(
+        playlist.clone(),
+        vec![Arc::new(track("first"))],
+        true,
+        20,
+        0,
+    );
+    resource.apply_page(
+        playlist.clone(),
+        vec![Arc::new(track("second"))],
+        true,
+        40,
+        20,
+    );
+    resource.apply_page(playlist, vec![Arc::new(track("duplicate"))], false, 40, 20);
+
+    assert_eq!(mids(&resource.tracks), ["first", "second"]);
+    assert!(resource.has_more);
+    assert_eq!(resource.next_offset, 40);
+}
+
+#[test]
+fn playback_time_uses_compact_player_formatting() {
+    assert_eq!(format_playback_time(Duration::from_secs(137)), "2:17");
+    assert_eq!(format_playback_time(Duration::from_secs(3_661)), "1:01:01");
+}
+
+#[test]
+fn playlist_title_length_accounts_for_wide_characters() {
+    assert!(!playlist_title_is_long("123456789012345678901234"));
+    assert!(playlist_title_is_long("1234567890123456789012345"));
+    assert!(!playlist_title_is_long("一二三四五六七八九十一二"));
+    assert!(playlist_title_is_long("一二三四五六七八九十一二三"));
+}
+
+#[test]
+fn search_history_keeps_the_active_category_without_splitting_one_query() {
+    let visible_counts = SearchVisibleCounts {
+        albums: 60,
+        ..Default::default()
+    };
+    let songs = NavigationPage::Search {
+        query: "周杰伦".to_owned(),
+        category: SearchCategory::Songs,
+        visible_counts: SearchVisibleCounts::default(),
+        scroll_offsets: [px(0.); 4],
+        resource: None,
+    };
+    let albums = NavigationPage::Search {
+        query: "周杰伦".to_owned(),
+        category: SearchCategory::Albums,
+        visible_counts,
+        scroll_offsets: [px(-120.), px(-360.), px(-720.), px(-180.)],
+        resource: None,
+    };
+    assert!(songs.same_destination(&albums));
+
+    let target = playlist(42);
+    let mut history = NavigationHistory::default();
+    history.record(Some(albums.clone()), &target);
+    let restored = history.go_back(Some(target)).expect("search history entry");
+    assert!(matches!(
+        restored,
+        NavigationPage::Search {
+            query,
+            category: SearchCategory::Albums,
+            visible_counts,
+            scroll_offsets,
+            ..
+        } if query == "周杰伦"
+            && visible_counts.albums == 60
+            && scroll_offsets == [px(-120.), px(-360.), px(-720.), px(-180.)]
+    ));
+}
+
+#[test]
+fn search_history_keeps_scroll_offsets_between_queries() {
+    let previous = NavigationPage::Search {
+        query: "milet".to_owned(),
+        category: SearchCategory::Playlists,
+        visible_counts: SearchVisibleCounts::default(),
+        scroll_offsets: [px(-128.), px(-480.), px(-256.), px(-64.)],
+        resource: None,
+    };
+    let next = NavigationPage::Search {
+        query: "许嵩".to_owned(),
+        category: SearchCategory::Songs,
+        visible_counts: SearchVisibleCounts::default(),
+        scroll_offsets: [px(0.); 4],
+        resource: None,
+    };
+    let mut history = NavigationHistory::default();
+    history.record(Some(previous), &next);
+    let restored = history.go_back(Some(next)).expect("previous search");
+    assert!(matches!(
+        &restored,
+        NavigationPage::Search { category: SearchCategory::Playlists, scroll_offsets, .. }
+            if *scroll_offsets == [px(-128.), px(-480.), px(-256.), px(-64.)]
+    ));
+    let restored = history.go_forward(Some(restored)).expect("new search");
+    assert!(matches!(
+        restored,
+        NavigationPage::Search { query, scroll_offsets, .. }
+            if query == "许嵩" && scroll_offsets == [px(0.); 4]
+    ));
+}
+
+#[test]
+fn search_categories_follow_the_product_order() {
+    assert_eq!(
+        SearchCategory::ALL.map(SearchCategory::label),
+        ["单曲", "歌单", "专辑", "歌手"]
+    );
+}
+
+#[test]
+fn search_track_is_inserted_after_the_current_track() {
+    let mut tracks = vec![Arc::new(track("A")), Arc::new(track("B"))];
+
+    let inserted = insert_track_after_current(&mut tracks, Some(0), Arc::new(track("C")));
+
+    assert_eq!(inserted, 1);
+    assert_eq!(mids(&tracks), ["A", "C", "B"]);
+}
+
+#[test]
+fn existing_search_track_is_moved_without_duplication() {
+    let mut tracks = vec![
+        Arc::new(track("C")),
+        Arc::new(track("A")),
+        Arc::new(track("B")),
+    ];
+
+    let inserted = insert_track_after_current(&mut tracks, Some(1), Arc::new(track("C")));
+
+    assert_eq!(inserted, 1);
+    assert_eq!(mids(&tracks), ["A", "C", "B"]);
+}
+
+#[test]
+fn search_insertion_prevents_reusing_the_source_playlist_queue() {
+    let playlist_id = UserPlaylistId::Liked;
+    let mut queue = PlaybackQueue {
+        playlist_id: playlist_id.clone(),
+        tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
+        modified: false,
+        continuation: None,
+    };
+
+    let inserted =
+        insert_external_track_after_current(&mut queue, Some(0), Arc::new(track("search")));
+
+    assert_eq!(inserted, 1);
+    assert_eq!(mids(&queue.tracks), ["A", "search", "B"]);
+    assert!(queue.modified);
+    assert_eq!(canonical_queue_track_index(&queue, &playlist_id, "B"), None);
+}

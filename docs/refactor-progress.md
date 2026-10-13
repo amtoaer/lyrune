@@ -176,3 +176,25 @@
 系统存在 `/usr/bin/shutdown`，启动时只读查询 login1 `CanPowerOff` 返回 `yes`。沙箱内系统总线访问被限制，只读查询通过工具审批后完成；这不代表未来的实际关机命令已获工具批准。
 
 重构、可执行自动验证和交接文档已完成，人工桌面验收按 Goal 授权交由用户后续执行。保存本报告并完成文档提交后，按授权尝试安排五分钟后的正常关机；实际调度结果以最终回复为准。若权限或会话阻止则报告，不绕过限制；取消已成功安排的关机可运行 `shutdown -c`。
+
+## 后续：协议库精简与 crate 改名（2026-10-13）
+
+本节是后续单独授权的工作，起点为干净的 `refactor/app-modules@a95f165`；上面的 Goal 交付记录和命令保留为当时的历史记录。本次用户授权移除网易云与中间抽象，并将三个 crate 统一命名为 `lyrune`、`lyrune-api`、`lyrune-decrypt`。
+
+第一阶段提交 `8222045` 移除了网易云实现、跨平台请求 builder、平台选择和 token 包装，以及应用未使用的旧 QQ 搜索、详情、播放等接口及配套模型。调用检索证明应用查询都使用已有 `ProtocolClient`，只有扫码及刷新经过 `MusicClient`；这两处改为直接调用 QQ 登录实现。扫码任务独占 MQTT 会话，去掉了为跨平台会话包装引入的 Mutex。保留 43 项协议测试通过，应用编译通过后提交。
+
+第二阶段将登录实现收拢到 `lyrune-api/src/login.rs` 与 `login/`，协议标识和签名工具移到 `request.rs`；库的应用入口仍是 `integration`，不再保留 `platform/tencent` 目录。三个 crate 的包名、目录、依赖、导入和当前文档链接同步更新。`lyrune` 可执行文件名称不变。上游 README、版本记录、MIT 许可和来源声明继续保留为历史与版权资料。
+
+等价检查确认：QQ 登录请求体、签名、响应解析及 MQTT 状态机保留原实现；应用源码除导入名称、歌词类型路径和格式调整外不变；`QqCredential` 和 `LyricResult` 的序列化声明不变；QMC 解密实现完整搬移。`LoginToken` 只在登录模块与凭据转换之间使用，去掉未调用的构造及过期查询接口；凭据转换只去掉了必定成功的 Result 包装。登录协议的进程 GUID 和 Cookie 仍与资源请求分开，并补充了原因注释。
+
+协议 crate 去掉 9 项不再使用的直接依赖：`aes`、`cookie`、`ecb`、`hashbrown`、`image`、`md5`、`qrcode`、`time`、`dotenvy`（开发依赖）。最后仍由其他库需要的传递依赖保留，锁文件没有升级外部依赖版本。
+
+验证结果：
+
+- `cargo test --locked --offline --workspace --quiet`：应用 99 项、API 43 项、解密 2 项通过；3 项真实账号/网络用例按原设置忽略。
+- `cargo check -p lyrune --all-targets --offline`：通过。
+- `cargo clippy --locked --offline --workspace --all-targets`：通过，仅原有 `library.rs::set_cards` 参数过多警告。
+- `cargo doc --locked --offline --no-deps -p lyrune-api -p lyrune-decrypt`：通过。
+- `cargo fmt --all -- --check` 与 `git diff --check`：通过。
+
+保留并扩展了凭据撤销测试，确认直接登录客户端的业务拒绝错误穿过 anyhow 上下文后仍能触发撤销。删除的测试对应已删除的跨平台接口，没有建立新的网络 mock 框架。未执行真实扫码、凭据刷新和桌面播放验收，也没有测量体积或性能收益。本次没有推送、重放 PR #35 或处理此前记录的推荐回填与歌词 loading 风险。用户另行授权本次验证、提交完成后正常关机，执行结果以对话最终回复为准。

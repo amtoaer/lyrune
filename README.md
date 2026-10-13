@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="crates/lyrune-app/assets/lyrune.svg" width="96" alt="Lyrune icon">
+  <img src="crates/lyrune/assets/lyrune.svg" width="96" alt="Lyrune icon">
 </p>
 
 <h1 align="center">Lyrune</h1>

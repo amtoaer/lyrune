@@ -6,7 +6,7 @@
 
 ## 从哪里开始读
 
-程序入口是 [main.rs](../crates/lyrune-app/src/main.rs)：创建 GPUI 应用和窗口，连接托盘、单实例和 Linux 媒体控制。[app.rs](../crates/lyrune-app/src/app.rs) 定义 `LyruneView`，创建控件和订阅，组合主界面。
+程序入口是 [main.rs](../crates/lyrune/src/main.rs)：创建 GPUI 应用和窗口，连接托盘、单实例和 Linux 媒体控制。[app.rs](../crates/lyrune/src/app.rs) 定义 `LyruneView`，创建控件和订阅，组合主界面。
 
 `app/` 中的 `impl LyruneView` 都作用于同一个 GPUI 实体。实体持有领域状态和控件，方法按职责放置；关闭窗口后，主程序仍可持有这个实体，继续播放。拆分状态所有者时，需要同时考虑窗口重开、订阅和后台任务的寿命。
 
@@ -14,20 +14,24 @@
 
 | 模块 | 负责什么 |
 | --- | --- |
-| [account](../crates/lyrune-app/src/app/account.rs) | `Account` 持有账号、凭据、二维码及登录版本；扫码登录、凭据恢复和刷新、退出及会话失效 |
-| [navigation](../crates/lyrune-app/src/app/navigation.rs) | 页面快照、前进后退；`PageResourceCache` 管账号隔离的弱引用索引、获取和淘汰；资源类型管理结果应用 |
-| [home](../crates/lyrune-app/src/app/home.rs)、[search](../crates/lyrune-app/src/app/search.rs)、[artist](../crates/lyrune-app/src/app/artist.rs) | 各页面的 `*PageState` 持有当前页状态，视图方法负责加载、分页和显示 |
-| [playlists](../crates/lyrune-app/src/app/playlists.rs) | `PlaylistPageState` 持有当前歌单与滚动恢复；用户歌单、分页浏览、喜欢状态及页面同步 |
-| [queue](../crates/lyrune-app/src/app/queue.rs) | 播放队列的建立、插入、补全、恢复和推荐续播 |
-| [playback](../crates/lyrune-app/src/app/playback.rs) | `Playback` 持有音频设备、队列、当前曲、位置、音质和恢复信息；音源加载、音源选择、音质回退、解码准备、播放/暂停/跳歌/seek |
-| [playback_sync](../crates/lyrune-app/src/app/playback_sync.rs) | 窗口进度、曲终处理、定期保存、MPRIS 和休眠抑制 |
-| [player_view](../crates/lyrune-app/src/app/player_view.rs) | 播放栏、进度预览和音质菜单 |
-| [lyrics_loading](../crates/lyrune-app/src/app/lyrics_loading.rs) | `LyricsCache` 持有歌词数据缓存并应用结果；视图编排磁盘读取、网络刷新与通知 |
-| [lyrics](../crates/lyrune-app/src/app/lyrics.rs) | LRC/QRC 解析、翻译和注音对齐 |
-| [lyrics_view](../crates/lyrune-app/src/app/lyrics_view.rs) | 歌词排版、逐字高亮、滚动、封面背景和动画帧调度 |
-| [app/settings](../crates/lyrune-app/src/app/settings.rs) | `SettingsInputs` 创建和持有设置输入控件；设置页面及偏好的即时生效 |
+| [account](../crates/lyrune/src/app/account.rs) | `Account` 持有账号、凭据、二维码及登录版本；扫码登录、凭据恢复和刷新、退出及会话失效 |
+| [navigation](../crates/lyrune/src/app/navigation.rs) | 页面快照、前进后退；`PageResourceCache` 管账号隔离的弱引用索引、获取和淘汰；资源类型管理结果应用 |
+| [home](../crates/lyrune/src/app/home.rs)、[search](../crates/lyrune/src/app/search.rs)、[artist](../crates/lyrune/src/app/artist.rs) | 各页面的 `*PageState` 持有当前页状态，视图方法负责加载、分页和显示 |
+| [playlists](../crates/lyrune/src/app/playlists.rs) | `PlaylistPageState` 持有当前歌单与滚动恢复；用户歌单、分页浏览、喜欢状态及页面同步 |
+| [queue](../crates/lyrune/src/app/queue.rs) | 播放队列的建立、插入、补全、恢复和推荐续播 |
+| [playback](../crates/lyrune/src/app/playback.rs) | `Playback` 持有音频设备、队列、当前曲、位置、音质和恢复信息；音源加载、音源选择、音质回退、解码准备、播放/暂停/跳歌/seek |
+| [playback_sync](../crates/lyrune/src/app/playback_sync.rs) | 窗口进度、曲终处理、定期保存、MPRIS 和休眠抑制 |
+| [player_view](../crates/lyrune/src/app/player_view.rs) | 播放栏、进度预览和音质菜单 |
+| [lyrics_loading](../crates/lyrune/src/app/lyrics_loading.rs) | `LyricsCache` 持有歌词数据缓存并应用结果；视图编排磁盘读取、网络刷新与通知 |
+| [lyrics](../crates/lyrune/src/app/lyrics.rs) | LRC/QRC 解析、翻译和注音对齐 |
+| [lyrics_view](../crates/lyrune/src/app/lyrics_view.rs) | 歌词排版、逐字高亮、滚动、封面背景和动画帧调度 |
+| [app/settings](../crates/lyrune/src/app/settings.rs) | `SettingsInputs` 创建和持有设置输入控件；设置页面及偏好的即时生效 |
 
-已有底层边界继续保留：`player.rs` 管音频设备与解码，`cache.rs` 管音频缓存与流，`http.rs` 管图片缓存，`settings.rs` 管设置和持久化数据格式，`credentials.rs` 管系统钥匙串，`library.rs` 管列表/表格 Delegate。QQ 协议实现仍在独立的 `qqmusic-api` crate。
+已有底层边界继续保留：`player.rs` 管音频设备与解码，`cache.rs` 管音频缓存与流，`http.rs` 管图片缓存，`settings.rs` 管设置和持久化数据格式，`credentials.rs` 管系统钥匙串，`library.rs` 管列表/表格 Delegate。QQ 协议实现仍在独立的 `lyrune-api` crate。
+
+工作区现由三个内部 crate 组成：`crates/lyrune` 是桌面应用，`crates/lyrune-api` 是 QQ 音乐协议实现，`crates/lyrune-decrypt` 负责 QMC 音频解密。包名与目录名一致。
+
+`lyrune-api::integration` 是应用入口，持有凭据会话与应用需要的数据类型；`integration/protocol.rs` 实现曲库、搜索、歌词、音源及 CDN 请求。扫码与刷新直接调用 `login.rs`，响应校验和 MQTT 状态机位于 `login/`，协议标识和签名算法位于 `request.rs`。网易云、跨平台 builder、平台 token 包装，以及应用未使用的旧查询接口已移除。`QqCredential` 和 `LyricResult` 的序列化字段保持原样；登录 Cookie 和 GUID 继续使用原来的规则。
 
 ## 关键调用关系
 
@@ -112,7 +116,7 @@ MPRIS 在音源加载期间沿用 `Playing` 状态；它与 `Playback::is_advanc
 - **歌词时间和排版不能按字符数简化。** 字范围是 UTF-8 字节下标；没有字级计时的标点和尾部文字借用相邻时间段。QRC 的严格与宽松解析都覆盖真实格式差异，现有测试包含未转义属性和截断输入。
 - **自绘和帧率缓存有用途。** 歌词缩放复用已排版字形；进度条用路径避免设备像素取整造成跳动。面板缓存让其他控件重绘时仍遵守歌词帧率限制。`expanded`、`visible`、`fully_expanded` 分别表示用户目标、过渡可见性和跳过底层页面渲染的时机。
 
-网络与阻塞准备任务使用 [runtime.rs](../crates/lyrune-app/src/runtime.rs) 的共享 Tokio runtime；GPUI 实体通过 `cx.spawn` / `this.update` 接收结果。`drop(RUNTIME.spawn(...))` 让 Tokio 任务继续运行，不能理解为取消。长期维护任务保存 `JoinHandle`，重启维护或实体销毁时显式 `abort`。
+网络与阻塞准备任务使用 [runtime.rs](../crates/lyrune/src/runtime.rs) 的共享 Tokio runtime；GPUI 实体通过 `cx.spawn` / `this.update` 接收结果。`drop(RUNTIME.spawn(...))` 让 Tokio 任务继续运行，不能理解为取消。长期维护任务保存 `JoinHandle`，重启维护或实体销毁时显式 `abort`。
 
 ## 保留、以后再判断的代码
 
@@ -135,12 +139,12 @@ MPRIS 在音源加载期间沿用 `Playing` 状态；它与 `Playback::is_advanc
 ```sh
 cargo check --locked -p lyrune --all-targets
 cargo test --locked -p lyrune
-cargo test --locked -p netease-qq-music-api quality_fallback
+cargo test --locked -p lyrune-api quality_fallback
 cargo clippy --locked -p lyrune --all-targets
 cargo fmt --all -- --check
 ```
 
-应用回归测试在 [app/tests.rs](../crates/lyrune-app/src/app/tests.rs)，纯解析测试在 `app/lyrics.rs`。现有测试覆盖页面资源寿命、历史滚动位置、队列插入、歌词计时和缓存等关键约束。部分缓存测试启动本机 HTTP 服务，需要允许绑定回环端口；两个真实账号测试默认忽略，需要系统钥匙串中的凭据和 QQ 音乐网络访问。
+应用回归测试在 [app/tests.rs](../crates/lyrune/src/app/tests.rs)，纯解析测试在 `app/lyrics.rs`。现有测试覆盖页面资源寿命、历史滚动位置、队列插入、歌词计时和缓存等关键约束。部分缓存测试启动本机 HTTP 服务，需要允许绑定回环端口；两个真实账号测试默认忽略，需要系统钥匙串中的凭据和 QQ 音乐网络访问。
 
 局部整理复用已有测试，没有为模式匹配、构造入口或信号转发增加测试。队列规则整理新增两项行为测试，验证追加顺序、重复歌曲保留与续播起点，以及页面重新排序或缺少歌曲时的播放标记。音源准备与回调整理保留回退分支、事件发送顺序和播放版本过滤；音源获取与设备播放失败共用提示和跳歌处理，各自的错误文案不变。现有音质和缓存测试覆盖各自策略，不能单独证明完整的播放交互链路。
 

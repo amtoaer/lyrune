@@ -1,0 +1,366 @@
+//! 首页推荐歌单的加载与显示；个性化歌曲的播放和续播由 queue 管理。
+
+use std::time::Duration;
+
+use anyhow::Context as _;
+use gpui::{prelude::*, *};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    scroll::ScrollableElement as _,
+    spinner::Spinner,
+    v_flex,
+};
+use lyrune_api::integration::{RecommendationKind, UserPlaylist};
+
+use super::{LyruneView, page_horizontal_padding};
+use crate::icons::{MediaIcon, media_icon_hsla};
+use crate::library::playlist_cover;
+use crate::runtime::RUNTIME;
+
+#[derive(Default)]
+pub(super) struct HomePageState {
+    pub(super) playlists: Vec<UserPlaylist>,
+    pub(super) loading: bool,
+    pub(super) loaded: bool,
+    pub(super) error: Option<String>,
+    pub(super) generation: u64,
+    pub(super) recommendation_loading: Option<RecommendationKind>,
+}
+
+impl LyruneView {
+    pub(super) fn load_home(&mut self, cx: &mut Context<Self>) {
+        if self.home.loading {
+            return;
+        }
+        let Some(credential) = self.account.credential.clone() else {
+            self.home.error = Some("请先登录 QQ 音乐".to_owned());
+            cx.notify();
+            return;
+        };
+        let Some(client) = self.protocol_client.clone() else {
+            self.home.error = Some("QQ 音乐客户端不可用".to_owned());
+            cx.notify();
+            return;
+        };
+        self.home.generation = self.home.generation.wrapping_add(1);
+        let generation = self.home.generation;
+        self.home.loading = true;
+        self.home.error = None;
+        cx.notify();
+
+        let task = RUNTIME.spawn(async move {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                client.recommended_playlists(&credential, 0, 20),
+            )
+            .await
+            .context("QQ 音乐主页请求等待超过 30 秒")
+            .and_then(|result| result)
+        });
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.home.generation != generation {
+                    return;
+                }
+                this.home.loading = false;
+                match result {
+                    Ok(page) => {
+                        this.home.loaded = true;
+                        this.home.playlists = page.items;
+                        this.home.error = None;
+                    }
+                    Err(error) => {
+                        this.home.error = Some(format!("加载主页推荐失败：{error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn render_home(
+        &mut self,
+        compact: bool,
+        narrow: bool,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        if self.home.loading && self.home.playlists.is_empty() {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .text_color(theme.muted_foreground)
+                .child(Spinner::new().with_size(px(24.)).color(theme.primary))
+                .child("正在加载主页推荐…")
+                .into_any_element();
+        }
+        if self.home.playlists.is_empty()
+            && let Some(error) = self.home.error.clone()
+        {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_4()
+                .text_color(theme.muted_foreground)
+                .child(error)
+                .child(
+                    Button::new("retry-home")
+                        .outline()
+                        .h(px(44.))
+                        .px_4()
+                        .label("重新加载")
+                        .on_click(cx.listener(|this, _, _, cx| this.load_home(cx))),
+                )
+                .into_any_element();
+        }
+        if self.home.loaded && self.home.playlists.is_empty() {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_color(theme.muted_foreground)
+                .child("QQ 音乐暂时没有返回可显示的歌单推荐")
+                .into_any_element();
+        }
+
+        let cover_size = if narrow {
+            px(132.)
+        } else if compact {
+            px(148.)
+        } else {
+            px(168.)
+        };
+        let card_width = cover_size + px(16.);
+        let feature_width = if narrow {
+            px(304.)
+        } else if compact {
+            px(344.)
+        } else {
+            px(384.)
+        };
+        let grid_width = if narrow {
+            px(640.)
+        } else if compact {
+            px(704.)
+        } else {
+            px(784.)
+        };
+        let cards = self
+            .home
+            .playlists
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, playlist)| {
+                let cover = playlist_cover(&playlist, cover_size, px(14.), scale_factor, cx);
+                let title = playlist.title.clone();
+                let subtitle = if playlist.description.is_empty() {
+                    "为你推荐".to_owned()
+                } else {
+                    playlist.description.clone()
+                };
+                Button::new(format!("home-playlist-{index}"))
+                    .ghost()
+                    .w(card_width)
+                    .h(cover_size + px(74.))
+                    .p_2()
+                    .rounded(px(12.))
+                    .tooltip(title.clone())
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .items_start()
+                            .gap_2()
+                            .child(div().rounded(px(14.)).shadow_sm().child(cover))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .font_medium()
+                                    .text_color(theme.foreground)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(subtitle),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_home_playlist(playlist.clone(), window, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let recommendation_loading = self.home.recommendation_loading.is_some();
+        let radar_icon = media_icon_hsla(MediaIcon::Radar, theme.primary, px(25.));
+        let guess_icon = media_icon_hsla(MediaIcon::Headphones, theme.primary, px(25.));
+        let recommendation_cards = [
+            Button::new("home-radar")
+                .ghost()
+                .w(feature_width)
+                .h(px(92.))
+                .p_4()
+                .rounded(px(12.))
+                .bg(theme.muted.opacity(0.7))
+                .when(recommendation_loading, |button| {
+                    button
+                        .bg(theme.muted.opacity(0.7))
+                        .text_color(theme.secondary_foreground)
+                })
+                .disabled(recommendation_loading)
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap_4()
+                        .child(
+                            div()
+                                .size(px(48.))
+                                .flex_shrink_0()
+                                .rounded(px(10.))
+                                .bg(theme.background.opacity(0.55))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(radar_icon),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_1()
+                                .child(div().font_semibold().child("专属雷达"))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("不断更新的个性推荐"),
+                                ),
+                        ),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.start_home_recommendation(RecommendationKind::Radar, cx)
+                })),
+            Button::new("home-guess")
+                .ghost()
+                .w(feature_width)
+                .h(px(92.))
+                .p_4()
+                .rounded(px(12.))
+                .bg(theme.muted.opacity(0.7))
+                .when(recommendation_loading, |button| {
+                    button
+                        .bg(theme.muted.opacity(0.7))
+                        .text_color(theme.secondary_foreground)
+                })
+                .disabled(recommendation_loading)
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap_4()
+                        .child(
+                            div()
+                                .size(px(48.))
+                                .flex_shrink_0()
+                                .rounded(px(10.))
+                                .bg(theme.background.opacity(0.55))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(guess_icon),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_1()
+                                .child(div().font_semibold().child("猜你喜欢"))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("持续生成的个性漫游"),
+                                ),
+                        ),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.start_home_recommendation(RecommendationKind::Guess, cx)
+                })),
+        ];
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .child(
+                v_flex()
+                    .w_full()
+                    .px(page_horizontal_padding(narrow))
+                    .pt(if narrow { px(22.) } else { px(32.) })
+                    .pb_8()
+                    .child(
+                        h_flex().w_full().justify_center().child(
+                            v_flex()
+                                .w_full()
+                                .max_w(grid_width)
+                                .gap_6()
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .px_2()
+                                                .text_size(if narrow { px(22.) } else { px(24.) })
+                                                .font_semibold()
+                                                .child("智能推荐"),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .items_start()
+                                                .flex_wrap()
+                                                .gap_4()
+                                                .children(recommendation_cards),
+                                        ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .px_2()
+                                        .child(
+                                            div()
+                                                .text_size(if narrow { px(22.) } else { px(24.) })
+                                                .font_semibold()
+                                                .child("今日歌单"),
+                                        )
+                                        .when_some(self.home.error.clone(), |header, error| {
+                                            header.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(error),
+                                            )
+                                        }),
+                                )
+                                .child(h_flex().items_start().flex_wrap().gap_4().children(cards)),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+}

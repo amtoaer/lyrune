@@ -115,7 +115,7 @@ This section supplies constraints for the current Lyrune reorganization and futu
 
 Reorganize the Lyrune application so that code can be understood by responsibility and lifecycle instead of requiring readers to navigate a multi-thousand-line application source file. Reduce implicit state transitions, duplicated entry paths, misleading names, and logic that is only understandable through call-site archaeology.
 
-The immediate focus is `crates/lyrune-app`, especially application state ownership and the account/login/bootstrap flow present in the agreed baseline. The refactor should make it clear which code owns:
+The immediate focus is `crates/lyrune`, especially application state ownership and the account/login/bootstrap flow present in the agreed baseline. The refactor should make it clear which code owns:
 
 - application/view state and the top-level lifecycle;
 - settings loading, normalization, and persistence;
@@ -139,7 +139,8 @@ The following reflect explicit developer instructions, not approval inferred fro
 
 - **Internal architecture may change.** Preserve user behavior; source consistency is not a goal. Module boundaries, private names and paths, the size of `LyruneView`, and internal state representations such as `AccountState` may be redesigned when this improves ownership and maintainability. A prior choice of a conservative first step does not require retaining that structure indefinitely.
 - **Keep changes proportional.** Architecture freedom does not waive the style, reuse-proportion, and testing rules above. Demonstrate the ownership problem or shared invariant before adding an abstraction; fewer lines or more files alone are not success criteria.
-- **The protocol crate is project-internal.** `crates/qqmusic-api` is used only by Lyrune and will not be published. Replacing all workspace `HashMap` types with `hashbrown::HashMap`, including public protocol model fields, is approved. In a separate follow-up, removing NetEase support, unused cross-platform builders/models, and unnecessary intermediate layers is now approved. Keep the QQ paths used by Lyrune, including login/MQTT behavior, request parameters, credential storage, and lyric cache compatibility.
+- **The protocol crate is project-internal.** `crates/lyrune-api` is used only by Lyrune and will not be published. Replacing all workspace `HashMap` types with `hashbrown::HashMap`, including public protocol model fields, is approved. In a separate follow-up, removing NetEase support, unused cross-platform builders/models, and unnecessary intermediate layers is now approved. Keep the QQ paths used by Lyrune, including login/MQTT behavior, request parameters, credential storage, and lyric cache compatibility.
+- **Workspace names follow Lyrune ownership.** The approved crate directories and package names are `lyrune`, `lyrune-api`, and `lyrune-decrypt`. QQ API implementation belongs in `lyrune-api`; QMC audio decryption belongs in `lyrune-decrypt`.
 - **Settings persistence may run in the background.** A single worker may receive snapshots over a FIFO channel and finish each save before starting the next. Preserve save triggers and JSON compatibility, without debouncing or coalescing requests. Normal shutdown must wait for the final save. Atomic replacement through a same-directory temporary file is approved so an interrupted write cannot truncate the committed configuration. Complete writes before replacement, but leave disk flushing to the OS; do not add `sync_all`/`fsync` for power-loss durability. This authorization does not extend to other persistence paths.
 - **Explain necessary complexity.** Add concise comments for complex or non-idiomatic code that cannot reasonably be simplified, explaining the constraint or reason rather than restating the code.
 - **Record progress locally.** Make a small local commit after each coherent, verified stage. Do not push or reapply PR #35 without separate authorization.
@@ -177,7 +178,7 @@ A refactor may redesign internal ownership and state, move code, rename private 
 Use the existing project's direct style rather than introducing a framework. A possible direction is:
 
 ```text
-crates/lyrune-app/src/
+crates/lyrune/src/
 ├── app.rs                 # view type, shared state, top-level construction/render composition
 ├── app/
 │   ├── account.rs         # credential restoration, login, quick login, logout, account state

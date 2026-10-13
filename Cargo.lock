@@ -1210,16 +1210,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cookie"
-version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
-dependencies = [
- "time",
- "version_check",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1684,12 +1674,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
-
-[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1724,15 +1708,6 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
-
-[[package]]
-name = "ecb"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a8bfa975b1aec2145850fcaa1c6fe269a16578c44705a532ae3edc92b8881c7"
-dependencies = [
- "cipher",
-]
 
 [[package]]
 name = "educe"
@@ -4031,9 +4006,9 @@ dependencies = [
  "keyring",
  "ksni",
  "lru",
+ "lyrune-api",
+ "lyrune-decrypt",
  "mpris-server",
- "netease-qq-music-api",
- "qmc-decrypt",
  "quick-xml",
  "reqwest",
  "resvg 0.46.0",
@@ -4048,6 +4023,37 @@ dependencies = [
  "wana_kana",
  "xxhash-rust",
  "zbus_systemd",
+]
+
+[[package]]
+name = "lyrune-api"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-tungstenite",
+ "base64",
+ "bytes",
+ "flate2",
+ "futures-util",
+ "hex",
+ "rand 0.10.2",
+ "reqwest",
+ "rumqttc",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha1",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "lyrune-decrypt"
+version = "1.5.0"
+dependencies = [
+ "base64",
 ]
 
 [[package]]
@@ -4143,12 +4149,6 @@ dependencies = [
  "cfg-if",
  "digest 0.10.7",
 ]
-
-[[package]]
-name = "md5"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
 
 [[package]]
 name = "media"
@@ -4343,39 +4343,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
-]
-
-[[package]]
-name = "netease-qq-music-api"
-version = "1.5.0"
-dependencies = [
- "aes",
- "anyhow",
- "arc-swap",
- "async-tungstenite",
- "base64",
- "bytes",
- "cookie",
- "dotenvy",
- "ecb",
- "flate2",
- "futures-util",
- "hashbrown 0.17.1",
- "hex",
- "image",
- "md5",
- "qrcode",
- "rand 0.10.2",
- "reqwest",
- "rumqttc",
- "rustls",
- "serde",
- "serde_json",
- "sha1",
- "thiserror 2.0.20",
- "time",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -5542,28 +5509,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
-name = "qmc-decrypt"
-version = "1.5.0"
-dependencies = [
- "base64",
-]
-
-[[package]]
 name = "qoi"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
 dependencies = [
  "bytemuck",
-]
-
-[[package]]
-name = "qrcode"
-version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
-dependencies = [
- "image",
 ]
 
 [[package]]
@@ -7538,7 +7489,6 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
- "time-macros",
 ]
 
 [[package]]
@@ -7546,16 +7496,6 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
-
-[[package]]
-name = "time-macros"
-version = "0.2.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
-dependencies = [
- "num-conv",
- "time-core",
-]
 
 [[package]]
 name = "tiny-keccak"

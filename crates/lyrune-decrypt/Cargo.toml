@@ -1,0 +1,8 @@
+[package]
+name = "lyrune-decrypt"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true

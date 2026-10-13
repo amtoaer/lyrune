@@ -1212,14 +1212,15 @@ impl LyruneView {
         };
 
         let Some(lyrics) = self
-            .lyrics_cache
+            .lyrics
+            .adopted
             .get(mid)
             .map(|lyrics| lyrics.parsed.clone())
         else {
-            if self.lyrics_loading.contains(mid) {
+            if self.lyrics.loading.contains(mid) {
                 return message("正在加载歌词…", None);
             }
-            if let Some(error) = self.lyrics_errors.get(mid) {
+            if let Some(error) = self.lyrics.errors.get(mid) {
                 return message("歌词加载失败", Some(error.clone()));
             }
             return message("歌词暂未加载", None);

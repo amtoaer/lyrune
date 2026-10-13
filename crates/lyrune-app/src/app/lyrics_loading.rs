@@ -1,5 +1,6 @@
 //! 歌词的内存/磁盘缓存及后台刷新；解析在 lyrics，显示与动画在 lyrics_view。
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use tokio::sync::mpsc;
 
 use super::lyrics::{ParsedLyrics, parse_lyrics};
 use super::{LyruneView, unix_timestamp_secs};
+use crate::lyrics_cache::LyricDiskCache;
 use crate::runtime::RUNTIME;
 
 const LYRIC_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -22,6 +24,26 @@ pub(super) struct MemoryLyrics {
 impl MemoryLyrics {
     fn is_fresh(&self, now_secs: u64) -> bool {
         now_secs.saturating_sub(self.fetched_at_secs) < LYRIC_CACHE_TTL.as_secs()
+    }
+}
+
+pub(super) struct LyricsCache {
+    disk: Option<LyricDiskCache>,
+    pub(super) adopted: HashMap<String, MemoryLyrics>,
+    pending: HashMap<String, MemoryLyrics>,
+    pub(super) loading: HashSet<String>,
+    pub(super) errors: HashMap<String, String>,
+}
+
+impl LyricsCache {
+    pub(super) fn new(disk: Option<LyricDiskCache>) -> Self {
+        Self {
+            disk,
+            adopted: HashMap::new(),
+            pending: HashMap::new(),
+            loading: HashSet::new(),
+            errors: HashMap::new(),
+        }
     }
 }
 
@@ -53,28 +75,30 @@ impl LyruneView {
             .playback
             .track()
             .is_some_and(|current| current.mid == mid);
-        if !current_is_same_track && let Some(pending) = self.pending_lyrics_cache.remove(&mid) {
-            self.lyrics_cache.insert(mid.clone(), pending);
+        if !current_is_same_track && let Some(pending) = self.lyrics.pending.remove(&mid) {
+            self.lyrics.adopted.insert(mid.clone(), pending);
             cx.notify();
         }
-        let had_cached = self.lyrics_cache.contains_key(&mid);
+        let had_cached = self.lyrics.adopted.contains_key(&mid);
         if self
-            .pending_lyrics_cache
+            .lyrics
+            .pending
             .get(&mid)
             .is_some_and(|lyrics| current_is_same_track && lyrics.is_fresh(unix_timestamp_secs()))
             || self
-                .lyrics_cache
+                .lyrics
+                .adopted
                 .get(&mid)
                 .is_some_and(|lyrics| lyrics.is_fresh(unix_timestamp_secs()))
-            || !self.lyrics_loading.insert(mid.clone())
+            || !self.lyrics.loading.insert(mid.clone())
         {
             return;
         }
 
-        self.lyrics_errors.remove(&mid);
+        self.lyrics.errors.remove(&mid);
         cx.notify();
 
-        let disk_cache = self.lyric_disk_cache.clone();
+        let disk_cache = self.lyrics.disk.clone();
         let (sender, mut receiver) = mpsc::channel(2);
         let worker_mid = mid.clone();
         drop(RUNTIME.spawn(async move {
@@ -134,50 +158,50 @@ impl LyruneView {
                     .update(cx, |this, cx| {
                         match event {
                             LyricLoadEvent::Disk { lyrics, fresh } => {
-                                this.lyrics_errors.remove(&mid);
-                                this.lyrics_cache.insert(mid.clone(), lyrics);
+                                this.lyrics.errors.remove(&mid);
+                                this.lyrics.adopted.insert(mid.clone(), lyrics);
                                 if fresh {
-                                    this.lyrics_loading.remove(&mid);
+                                    this.lyrics.loading.remove(&mid);
                                 }
                             }
                             LyricLoadEvent::Network { result, had_cached } => {
-                                this.lyrics_loading.remove(&mid);
+                                this.lyrics.loading.remove(&mid);
                                 match result {
                                     Ok(lyrics) => {
-                                        this.lyrics_errors.remove(&mid);
+                                        this.lyrics.errors.remove(&mid);
                                         let is_current = this
                                             .playback
                                             .track()
                                             .is_some_and(|track| track.mid == mid);
-                                        let unchanged = this
-                                            .lyrics_cache
-                                            .get(&mid)
-                                            .is_some_and(|cached| cached.parsed == lyrics.parsed);
+                                        let unchanged =
+                                            this.lyrics.adopted.get(&mid).is_some_and(|cached| {
+                                                cached.parsed == lyrics.parsed
+                                            });
                                         // 正在播放的歌词保持本次显示内容，避免刷新后时间轴和排版突然跳变。
                                         // 有变化的新内容暂存到 pending，下次选择该曲时再启用。
                                         if had_cached && is_current {
                                             if unchanged {
                                                 if let Some(cached) =
-                                                    this.lyrics_cache.get_mut(&mid)
+                                                    this.lyrics.adopted.get_mut(&mid)
                                                 {
                                                     cached.fetched_at_secs = lyrics.fetched_at_secs;
                                                 }
-                                                this.pending_lyrics_cache.remove(&mid);
+                                                this.lyrics.pending.remove(&mid);
                                             } else {
-                                                this.pending_lyrics_cache
-                                                    .insert(mid.clone(), lyrics);
+                                                this.lyrics.pending.insert(mid.clone(), lyrics);
                                             }
                                         } else {
-                                            this.pending_lyrics_cache.remove(&mid);
-                                            this.lyrics_cache.insert(mid.clone(), lyrics);
+                                            this.lyrics.pending.remove(&mid);
+                                            this.lyrics.adopted.insert(mid.clone(), lyrics);
                                         }
                                     }
                                     Err(error) if !had_cached => {
-                                        this.lyrics_errors
+                                        this.lyrics
+                                            .errors
                                             .insert(mid.clone(), format!("{error:#}"));
                                     }
                                     Err(_) => {
-                                        this.lyrics_errors.remove(&mid);
+                                        this.lyrics.errors.remove(&mid);
                                     }
                                 }
                             }
@@ -190,7 +214,7 @@ impl LyruneView {
                 }
             }
             let _ = this.update(cx, |this, cx| {
-                if !this.lyrics_cache.contains_key(&mid) && this.lyrics_loading.remove(&mid) {
+                if !this.lyrics.adopted.contains_key(&mid) && this.lyrics.loading.remove(&mid) {
                     cx.notify();
                 }
             });

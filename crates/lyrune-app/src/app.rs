@@ -66,7 +66,7 @@ use crate::settings::{
 };
 use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
-use lyrics_loading::MemoryLyrics;
+use lyrics_loading::LyricsCache;
 use lyrics_view::{
     CachedLyricsPanel, LYRIC_BACKGROUND_OVERLAY_OPACITY, LYRIC_EXPANSION_DURATION,
     LyricLayoutCache, LyricMotionState, interpolate_color,
@@ -170,17 +170,13 @@ pub struct LyruneView {
     backdrop_previous_url: Option<String>,
     backdrop_crossfade_phase: bool,
     // 歌词源数据、待下次播放采用的刷新结果、排版缓存和每帧显示缓存各有独立寿命。
-    lyric_disk_cache: Option<LyricDiskCache>,
-    lyrics_cache: HashMap<String, MemoryLyrics>,
-    pending_lyrics_cache: HashMap<String, MemoryLyrics>,
+    lyrics: LyricsCache,
     lyric_layout_cache: LyricLayoutCache,
     lyric_motion_state: Option<LyricMotionState>,
     cached_lyrics_panel: Option<CachedLyricsPanel>,
     lyric_panel_frame_pending: bool,
     pending_lyric_reveal_mid: Option<String>,
     lyric_reveal_frame_pending: bool,
-    lyrics_loading: HashSet<String>,
-    lyrics_errors: HashMap<String, String>,
     fonts: AppFonts,
     color_theme: ColorTheme,
     settings: AppSettings,
@@ -547,17 +543,13 @@ impl LyruneView {
             backdrop_current_url: None,
             backdrop_previous_url: None,
             backdrop_crossfade_phase: false,
-            lyric_disk_cache,
-            lyrics_cache: HashMap::new(),
-            pending_lyrics_cache: HashMap::new(),
+            lyrics: LyricsCache::new(lyric_disk_cache),
             lyric_layout_cache: LyricLayoutCache::default(),
             lyric_motion_state: None,
             cached_lyrics_panel: None,
             lyric_panel_frame_pending: true,
             pending_lyric_reveal_mid: None,
             lyric_reveal_frame_pending: false,
-            lyrics_loading: HashSet::new(),
-            lyrics_errors: HashMap::new(),
             fonts,
             color_theme,
             settings,

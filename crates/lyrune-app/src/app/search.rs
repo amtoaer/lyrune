@@ -68,10 +68,8 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                let mut state = lock_resource(&resource);
-                state.apply_results(result);
                 // 离开页面后仍保存结果，返回历史页面时可直接复用；仅当前资源需要刷新界面。
-                drop(state);
+                lock_resource(&resource).apply_results(result);
                 if this
                     .search_resource
                     .as_ref()
@@ -168,9 +166,7 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                let mut state = lock_resource(&resource);
-                state.apply_more_results(category, result);
-                drop(state);
+                lock_resource(&resource).apply_more_results(category, result);
                 if this
                     .search_resource
                     .as_ref()

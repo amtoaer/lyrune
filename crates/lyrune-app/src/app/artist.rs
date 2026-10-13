@@ -122,9 +122,7 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                let mut state = lock_resource(&resource);
-                state.apply_songs(offset, result);
-                drop(state);
+                lock_resource(&resource).apply_songs(offset, result);
                 if this
                     .artist_resource
                     .as_ref()
@@ -193,9 +191,7 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                let mut state = lock_resource(&resource);
-                state.apply_albums(offset, result);
-                drop(state);
+                lock_resource(&resource).apply_albums(offset, result);
                 if this
                     .artist_resource
                     .as_ref()

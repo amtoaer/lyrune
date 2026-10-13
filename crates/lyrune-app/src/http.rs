@@ -14,8 +14,8 @@ use gpui::{
 };
 use image::imageops::FilterType;
 
-use crate::app::RUNTIME;
 use crate::cache::cache_key;
+use crate::runtime::RUNTIME;
 
 const IMAGE_CACHE_DIR: &str = "images-v1";
 const THUMBNAIL_CACHE_DIR: &str = "thumbnails-v1";

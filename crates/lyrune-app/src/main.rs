@@ -11,6 +11,7 @@ mod lyrics_cache;
 #[cfg(target_os = "linux")]
 mod mpris;
 mod player;
+mod runtime;
 mod settings;
 mod single_instance;
 mod singleflight;

@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use zbus_systemd::login1::ManagerProxy;
 use zbus_systemd::zbus::{Connection, zvariant::OwnedFd};
 
-use crate::app::RUNTIME;
+use crate::runtime::RUNTIME;
 
 const INHIBIT_APP_ID: &str = "Lyrune";
 const INHIBIT_REASON: &str = "Lyrune 正在播放音乐";

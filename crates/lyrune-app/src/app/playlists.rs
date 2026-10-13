@@ -501,22 +501,15 @@ impl LyruneView {
     }
 
     pub(super) fn sync_table_playback_state(&mut self, cx: &mut Context<Self>) {
-        let current_mid = self.current_track_data().map(|track| track.mid.clone());
-        let loading_mid = self
-            .loading_track
-            .and_then(|index| self.playback_queue.as_ref()?.tracks.get(index))
-            .map(|track| track.mid.clone());
         let (playing, loading) = {
             let table = self.track_table.read(cx);
-            let tracks = table.delegate().tracks();
-            (
-                current_mid
-                    .as_deref()
-                    .and_then(|mid| tracks.iter().position(|track| track.mid == mid)),
-                loading_mid
-                    .as_deref()
-                    .and_then(|mid| tracks.iter().position(|track| track.mid == mid)),
-            )
+            self.playback_queue.as_ref().map_or((None, None), |queue| {
+                queue.playback_indices_in(
+                    table.delegate().tracks(),
+                    self.current_track,
+                    self.loading_track,
+                )
+            })
         };
         let playback_active = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
         self.track_table.update(cx, |table, cx| {

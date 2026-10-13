@@ -543,6 +543,27 @@ fn existing_search_track_is_moved_without_duplication() {
 }
 
 #[test]
+fn queue_playback_markers_follow_page_order() {
+    let queue = PlaybackQueue {
+        playlist_id: UserPlaylistId::Liked,
+        tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
+        modified: false,
+        continuation: None,
+    };
+    let reordered = vec![Arc::new(track("B")), Arc::new(track("A"))];
+    assert_eq!(
+        queue.playback_indices_in(&reordered, Some(0), Some(1)),
+        (Some(1), Some(0))
+    );
+
+    let another_page = vec![Arc::new(track("C")), Arc::new(track("B"))];
+    assert_eq!(
+        queue.playback_indices_in(&another_page, Some(0), Some(1)),
+        (None, Some(1))
+    );
+}
+
+#[test]
 fn queue_append_preserves_order_and_existing_tracks() {
     let mut queue = PlaybackQueue {
         playlist_id: UserPlaylistId::Liked,

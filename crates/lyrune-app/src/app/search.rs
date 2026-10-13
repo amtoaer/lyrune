@@ -318,21 +318,14 @@ impl LyruneView {
             let card_results = match self.search_category {
                 SearchCategory::Songs => {
                     is_empty = results.songs.items.is_empty();
-                    let playing_mid = self.current_track_data().map(|track| track.mid.as_str());
-                    let loading_mid = self
-                        .loading_track
-                        .and_then(|index| self.playback_queue.as_ref()?.tracks.get(index))
-                        .map(|track| track.mid.as_str());
-                    let playing_index = results
-                        .songs
-                        .items
-                        .iter()
-                        .position(|track| Some(track.mid.as_str()) == playing_mid);
-                    let loading_index = results
-                        .songs
-                        .items
-                        .iter()
-                        .position(|track| Some(track.mid.as_str()) == loading_mid);
+                    let (playing_index, loading_index) =
+                        self.playback_queue.as_ref().map_or((None, None), |queue| {
+                            queue.playback_indices_in(
+                                &results.songs.items,
+                                self.current_track,
+                                self.loading_track,
+                            )
+                        });
                     let playback_active = self.audio.as_ref().is_some_and(AudioPlayer::is_playing);
                     self.search_track_table.update(cx, |table, cx| {
                         let delegate = table.delegate_mut();

@@ -72,6 +72,23 @@ pub(super) struct PlaybackQueue {
 }
 
 impl PlaybackQueue {
+    // 页面顺序与队列顺序独立；播放和加载标记都按歌曲身份映射到页面行号。
+    pub(super) fn playback_indices_in(
+        &self,
+        tracks: &[Arc<Track>],
+        current: Option<usize>,
+        loading: Option<usize>,
+    ) -> (Option<usize>, Option<usize>) {
+        let index_in_page = |index: usize| {
+            let track = self.tracks.get(index)?;
+            tracks.iter().position(|item| item.mid == track.mid)
+        };
+        (
+            current.and_then(index_in_page),
+            loading.and_then(index_in_page),
+        )
+    }
+
     // 返回第一首新加入的歌曲，供队尾等待中的推荐续播使用；已有歌曲保留原位置和数据。
     pub(super) fn append_tracks(
         &mut self,

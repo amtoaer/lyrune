@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::io::Cursor;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +13,7 @@ use gpui::{
     ImageFormat, ImageSource, ImgResourceLoader, Pixels, RenderImage, Resource, Window, hash,
 };
 use image::imageops::FilterType;
+use lru::LruCache;
 
 use crate::cache::cache_key;
 use crate::runtime::RUNTIME;
@@ -83,9 +84,7 @@ struct ThumbnailSource {
 }
 
 pub struct CachedImageCache {
-    capacity: usize,
-    usages: Vec<u64>,
-    items: HashMap<u64, ImageCacheItem>,
+    items: LruCache<u64, ImageCacheItem>,
 }
 
 pub struct BlurredCover {
@@ -156,14 +155,12 @@ impl Asset for CachedThumbnailFile {
 
 impl CachedImageCache {
     pub fn new(capacity: usize, cx: &mut App) -> Entity<Self> {
-        let capacity = capacity.max(1);
+        let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
         let cache = cx.new(|_| Self {
-            capacity,
-            usages: Vec::with_capacity(capacity),
-            items: HashMap::with_capacity(capacity),
+            items: LruCache::new(capacity),
         });
         cx.observe_release(&cache, |cache, cx| {
-            for (_, mut item) in std::mem::take(&mut cache.items) {
+            while let Some((_, mut item)) = cache.items.pop_lru() {
                 if let Some(Ok(image)) = item.get() {
                     cx.drop_image(image, None);
                 }
@@ -174,21 +171,16 @@ impl CachedImageCache {
     }
 
     pub fn set_capacity(&mut self, capacity: usize, window: &mut Window, cx: &mut App) {
-        self.capacity = capacity.max(1);
-        while self.usages.len() > self.capacity {
+        let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
+        // resize 会直接丢弃超额条目；先显式淘汰，确保 GPUI 的图片资源一并释放。
+        while self.items.len() > capacity.get() {
             self.evict_oldest(window, cx);
         }
-        self.usages.shrink_to(self.capacity);
-        self.items.shrink_to(self.capacity);
+        self.items.resize(capacity);
     }
 
     fn evict_oldest(&mut self, window: &mut Window, cx: &mut App) {
-        // usages 与 items 同步增删，最近使用的键放在开头；这里的 expect 检查内部一致性。
-        let oldest = self.usages.pop().expect("非空图片缓存应包含最旧条目");
-        let mut item = self
-            .items
-            .remove(&oldest)
-            .expect("图片缓存条目与使用顺序应保持一致");
+        let (_, mut item) = self.items.pop_lru().expect("非空图片缓存应包含最旧条目");
         if let Some(Ok(image)) = item.get() {
             cx.drop_image(image, Some(window));
         }
@@ -204,13 +196,6 @@ impl ImageCache for CachedImageCache {
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         let key = hash(resource);
         if let Some(item) = self.items.get_mut(&key) {
-            let index = self
-                .usages
-                .iter()
-                .position(|cached| *cached == key)
-                .expect("图片缓存条目与使用顺序应保持一致");
-            self.usages.remove(index);
-            self.usages.insert(0, key);
             return item.get();
         }
 
@@ -241,12 +226,11 @@ impl ImageCache for CachedImageCache {
         let future = ImgResourceLoader::load(source, cx);
         let task = cx.background_executor().spawn(future).shared();
 
-        if self.usages.len() >= self.capacity {
+        // 插入前释放旧图片，避免 put 自动淘汰时跳过 GPU 资源清理。
+        if self.items.len() >= self.items.cap().get() {
             self.evict_oldest(window, cx);
         }
-        self.items
-            .insert(key, ImageCacheItem::Loading(task.clone()));
-        self.usages.insert(0, key);
+        self.items.put(key, ImageCacheItem::Loading(task.clone()));
 
         let entity = window.current_view();
         window

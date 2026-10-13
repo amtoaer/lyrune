@@ -40,6 +40,7 @@ hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 keyring = "4.1.6"
 ksni = { version = "0.3.6", features = ["blocking"] }
+lru = "0.18.5"
 md5 = "0.8"
 mpris-server = { version = "0.10.0", default-features = false, features = ["tokio"] }
 qrcode = "0.14.1"

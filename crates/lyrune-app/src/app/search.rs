@@ -17,10 +17,7 @@ use gpui_component::{
 };
 use qqmusic_api::integration::UserPlaylistId;
 
-use super::navigation::{
-    SearchCategory, SearchMoreResults, SharedSearchResource, append_shared_search_page,
-    lock_resource,
-};
+use super::navigation::{SearchCategory, SearchMoreResults, SharedSearchResource, lock_resource};
 use super::queue::{PlaybackQueue, insert_external_track_after_current};
 use super::{LyruneView, SEARCH_PAGE_SIZE, page_horizontal_padding};
 use crate::icons::media_icon_hsla;
@@ -72,17 +69,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 let mut state = lock_resource(&resource);
-                state.loading = false;
-                match result {
-                    Ok(results) => {
-                        state.results = Some(results.into());
-                        state.error = None;
-                    }
-                    Err(error) => {
-                        state.results = None;
-                        state.error = Some(format!("搜索失败：{error:#}"));
-                    }
-                }
+                state.apply_results(result);
                 // 离开页面后仍保存结果，返回历史页面时可直接复用；仅当前资源需要刷新界面。
                 drop(state);
                 if this
@@ -182,25 +169,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 let mut state = lock_resource(&resource);
-                state.loading_more[category.index()] = false;
-                match (state.results.as_mut(), result) {
-                    (Some(results), Ok(SearchMoreResults::Songs(page))) => {
-                        append_shared_search_page(&mut results.songs, page)
-                    }
-                    (Some(results), Ok(SearchMoreResults::Artists(page))) => {
-                        append_shared_search_page(&mut results.artists, page)
-                    }
-                    (Some(results), Ok(SearchMoreResults::Albums(page))) => {
-                        append_shared_search_page(&mut results.albums, page)
-                    }
-                    (Some(results), Ok(SearchMoreResults::Playlists(page))) => {
-                        append_shared_search_page(&mut results.playlists, page)
-                    }
-                    (_, Err(error)) => {
-                        state.error = Some(format!("继续加载搜索结果失败：{error:#}"));
-                    }
-                    _ => {}
-                }
+                state.apply_more_results(category, result);
                 drop(state);
                 if this
                     .search_resource

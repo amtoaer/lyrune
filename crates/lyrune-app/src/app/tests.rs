@@ -5,7 +5,8 @@ use super::lyrics_view::{
     lyric_position_for_frame_rate, readable_lyric_color,
 };
 use super::navigation::{
-    NavigationPage, PlaylistResource, SearchResource, resolved_playlist_scroll_row,
+    NavigationPage, PlaylistResource, SearchMoreResults, SearchResource,
+    resolved_playlist_scroll_row,
 };
 use super::player_view::format_playback_time;
 use super::playlists::playlist_title_is_long;
@@ -17,7 +18,7 @@ use super::{
 };
 use crate::settings::{DEFAULT_NAVIGATION_HISTORY_LIMIT, LyricFrameRate};
 use gpui::{Pixels, Rgba, black, px, rgb};
-use qqmusic_api::integration::{Track, UserPlaylist, UserPlaylistId};
+use qqmusic_api::integration::{SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -508,6 +509,70 @@ fn search_history_keeps_scroll_offsets_between_queries() {
         NavigationPage::Search { query, scroll_offsets, .. }
             if query == "许嵩" && scroll_offsets == [px(0.); 4]
     ));
+}
+
+#[test]
+fn search_results_survive_paging_errors() {
+    let mut resource = SearchResource {
+        loading: true,
+        ..Default::default()
+    };
+    resource.apply_results(Err(anyhow::anyhow!("offline")));
+    assert!(!resource.loading && resource.results.is_none());
+    assert_eq!(resource.error.as_deref(), Some("搜索失败：offline"));
+
+    resource.loading = true;
+    resource.apply_results(Ok(SearchResults {
+        songs: SearchPage {
+            items: vec![track("A")],
+            has_more: true,
+            next_offset: 1,
+        },
+        artists: SearchPage {
+            items: vec![],
+            has_more: false,
+            next_offset: 0,
+        },
+        albums: SearchPage {
+            items: vec![],
+            has_more: true,
+            next_offset: 0,
+        },
+        playlists: SearchPage {
+            items: vec![],
+            has_more: false,
+            next_offset: 0,
+        },
+    }));
+    assert!(!resource.loading && resource.error.is_none());
+
+    resource.loading_more[SearchCategory::Songs.index()] = true;
+    resource.loading_more[SearchCategory::Albums.index()] = true;
+    resource.apply_more_results(
+        SearchCategory::Albums,
+        Err(anyhow::anyhow!("timeout").context("albums")),
+    );
+    assert!(!resource.loading_more[SearchCategory::Albums.index()]);
+    assert!(resource.loading_more[SearchCategory::Songs.index()]);
+
+    resource.apply_more_results(
+        SearchCategory::Songs,
+        Ok(SearchMoreResults::Songs(SearchPage {
+            items: vec![track("B")],
+            has_more: false,
+            next_offset: 7,
+        })),
+    );
+    let results = resource.results.as_ref().unwrap();
+    assert_eq!(mids(&results.songs.items), ["A", "B"]);
+    assert_eq!(results.songs.next_offset, 7);
+    assert!(!results.songs.has_more);
+    assert!(results.albums.items.is_empty() && results.albums.has_more);
+    assert!(!resource.loading_more[SearchCategory::Songs.index()]);
+    assert_eq!(
+        resource.error.as_deref(),
+        Some("继续加载搜索结果失败：albums: timeout")
+    );
 }
 
 #[test]

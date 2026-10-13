@@ -189,6 +189,49 @@ pub(super) struct SearchResource {
     pub(super) error: Option<String>,
 }
 
+impl SearchResource {
+    pub(super) fn apply_results(&mut self, result: anyhow::Result<SearchResults>) {
+        self.loading = false;
+        match result {
+            Ok(results) => {
+                self.results = Some(results.into());
+                self.error = None;
+            }
+            Err(error) => {
+                self.results = None;
+                self.error = Some(format!("搜索失败：{error:#}"));
+            }
+        }
+    }
+
+    pub(super) fn apply_more_results(
+        &mut self,
+        category: SearchCategory,
+        result: anyhow::Result<SearchMoreResults>,
+    ) {
+        self.loading_more[category.index()] = false;
+        // 不同类别可以同时补页；成功回填不能清除另一个类别刚写入的错误。
+        match (self.results.as_mut(), result) {
+            (Some(results), Ok(SearchMoreResults::Songs(page))) => {
+                append_shared_search_page(&mut results.songs, page)
+            }
+            (Some(results), Ok(SearchMoreResults::Artists(page))) => {
+                append_shared_search_page(&mut results.artists, page)
+            }
+            (Some(results), Ok(SearchMoreResults::Albums(page))) => {
+                append_shared_search_page(&mut results.albums, page)
+            }
+            (Some(results), Ok(SearchMoreResults::Playlists(page))) => {
+                append_shared_search_page(&mut results.playlists, page)
+            }
+            (_, Err(error)) => {
+                self.error = Some(format!("继续加载搜索结果失败：{error:#}"));
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ArtistResource {
     pub(super) songs: Option<SharedSearchPage<Track>>,

@@ -29,6 +29,7 @@ pub(super) struct ProgressInput {
 }
 
 pub(super) struct SeekTo(pub(super) Duration);
+pub(super) struct Seeking(pub(super) bool);
 
 pub(super) struct PlaybackProgressView {
     slider: Entity<SliderState>,
@@ -46,6 +47,7 @@ pub(super) struct PlaybackProgressView {
 }
 
 impl EventEmitter<SeekTo> for PlaybackProgressView {}
+impl EventEmitter<Seeking> for PlaybackProgressView {}
 
 impl PlaybackProgressView {
     pub(super) fn new(audio: Option<Arc<AudioPlayer>>, font: Font, cx: &mut Context<Self>) -> Self {
@@ -53,6 +55,9 @@ impl PlaybackProgressView {
         let subscription = cx.subscribe(&slider, |this, _, event, cx| {
             match event {
                 SliderEvent::Change(value) => {
+                    if this.seek_preview.is_none() && this.input.duration.is_some() {
+                        cx.emit(Seeking(true));
+                    }
                     // 音频进度同步不能覆盖拖动预览，Release 才真正 seek。
                     this.seek_preview = this
                         .input
@@ -61,6 +66,7 @@ impl PlaybackProgressView {
                 }
                 SliderEvent::Release(value) => {
                     this.seek_preview = None;
+                    cx.emit(Seeking(false));
                     if let Some(duration) = this.input.duration {
                         cx.emit(SeekTo(duration.mul_f32(value.end().clamp(0., 1.))));
                     }
@@ -431,7 +437,7 @@ mod tests {
     use gpui::{AppContext as _, TestAppContext, font};
     use gpui_component::{ActiveTheme as _, slider::SliderEvent};
 
-    use super::{PlaybackProgressView, ProgressInput, SeekTo};
+    use super::{PlaybackProgressView, ProgressInput, SeekTo, Seeking};
     use crate::settings::FrameRate;
 
     #[gpui::test]
@@ -448,10 +454,18 @@ mod tests {
                 received.borrow_mut().push(event.0)
             })
         });
+        let gestures = Rc::new(RefCell::new(Vec::new()));
+        let received = gestures.clone();
+        let _gesture_subscription = cx.update(|cx| {
+            cx.subscribe(&progress, move |_, event: &Seeking, _| {
+                received.borrow_mut().push(event.0)
+            })
+        });
         let slider = progress.read_with(cx, |view, _| view.slider.clone());
         slider.update(cx, |_, cx| cx.emit(SliderEvent::Change(0.5.into())));
         cx.run_until_parked();
         assert!(seeks.borrow().is_empty());
+        assert_eq!(*gestures.borrow(), [true]);
         progress.read_with(cx, |view, _| {
             assert_eq!(view.seek_preview, Some(Duration::from_secs(50)));
             assert_eq!(view.position, Duration::from_secs(10));
@@ -460,6 +474,7 @@ mod tests {
         slider.update(cx, |_, cx| cx.emit(SliderEvent::Release(0.5.into())));
         cx.run_until_parked();
         assert_eq!(*seeks.borrow(), [Duration::from_secs(50)]);
+        assert_eq!(*gestures.borrow(), [true, false]);
         progress.read_with(cx, |view, _| assert_eq!(view.seek_preview, None));
     }
 

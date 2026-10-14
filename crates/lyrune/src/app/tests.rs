@@ -23,7 +23,7 @@ use super::navigation::{
     PlaylistScrollPosition, SearchCategory, SearchMoreResults, SearchResource, SearchVisibleCounts,
     resolved_playlist_scroll_row,
 };
-use super::playback::{Playback, PlaybackLoad};
+use super::playback::{PlaybackLoad, PlaybackState};
 use super::playlists::playlist_title_is_long;
 use super::progress_view::format_playback_time;
 use super::queue::{
@@ -86,7 +86,7 @@ fn test_replace_playback_queue() {
         modified: false,
         continuation: None,
     };
-    let mut playback = Playback::new(None, Quality::Standard, None);
+    let mut playback = PlaybackState::new(None, Quality::Standard, None);
     let first = playback.replace_queue(queue("first"));
     playback.recommendation_loading = true;
     playback.waiting_for_recommendation = true;
@@ -113,7 +113,7 @@ fn test_replace_playback_queue() {
 
 #[test]
 fn test_playback_snapshot() {
-    let mut playback = Playback::new(None, Quality::High, None);
+    let mut playback = PlaybackState::new(None, Quality::High, None);
     playback.position = Duration::from_micros(123_456);
     assert!(playback.snapshot(123).is_none());
     playback.queue = Some(PlaybackQueue {

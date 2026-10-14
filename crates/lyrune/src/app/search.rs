@@ -309,33 +309,37 @@ impl LyruneView {
         };
         if self
             .playback
+            .read(cx)
+            .state
             .track()
             .is_some_and(|current| current.mid == track.mid)
         {
-            if self.playback.load.track.is_none() {
-                self.toggle_playback(cx);
+            if self.playback.read(cx).state.load.track.is_none() {
+                self.playback
+                    .update(cx, |playback, cx| playback.toggle_playback(cx));
             }
             return;
         }
 
-        self.playback.pending_restore = None;
         self.home.recommendation_loading = None;
-        let current_index = self.playback.current_track;
-        // 搜索插队保留队列版本；已启动的同队列补页仍可追加，不等同于换歌单。
-        let queue_index = if let Some(queue) = &mut self.playback.queue {
-            insert_external_track_after_current(queue, current_index, track)
-        } else {
-            self.playback.queue = Some(PlaybackQueue {
-                playlist_id: UserPlaylistId::Search {
-                    query: self.search.query.clone(),
-                },
-                tracks: vec![track],
-                modified: false,
-                continuation: None,
-            });
-            0
-        };
-        self.start_playback(queue_index, Duration::ZERO, None, true, cx);
+        let query = self.search.query.clone();
+        self.playback.update(cx, |playback, cx| {
+            playback.state.pending_restore = None;
+            let current_index = playback.state.current_track;
+            // 搜索插队保留队列版本；已启动的同队列补页仍可追加，不等同于换歌单。
+            let queue_index = if let Some(queue) = &mut playback.state.queue {
+                insert_external_track_after_current(queue, current_index, track)
+            } else {
+                playback.state.queue = Some(PlaybackQueue {
+                    playlist_id: UserPlaylistId::Search { query },
+                    tracks: vec![track],
+                    modified: false,
+                    continuation: None,
+                });
+                0
+            };
+            playback.start_playback(queue_index, Duration::ZERO, None, true, cx)
+        });
     }
 
     pub(super) fn render_search(
@@ -399,6 +403,8 @@ impl LyruneView {
                     is_empty = empty;
                     let playback_active = self
                         .playback
+                        .read(cx)
+                        .state
                         .audio
                         .as_deref()
                         .is_some_and(AudioPlayer::is_playing);
@@ -411,13 +417,16 @@ impl LyruneView {
                             delegate.set_loading(search_loading_more)
                         };
                         let (playing_index, loading_index) =
-                            self.playback.queue.as_ref().map_or((None, None), |queue| {
-                                queue.playback_indices_in(
-                                    delegate.tracks(),
-                                    self.playback.current_track,
-                                    self.playback.load.track,
-                                )
-                            });
+                            self.playback.read(cx).state.queue.as_ref().map_or(
+                                (None, None),
+                                |queue| {
+                                    queue.playback_indices_in(
+                                        delegate.tracks(),
+                                        self.playback.read(cx).state.current_track,
+                                        self.playback.read(cx).state.load.track,
+                                    )
+                                },
+                            );
                         changed |= delegate.set_playback_state(
                             playing_index,
                             loading_index,

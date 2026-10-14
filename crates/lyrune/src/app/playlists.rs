@@ -184,11 +184,14 @@ impl LyruneView {
             });
         let playback_restore = self
             .playback
+            .read(cx)
+            .state
             .pending_restore
             .clone()
             .filter(|restore| restore.account_id == account_id);
-        if self.playback.pending_restore.is_some() && playback_restore.is_none() {
-            self.clear_persisted_playback(cx);
+        if self.playback.read(cx).state.pending_restore.is_some() && playback_restore.is_none() {
+            self.playback
+                .update(cx, |playback, cx| playback.clear_persisted_playback(cx));
         }
         self.playlist_list.update(cx, |list, cx| {
             list.delegate_mut().set_playlists(playlists);
@@ -206,7 +209,9 @@ impl LyruneView {
             cx.notify();
         }
         if let Some(restore) = playback_restore {
-            self.restore_playback_queue(restore, cx);
+            self.playback.update(cx, |playback, cx| {
+                playback.restore_playback_queue(restore, cx)
+            });
         }
     }
 
@@ -539,16 +544,23 @@ impl LyruneView {
     pub(super) fn sync_table_playback_state(&mut self, cx: &mut Context<Self>) {
         let (playing, loading) = {
             let table = self.track_table.read(cx);
-            self.playback.queue.as_ref().map_or((None, None), |queue| {
-                queue.playback_indices_in(
-                    table.delegate().tracks(),
-                    self.playback.current_track,
-                    self.playback.load.track,
-                )
-            })
+            self.playback
+                .read(cx)
+                .state
+                .queue
+                .as_ref()
+                .map_or((None, None), |queue| {
+                    queue.playback_indices_in(
+                        table.delegate().tracks(),
+                        self.playback.read(cx).state.current_track,
+                        self.playback.read(cx).state.load.track,
+                    )
+                })
         };
         let playback_active = self
             .playback
+            .read(cx)
+            .state
             .audio
             .as_deref()
             .is_some_and(AudioPlayer::is_playing);
@@ -612,7 +624,13 @@ impl LyruneView {
                         this.liked_tracks.insert(mid.clone(), liked);
                     }
                     Err(error) => {
-                        if this.playback.track().is_some_and(|track| track.mid == mid) {
+                        if this
+                            .playback
+                            .read(cx)
+                            .state
+                            .track()
+                            .is_some_and(|track| track.mid == mid)
+                        {
                             this.notify_error(format!("读取当前歌曲的喜欢状态失败：{error:#}"), cx);
                         }
                     }
@@ -624,7 +642,7 @@ impl LyruneView {
     }
 
     pub(super) fn toggle_current_track_liked(&mut self, cx: &mut Context<Self>) {
-        let Some(track) = self.playback.track().cloned() else {
+        let Some(track) = self.playback.read(cx).state.track().cloned() else {
             return;
         };
         let Some(liked) = self.liked_tracks.get(&track.mid).copied() else {

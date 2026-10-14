@@ -10,7 +10,7 @@ use futures_util::{
 use gpui::Context;
 use tokio::sync::mpsc;
 
-use super::LyruneView;
+use super::playback::{Playback, PlaybackEvent};
 #[cfg(target_os = "linux")]
 use super::queue::RepeatMode;
 #[cfg(target_os = "linux")]
@@ -41,7 +41,7 @@ pub(super) fn mpris_track_id(track_mid: &str) -> String {
     )
 }
 
-impl LyruneView {
+impl Playback {
     // 绑定应用实体而非窗口。暂停时等待唤醒，不靠不断轮询维持后台播放。
     pub(crate) fn start_background_tick(&mut self, cx: &mut Context<Self>) {
         let (wake_sender, mut wake_receiver) = mpsc::channel(1);
@@ -49,7 +49,7 @@ impl LyruneView {
         cx.spawn(async move |this, cx| {
             loop {
                 let interval = match this.read_with(cx, |this, _| {
-                    if !this.playback.is_advancing() {
+                    if !this.state.is_advancing() {
                         None
                     } else {
                         Some(PROGRESS_TICK)
@@ -115,7 +115,7 @@ impl LyruneView {
                 self.set_mpris_position(&track_id, position, cx);
             }
             MprisCommand::SetLoopStatus(status) => {
-                self.playback.repeat_mode = match status {
+                self.state.repeat_mode = match status {
                     MprisLoopStatus::None => RepeatMode::Off,
                     MprisLoopStatus::Track => RepeatMode::One,
                     MprisLoopStatus::Playlist => RepeatMode::All,
@@ -124,14 +124,13 @@ impl LyruneView {
                 cx.notify();
             }
             MprisCommand::SetShuffle(shuffle) => {
-                self.playback.shuffle = shuffle;
+                self.state.shuffle = shuffle;
                 self.sync_mpris(false, cx);
                 cx.notify();
             }
             MprisCommand::SetVolume(volume) => {
                 let volume = volume.clamp(0., 1.) as f32;
-                self.player_controls
-                    .update(cx, |view, cx| view.reset_volume(volume, cx));
+                cx.emit(PlaybackEvent::VolumeChanged(volume));
                 self.set_volume(volume, cx);
                 self.preferences.read(cx).save();
             }
@@ -140,15 +139,15 @@ impl LyruneView {
 
     #[cfg(target_os = "linux")]
     fn mpris_snapshot(&self, cx: &gpui::App) -> MprisSnapshot {
-        let audio_available = self.playback.audio.is_some();
-        let loading = self.playback.load.track.is_some();
+        let audio_available = self.state.audio.is_some();
+        let loading = self.state.load.track.is_some();
         // 系统媒体状态在加载期间沿用 Playing，区别于设备时钟是否实际推进。
         let playback_status = if loading {
             MprisPlaybackStatus::Playing
-        } else if !self.playback.started {
+        } else if !self.state.started {
             MprisPlaybackStatus::Stopped
         } else if self
-            .playback
+            .state
             .audio
             .as_deref()
             .is_some_and(AudioPlayer::is_playing)
@@ -157,11 +156,11 @@ impl LyruneView {
         } else {
             MprisPlaybackStatus::Paused
         };
-        let (queue_len, current_index) = self.playback.queue.as_ref().map_or((0, None), |queue| {
-            (queue.tracks.len(), self.playback.current_track)
+        let (queue_len, current_index) = self.state.queue.as_ref().map_or((0, None), |queue| {
+            (queue.tracks.len(), self.state.current_track)
         });
         let can_extend = self
-            .playback
+            .state
             .queue
             .as_ref()
             .and_then(|queue| queue.continuation)
@@ -169,17 +168,17 @@ impl LyruneView {
         let can_go_next = audio_available
             && current_index.is_some_and(|index| {
                 can_extend
-                    || (self.playback.shuffle && queue_len > 1)
+                    || (self.state.shuffle && queue_len > 1)
                     || index + 1 < queue_len
-                    || (self.playback.repeat_mode == RepeatMode::All && queue_len > 0)
+                    || (self.state.repeat_mode == RepeatMode::All && queue_len > 0)
             });
         let can_go_previous = audio_available
             && current_index.is_some_and(|index| {
-                self.playback.position >= Duration::from_secs(3)
+                self.state.position >= Duration::from_secs(3)
                     || index > 0
-                    || (self.playback.repeat_mode == RepeatMode::All && queue_len > 0)
+                    || (self.state.repeat_mode == RepeatMode::All && queue_len > 0)
             });
-        let track = self.playback.track().map(|track| MprisTrack {
+        let track = self.state.track().map(|track| MprisTrack {
             id: mpris_track_id(&track.mid),
             title: track.title.clone(),
             artists: if track.artists.trim().is_empty() {
@@ -197,20 +196,20 @@ impl LyruneView {
         let has_track = track.is_some();
         MprisSnapshot {
             playback_status,
-            loop_status: match self.playback.repeat_mode {
+            loop_status: match self.state.repeat_mode {
                 RepeatMode::Off => MprisLoopStatus::None,
                 RepeatMode::All => MprisLoopStatus::Playlist,
                 RepeatMode::One => MprisLoopStatus::Track,
             },
-            shuffle: self.playback.shuffle,
+            shuffle: self.state.shuffle,
             volume: self.preferences.read(cx).settings.volume as f64,
-            position_micros: duration_micros(self.playback.position),
+            position_micros: duration_micros(self.state.position),
             track,
             can_go_next,
             can_go_previous,
             can_play: has_track && audio_available && !loading,
-            can_pause: has_track && audio_available && !loading && self.playback.started,
-            can_seek: has_track && audio_available && !loading && self.playback.started,
+            can_pause: has_track && audio_available && !loading && self.state.started,
+            can_seek: has_track && audio_available && !loading && self.state.started,
         }
     }
 
@@ -229,49 +228,46 @@ impl LyruneView {
     #[cfg(target_os = "linux")]
     pub(super) fn sync_inhibit(&self) {
         if let Some(inhibit) = &self.inhibit {
-            inhibit.set_active(self.playback.is_advancing());
+            inhibit.set_active(self.state.is_advancing());
         }
     }
 
     #[cfg(target_os = "linux")]
     fn sync_mpris_position(&self) {
         if let Some(mpris) = &self.mpris {
-            mpris.update_position(duration_micros(self.playback.position));
+            mpris.update_position(duration_micros(self.state.position));
         }
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
-        if self.progress.read(cx).seek_preview.is_none()
-            && self.playback.load.track.is_none()
-            && self.playback.started
-        {
-            self.playback.position = self
-                .playback
+        if !self.seeking && self.state.load.track.is_none() && self.state.started {
+            self.state.position = self
+                .state
                 .audio
                 .as_deref()
                 .map(AudioPlayer::position)
                 .unwrap_or_default();
         }
 
-        let ended = self.playback.started
-            && self.playback.load.track.is_none()
+        let ended = self.state.started
+            && self.state.load.track.is_none()
             && self
-                .playback
+                .state
                 .audio
                 .as_deref()
                 .is_some_and(AudioPlayer::is_empty);
         if ended {
-            self.playback.started = false;
+            self.state.started = false;
             self.play_next(true, cx);
         }
-        if self.playback.current_track.is_some()
-            && self.playback.last_persisted_at.elapsed() >= PLAYBACK_PERSIST_INTERVAL
+        if self.state.current_track.is_some()
+            && self.state.last_persisted_at.elapsed() >= PLAYBACK_PERSIST_INTERVAL
         {
             self.persist_current_playback(cx);
         }
         #[cfg(target_os = "linux")]
-        if self.playback.current_track.is_some()
-            && self.playback.load.track.is_none()
+        if self.state.current_track.is_some()
+            && self.state.load.track.is_none()
             && self.last_mpris_position_sync.elapsed() >= PROGRESS_TICK
         {
             self.sync_mpris_position();

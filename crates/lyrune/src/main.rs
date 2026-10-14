@@ -206,7 +206,10 @@ fn main() {
                 .take()
                 .expect("Lyrune view was created with its window");
 
-            view.update(cx, |view, cx| view.start_background_tick(cx));
+            view.read(cx)
+                .playback
+                .clone()
+                .update(cx, |playback, cx| playback.start_background_tick(cx));
 
             let main_window = Rc::new(RefCell::new(MainWindowState {
                 view,
@@ -243,9 +246,12 @@ fn main() {
             match mpris::install() {
                 Ok((service, mut mpris_events)) => {
                     let mpris_handle = service.handle();
-                    main_window.borrow().view.update(cx, |view, cx| {
-                        view.attach_mpris(mpris_handle, cx);
-                    });
+                    main_window.borrow().view.read(cx).playback.clone().update(
+                        cx,
+                        |playback, cx| {
+                            playback.attach_mpris(mpris_handle, cx);
+                        },
+                    );
                     cx.set_global(MprisState { _service: service });
 
                     let main_window_for_mpris = main_window.clone();
@@ -259,8 +265,8 @@ fn main() {
                                 mpris::MprisCommand::Quit => cx.quit(),
                                 command => {
                                     let view = main_window_for_mpris.borrow().view.clone();
-                                    view.update(cx, |view, cx| {
-                                        view.handle_mpris_command(command, cx);
+                                    view.read(cx).playback.clone().update(cx, |playback, cx| {
+                                        playback.handle_mpris_command(command, cx);
                                     });
                                 }
                             });
@@ -277,9 +283,15 @@ fn main() {
             #[cfg(target_os = "linux")]
             {
                 let inhibit_handle = inhibit::install();
-                main_window.borrow().view.update(cx, |view, _| {
-                    view.attach_inhibit(inhibit_handle);
-                });
+                main_window
+                    .borrow()
+                    .view
+                    .read(cx)
+                    .playback
+                    .clone()
+                    .update(cx, |playback, _| {
+                        playback.attach_inhibit(inhibit_handle);
+                    });
             }
 
             let main_window_for_tray = main_window;

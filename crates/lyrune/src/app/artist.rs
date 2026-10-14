@@ -636,15 +636,32 @@ impl LyruneView {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let monospace_font = self.preferences.read(cx).fonts.monospace.clone();
-        let current_mid = self.playback.track().map(|track| track.mid.clone());
+        let current_mid = self
+            .playback
+            .read(cx)
+            .state
+            .track()
+            .map(|track| track.mid.clone());
         let loading_mid = self
             .playback
+            .read(cx)
+            .state
             .load
             .track
-            .and_then(|index| self.playback.queue.as_ref()?.tracks.get(index))
+            .and_then(|index| {
+                self.playback
+                    .read(cx)
+                    .state
+                    .queue
+                    .as_ref()?
+                    .tracks
+                    .get(index)
+            })
             .map(|track| track.mid.clone());
         let is_playing = self
             .playback
+            .read(cx)
+            .state
             .audio
             .as_deref()
             .is_some_and(AudioPlayer::is_playing);

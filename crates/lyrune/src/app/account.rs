@@ -369,11 +369,8 @@ impl LyruneView {
             .update(cx, |account, _| account.invalidate_login());
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home.generation = self.home.generation.wrapping_add(1);
-        self.playback.queue_generation = self.playback.queue_generation.wrapping_add(1);
-        self.playback.load.invalidate();
-        if let Some(audio) = &self.playback.audio {
-            audio.stop();
-        }
+        self.playback
+            .update(cx, |playback, _| playback.invalidate_session());
         self.account.update(cx, |account, cx| {
             account.revoke();
             cx.notify();
@@ -400,24 +397,10 @@ impl LyruneView {
         self.playlist.selected = None;
         self.playlist.resource = None;
         self.page_resource_cache = PageResourceCache::default();
-        self.playback.queue = None;
-        self.playback.recommendation_loading = false;
-        self.playback.waiting_for_recommendation = false;
-        self.playback.current_track = None;
-        self.playback.load.clear();
-        self.playback.started = false;
-        self.wake_playback_tick();
-        self.playback.location = None;
-        self.playback.active_quality = self.preferences.read(cx).settings.playback_quality;
-        self.playback.available_qualities.clear();
         self.quality_menu_open = false;
-        self.playback.position = Duration::ZERO;
         self.account_menu_open = false;
-        self.clear_persisted_playback(cx);
-        #[cfg(target_os = "linux")]
-        self.sync_mpris(false, cx);
-        #[cfg(target_os = "linux")]
-        self.sync_inhibit();
+        self.playback
+            .update(cx, |playback, cx| playback.clear_session(cx));
         self.playlist_list.update(cx, |list, cx| {
             list.delegate_mut().clear();
             cx.notify();

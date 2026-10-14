@@ -4,13 +4,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::Context;
+use super::playback::Playback;
+use gpui::{Context, WeakEntity};
 use hashbrown::HashMap;
 use lyrune_api::{CredentialSession, ProtocolClient, Track};
 use tokio::sync::mpsc;
 
 use super::lyrics::{ParsedLyrics, parse_lyrics};
-use super::{LyruneView, unix_timestamp_secs};
+use super::unix_timestamp_secs;
 use crate::lyrics_cache::LyricDiskCache;
 use crate::runtime::RUNTIME;
 
@@ -112,12 +113,14 @@ enum LyricLoadEvent {
     },
 }
 
-impl LyruneView {
+impl LyricsCache {
     pub(super) fn ensure_track_lyrics(
         &mut self,
         client: ProtocolClient,
         credential: CredentialSession,
         track: Track,
+        current_is_same_track: bool,
+        playback: WeakEntity<Playback>,
         cx: &mut Context<Self>,
     ) {
         let mid = track.mid.clone();
@@ -125,33 +128,27 @@ impl LyruneView {
             return;
         }
 
-        let current_is_same_track = self
-            .playback
-            .track()
-            .is_some_and(|current| current.mid == mid);
-        if !current_is_same_track && self.lyrics.adopt_pending(&mid) {
+        if !current_is_same_track && self.adopt_pending(&mid) {
             cx.notify();
         }
-        let had_cached = self.lyrics.adopted.contains_key(&mid);
+        let had_cached = self.adopted.contains_key(&mid);
         if self
-            .lyrics
             .pending
             .get(&mid)
             .is_some_and(|lyrics| current_is_same_track && lyrics.is_fresh(unix_timestamp_secs()))
             || self
-                .lyrics
                 .adopted
                 .get(&mid)
                 .is_some_and(|lyrics| lyrics.is_fresh(unix_timestamp_secs()))
-            || !self.lyrics.loading.insert(mid.clone())
+            || !self.loading.insert(mid.clone())
         {
             return;
         }
 
-        self.lyrics.errors.remove(&mid);
+        self.errors.remove(&mid);
         cx.notify();
 
-        let disk_cache = self.lyrics.disk.clone();
+        let disk_cache = self.disk.clone();
         let (sender, mut receiver) = mpsc::channel(2);
         let worker_mid = mid.clone();
         drop(RUNTIME.spawn(async move {
@@ -209,9 +206,13 @@ impl LyruneView {
             while let Some(event) = receiver.recv().await {
                 if this
                     .update(cx, |this, cx| {
-                        let is_current =
-                            this.playback.track().is_some_and(|track| track.mid == mid);
-                        this.lyrics.apply(&mid, event, is_current);
+                        // 页面和歌词缓存都可能比请求活得更久；是否正在播放以播放实体为准。
+                        let is_current = playback
+                            .read_with(cx, |playback, _| {
+                                playback.state.track().is_some_and(|track| track.mid == mid)
+                            })
+                            .unwrap_or(false);
+                        this.apply(&mid, event, is_current);
                         cx.notify();
                     })
                     .is_err()
@@ -221,7 +222,7 @@ impl LyruneView {
             }
             let _ = this.update(cx, |this, cx| {
                 // 保留原通道结束规则：只清理尚无内容的请求；不能把磁盘/网络两阶段改成统一 finally。
-                if !this.lyrics.adopted.contains_key(&mid) && this.lyrics.loading.remove(&mid) {
+                if !this.adopted.contains_key(&mid) && this.loading.remove(&mid) {
                     cx.notify();
                 }
             });

@@ -25,7 +25,7 @@ mod tests;
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{prelude::*, *};
 use gpui_base::motion::{Transition, transition};
@@ -44,7 +44,6 @@ use gpui_component::{
 use hashbrown::HashMap;
 use lyrune_api::{PlaylistPage, ProtocolClient};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use self::{
     account::{Account, AccountEvent, AccountState},
@@ -56,11 +55,11 @@ use self::{
         LyricsInput, LyricsView, combined_lyric_frame_interval, interpolate_color,
     },
     navigation::{MainContent, NavigationHistory, PageResourceCache},
-    playback::Playback,
+    playback::{Playback, PlaybackEvent, PlaybackState},
     player_view::{PlayerAction, PlayerControlsView},
     playlists::{PlaylistPageKey, PlaylistPageState},
     preferences::Preferences,
-    progress_view::{PlaybackProgressView, SeekTo},
+    progress_view::{PlaybackProgressView, SeekTo, Seeking},
     search::SearchPageState,
     settings::{SettingsAction, SettingsPage},
 };
@@ -68,14 +67,10 @@ use crate::cache::{AudioCache, audio_cache_limit_bytes};
 use crate::design::AppFonts;
 use crate::http::CachedImageCache;
 use crate::icons::{MediaIcon, lyrune_icon, media_icon_hsla};
-#[cfg(target_os = "linux")]
-use crate::inhibit::InhibitHandle;
 use crate::library::{
     PlaylistListDelegate, SearchCardGridDelegate, TrackTableDelegate, TrackTableEvent,
 };
 use crate::lyrics_cache::LyricDiskCache;
-#[cfg(target_os = "linux")]
-use crate::mpris::MprisHandle;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 use crate::settings::{
@@ -88,7 +83,6 @@ const PAGE_SIZE: u64 = 100;
 const ARTIST_PAGE_SIZE: u64 = 5;
 const ARTIST_ALBUM_PAGE_SIZE: u64 = 10;
 const SEARCH_PAGE_SIZE: usize = 20;
-const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
 const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
 
@@ -138,17 +132,14 @@ pub struct LyruneView {
     window_drag_pressed: bool,
 
     // 音频、网络服务及维护任务。队列版本与单次音源加载版本分别失效。
-    playback: Playback,
-    audio_cache: Option<AudioCache>,
+    pub(crate) playback: Entity<Playback>,
     protocol_client: Option<ProtocolClient>,
-    cdn_maintenance: Option<JoinHandle<()>>,
-    audio_cache_maintenance: Option<JoinHandle<()>>,
     quality_menu_open: bool,
     // expanded 是用户目标，visible 包含过渡动画，fully_expanded 用于跳过被遮挡的主页面渲染。
     cover_backdrop_expanded: bool,
     cover_backdrop_visible: bool,
     cover_backdrop_fully_expanded: bool,
-    lyrics: LyricsCache,
+    lyrics: Entity<LyricsCache>,
     lyrics_view: Entity<LyricsView>,
     preferences: Entity<Preferences>,
     library_cache: LibraryCache,
@@ -162,13 +153,6 @@ pub struct LyruneView {
     _subscriptions: Vec<Subscription>,
     // 窗口关闭不销毁应用实体；所有 subscribe_in 订阅都在重开时重新绑定。
     _window_subscriptions: Vec<Subscription>,
-    background_tick_wake: Option<mpsc::Sender<()>>,
-    #[cfg(target_os = "linux")]
-    mpris: Option<MprisHandle>,
-    #[cfg(target_os = "linux")]
-    inhibit: Option<InhibitHandle>,
-    #[cfg(target_os = "linux")]
-    last_mpris_position_sync: Instant,
 }
 
 impl LyruneView {
@@ -278,7 +262,28 @@ impl LyruneView {
         let history_limit = settings.navigation_history_limit;
         let preferences = cx.new(|cx| Preferences::new(settings, fonts, cx));
         let settings_page = cx.new(|cx| SettingsPage::new(preferences.clone(), window, cx));
+        let lyrics = cx.new(|_| LyricsCache::new(lyric_disk_cache));
+        let playlist_page_requests = SingleFlight::default();
+        let playback = cx.new(|_| {
+            Playback::new(
+                PlaybackState::new(audio, playback_quality, pending_playback_restore),
+                account.clone(),
+                preferences.clone(),
+                lyrics.clone(),
+                audio_cache.clone(),
+                protocol_client.clone(),
+                playlist_page_requests.clone(),
+            )
+        });
         let subscriptions = vec![
+            cx.observe(&playback, |this, _, cx| {
+                this.sync_table_playback_state(cx);
+                cx.notify();
+            }),
+            cx.observe(&lyrics, |_, _, cx| cx.notify()),
+            cx.subscribe(&playback, |this, _, event: &PlaybackEvent, cx| {
+                this.handle_playback_event(event, cx)
+            }),
             cx.observe(&preferences, |_, _, cx| cx.notify()),
             cx.observe(&account, |_, _, cx| cx.notify()),
             cx.subscribe(&account, |this, _, event: &AccountEvent, cx| {
@@ -294,8 +299,13 @@ impl LyruneView {
                     this.select_search_track(*index, cx);
                 }
             }),
+            cx.subscribe(&progress, |this, _, event: &Seeking, cx| {
+                this.playback
+                    .update(cx, |playback, _| playback.seeking = event.0);
+            }),
             cx.subscribe(&progress, |this, _, event: &SeekTo, cx| {
-                this.seek_to(event.0, cx);
+                this.playback
+                    .update(cx, |playback, cx| playback.seek_to(event.0, cx));
             }),
         ];
 
@@ -333,7 +343,7 @@ impl LyruneView {
             library_loading: false,
             playlist: PlaylistPageState::default(),
             library_generation: 0,
-            playlist_page_requests: SingleFlight::default(),
+            playlist_page_requests,
             main_content: MainContent::Home,
             navigation_history: NavigationHistory::new(history_limit),
             home: HomePageState::default(),
@@ -349,16 +359,13 @@ impl LyruneView {
             player_controls,
             image_cache,
             window_drag_pressed: false,
-            playback: Playback::new(audio, playback_quality, pending_playback_restore),
-            audio_cache,
+            playback,
             protocol_client,
-            cdn_maintenance: None,
-            audio_cache_maintenance: None,
             quality_menu_open: false,
             cover_backdrop_expanded: false,
             cover_backdrop_visible: false,
             cover_backdrop_fully_expanded: false,
-            lyrics: LyricsCache::new(lyric_disk_cache),
+            lyrics,
             lyrics_view,
             preferences,
             library_cache,
@@ -370,20 +377,15 @@ impl LyruneView {
             window_handle: window.window_handle(),
             _subscriptions: subscriptions,
             _window_subscriptions: Vec::new(),
-            background_tick_wake: None,
-            #[cfg(target_os = "linux")]
-            mpris: None,
-            #[cfg(target_os = "linux")]
-            inhibit: None,
-            #[cfg(target_os = "linux")]
-            last_mpris_position_sync: Instant::now(),
         };
         view.attach_window(window, cx);
         if !initial_errors.is_empty() {
             view.notify_error(initial_errors.join("；"), cx);
         }
-        view.start_audio_cache_maintenance();
-        view.start_cdn_maintenance();
+        view.playback.update(cx, |playback, _| {
+            playback.start_audio_cache_maintenance();
+            playback.start_cdn_maintenance();
+        });
         view.account
             .update(cx, |account, cx| account.restore_credential(cx));
         if view.preferences.read(cx).settings.check_updates_on_startup {
@@ -487,6 +489,57 @@ impl LyruneView {
         ];
         self.progress
             .update(cx, |view, cx| view.attach_window(window, cx));
+    }
+
+    fn handle_playback_event(&mut self, event: &PlaybackEvent, cx: &mut Context<Self>) {
+        match event {
+            PlaybackEvent::TrackStarted {
+                mid,
+                duration,
+                position,
+                same_track,
+            } => {
+                if !same_track {
+                    self.lyrics_view.update(cx, |view, cx| {
+                        view.start_track(mid, self.cover_backdrop_expanded, cx)
+                    });
+                }
+                self.ensure_track_like_state(mid.clone(), cx);
+                self.progress
+                    .update(cx, |view, cx| view.start_track(*position, *duration, cx));
+            }
+            PlaybackEvent::Stopped => self.progress.update(cx, |view, cx| view.stop(cx)),
+            PlaybackEvent::PlayBrowsedTrack => {
+                if !self.track_table.read(cx).delegate().tracks().is_empty() {
+                    self.select_track(0, cx);
+                }
+            }
+            PlaybackEvent::CloseQualityMenu => self.quality_menu_open = false,
+            PlaybackEvent::VolumeChanged(volume) => self
+                .player_controls
+                .update(cx, |view, cx| view.reset_volume(*volume, cx)),
+            PlaybackEvent::PlaylistLoaded(resource) => {
+                if self
+                    .playlist
+                    .resource
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, resource))
+                {
+                    let state = navigation::lock_resource(resource);
+                    let tracks = state.tracks.clone();
+                    let has_more = state.has_more;
+                    drop(state);
+                    self.track_table.update(cx, |table, cx| {
+                        table.delegate_mut().set_tracks(tracks, has_more, false);
+                        cx.notify();
+                    });
+                    self.restore_pending_playlist_scroll(cx);
+                    self.sync_table_playback_state(cx);
+                }
+            }
+            PlaybackEvent::Error(message) => self.notify_error(message.clone(), cx),
+        }
+        cx.notify();
     }
 
     fn notify_error(&self, message: impl Into<String>, cx: &mut Context<Self>) {
@@ -598,42 +651,6 @@ impl LyruneView {
         self.preferences.read(cx).settings.window_decoration
     }
 
-    fn start_cdn_maintenance(&mut self) {
-        if let Some(task) = self.cdn_maintenance.take() {
-            task.abort();
-        }
-        let Some(client) = self.protocol_client.clone() else {
-            return;
-        };
-        self.cdn_maintenance = Some(RUNTIME.spawn(async move {
-            loop {
-                let delay = client.cdn_refresh_delay().await;
-                if !delay.is_zero() {
-                    tokio::time::sleep(delay).await;
-                }
-                match client.refresh_cdn().await {
-                    Ok(cache) => {
-                        let _ =
-                            tokio::task::spawn_blocking(move || CdnCacheStore::save(&cache)).await;
-                    }
-                    Err(_) => tokio::time::sleep(CDN_REFRESH_RETRY).await,
-                }
-            }
-        }));
-    }
-
-    fn start_audio_cache_maintenance(&mut self) {
-        if let Some(task) = self.audio_cache_maintenance.take() {
-            task.abort();
-        }
-        let Some(cache) = self.audio_cache.clone() else {
-            return;
-        };
-        self.audio_cache_maintenance = Some(RUNTIME.spawn(async move {
-            let _ = cache.maintain().await;
-        }));
-    }
-
     fn dismiss_popovers(&mut self, cx: &mut Context<Self>) {
         if self.account_menu_open || self.quality_menu_open {
             self.account_menu_open = false;
@@ -644,19 +661,18 @@ impl LyruneView {
 
     fn shutdown(&mut self, cx: &mut App) {
         if self.preferences.read(cx).writer.is_some() {
-            self.persist_current_playback(cx);
+            self.playback
+                .update(cx, |playback, cx| playback.persist_current_playback(cx));
         }
-        if let Some(audio) = self.playback.audio.take() {
-            audio.stop();
-        }
+        self.playback.update(cx, |playback, _| {
+            if let Some(audio) = playback.state.audio.take() {
+                audio.stop();
+            }
+        });
         self.preferences
             .update(cx, |preferences, _| preferences.finish());
-        if let Some(task) = self.cdn_maintenance.take() {
-            task.abort();
-        }
-        if let Some(task) = self.audio_cache_maintenance.take() {
-            task.abort();
-        }
+        self.playback
+            .update(cx, |playback, _| playback.stop_maintenance());
     }
 
     fn render_sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -769,7 +785,8 @@ impl LyruneView {
                 .update(cx, |view, _| view.reset_lyric_animation_frames());
         }
         window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
-        self.wake_playback_tick();
+        self.playback
+            .update(cx, |playback, _| playback.wake_playback_tick());
         cx.notify();
     }
 
@@ -794,13 +811,13 @@ impl LyruneView {
     }
 
     fn sync_lyrics_view(&mut self, expansion_progress: f32, cx: &mut Context<Self>) {
-        let track = self.playback.track();
+        let track = self.playback.read(cx).state.track();
         let mid = track.map(|track| track.mid.clone()).unwrap_or_default();
-        let content = if let Some(lyrics) = self.lyrics.adopted.get(&mid) {
+        let content = if let Some(lyrics) = self.lyrics.read(cx).adopted.get(&mid) {
             LyricsContent::Ready(lyrics.parsed.clone())
-        } else if self.lyrics.loading.contains(&mid) {
+        } else if self.lyrics.read(cx).loading.contains(&mid) {
             LyricsContent::Loading
-        } else if let Some(error) = self.lyrics.errors.get(&mid) {
+        } else if let Some(error) = self.lyrics.read(cx).errors.get(&mid) {
             LyricsContent::Error(error.clone())
         } else {
             LyricsContent::Unloaded
@@ -808,7 +825,7 @@ impl LyruneView {
         let input = LyricsInput {
             mid,
             cover_url: track.and_then(|track| track.cover_url.clone()),
-            duration: self.playback.duration(),
+            duration: self.playback.read(cx).state.duration(),
             content,
             font: self.preferences.read(cx).fonts.lyrics.clone(),
             font_scale: self.preferences.read(cx).settings.lyric_font_scale,
@@ -819,20 +836,27 @@ impl LyruneView {
                 .settings
                 .lyric_highlight_frame_rate,
             scroll_frame_rate: self.preferences.read(cx).settings.lyric_scroll_frame_rate,
-            advancing: self.playback.is_advancing(),
+            advancing: self.playback.read(cx).state.is_advancing(),
             seeking: self.progress.read(cx).seek_preview.is_some(),
             expanded: self.cover_backdrop_expanded,
             visible: self.cover_backdrop_visible,
             expansion_progress,
         };
         self.lyrics_view.update(cx, |view, cx| {
-            view.set_input(input, self.playback.position, cx)
+            view.set_input(input, self.playback.read(cx).state.position, cx)
         });
     }
 
-    fn render_lyrics_layer(&self, expansion_progress: f32, window: &Window) -> AnyElement {
+    fn render_lyrics_layer(
+        &self,
+        expansion_progress: f32,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
         if self
             .playback
+            .read(cx)
+            .state
             .track()
             .and_then(|track| track.cover_url.as_ref())
             .is_none()
@@ -1032,7 +1056,7 @@ impl LyruneView {
                 .bg(theme.background)
                 .text_color(theme.foreground)
                 .child(div().flex_1().min_h_0())
-                .child(self.render_lyrics_layer(expansion_progress, window))
+                .child(self.render_lyrics_layer(expansion_progress, window, cx))
                 .child(self.render_player_bar(window, cx))
                 .when(popover_open, |this| {
                     this.child(
@@ -1289,7 +1313,7 @@ impl LyruneView {
                         ),
                 ),
             )
-            .child(self.render_lyrics_layer(expansion_progress, window))
+            .child(self.render_lyrics_layer(expansion_progress, window, cx))
             .child(self.render_player_bar(window, cx))
             .when(popover_open, |this| {
                 this.child(
@@ -1321,14 +1345,16 @@ impl LyruneView {
 
 impl Render for LyruneView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.cover_backdrop_visible && self.playback.is_advancing() {
+        if self.cover_backdrop_visible && self.playback.read(cx).state.is_advancing() {
             if self.progress.read(cx).seek_preview.is_none() {
-                self.playback.position = self
-                    .playback
-                    .audio
-                    .as_deref()
-                    .map(AudioPlayer::position)
-                    .unwrap_or_default();
+                self.playback.update(cx, |playback, _| {
+                    playback.state.position = playback
+                        .state
+                        .audio
+                        .as_deref()
+                        .map(AudioPlayer::position)
+                        .unwrap_or_default();
+                });
             }
         }
 

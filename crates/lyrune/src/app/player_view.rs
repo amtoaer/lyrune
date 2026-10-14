@@ -677,30 +677,51 @@ impl LyruneView {
                 self.open_search_artist(artist.clone(), window, cx);
             }
             PlayerAction::ToggleLike => self.toggle_current_track_liked(cx),
-            PlayerAction::Shuffle => {
-                self.playback.shuffle = !self.playback.shuffle;
+            PlayerAction::Shuffle => self.playback.update(cx, |playback, cx| {
+                playback.state.shuffle = !playback.state.shuffle;
                 #[cfg(target_os = "linux")]
-                self.sync_mpris(false, cx);
+                playback.sync_mpris(false, cx);
                 cx.notify();
-            }
-            PlayerAction::Previous => self.play_previous(cx),
-            PlayerAction::TogglePlayback => self.toggle_playback(cx),
-            PlayerAction::Next => self.play_next(false, cx),
-            PlayerAction::Repeat => {
-                self.playback.repeat_mode = self.playback.repeat_mode.next();
+            }),
+            PlayerAction::Previous => self
+                .playback
+                .update(cx, |playback, cx| playback.play_previous(cx)),
+            PlayerAction::TogglePlayback => self
+                .playback
+                .update(cx, |playback, cx| playback.toggle_playback(cx)),
+            PlayerAction::Next => self
+                .playback
+                .update(cx, |playback, cx| playback.play_next(false, cx)),
+            PlayerAction::Repeat => self.playback.update(cx, |playback, cx| {
+                playback.state.repeat_mode = playback.state.repeat_mode.next();
                 #[cfg(target_os = "linux")]
-                self.sync_mpris(false, cx);
+                playback.sync_mpris(false, cx);
                 cx.notify();
+            }),
+            PlayerAction::ToggleMute => {
+                let settings = &self.preferences.read(cx).settings;
+                let volume = if settings.volume > 0. {
+                    0.
+                } else {
+                    settings.last_nonzero_volume
+                };
+                self.player_controls
+                    .update(cx, |view, cx| view.set_volume(volume, window, cx));
+                self.playback
+                    .update(cx, |playback, cx| playback.set_volume(volume, cx));
+                self.preferences.read(cx).save();
             }
-            PlayerAction::ToggleMute => self.toggle_mute(window, cx),
-            PlayerAction::Quality(quality) => self.set_playback_quality(*quality, cx),
+            PlayerAction::Quality(quality) => self.playback.update(cx, |playback, cx| {
+                playback.set_playback_quality(*quality, cx)
+            }),
             PlayerAction::ToggleQuality => {
                 self.quality_menu_open = !self.quality_menu_open;
                 self.account_menu_open = false;
                 cx.notify();
             }
             PlayerAction::Volume { value, persist } => {
-                self.set_volume(*value, cx);
+                self.playback
+                    .update(cx, |playback, cx| playback.set_volume(*value, cx));
                 if *persist {
                     self.preferences.read(cx).save();
                 }
@@ -716,9 +737,16 @@ impl LyruneView {
         let narrow = window.viewport_size().width < px(900.);
         let track = self
             .playback
+            .read(cx)
+            .state
             .queue
             .as_ref()
-            .and_then(|queue| queue.tracks.get(self.playback.current_track?).cloned());
+            .and_then(|queue| {
+                queue
+                    .tracks
+                    .get(self.playback.read(cx).state.current_track?)
+                    .cloned()
+            });
         let has_track = track.is_some();
         let foreground = if self.cover_backdrop_expanded {
             self.foreground_target(
@@ -735,15 +763,17 @@ impl LyruneView {
             cx.theme().secondary_foreground
         };
         let input = ProgressInput {
-            duration: self.playback.duration(),
-            interactive: has_track && self.playback.started && self.playback.load.track.is_none(),
-            advancing: self.playback.is_advancing(),
+            duration: self.playback.read(cx).state.duration(),
+            interactive: has_track
+                && self.playback.read(cx).state.started
+                && self.playback.read(cx).state.load.track.is_none(),
+            advancing: self.playback.read(cx).state.is_advancing(),
             frame_rate: self.preferences.read(cx).settings.progress_frame_rate,
             font: self.preferences.read(cx).fonts.monospace.clone(),
             foreground,
         };
         self.progress.update(cx, |progress, cx| {
-            progress.set_input(input, self.playback.position, window, cx);
+            progress.set_input(input, self.playback.read(cx).state.position, window, cx);
         });
 
         let input = PlayerInput {
@@ -751,25 +781,29 @@ impl LyruneView {
                 .as_ref()
                 .and_then(|track| self.liked_tracks.get(&track.mid))
                 .copied(),
-            active_quality: self.playback.active_quality,
-            available_qualities: self.playback.available_qualities.clone(),
-            loading: self.playback.load.track.is_some(),
-            show_pause: if self.playback.load.track.is_some() {
-                self.playback.load.autoplay
+            active_quality: self.playback.read(cx).state.active_quality,
+            available_qualities: self.playback.read(cx).state.available_qualities.clone(),
+            loading: self.playback.read(cx).state.load.track.is_some(),
+            show_pause: if self.playback.read(cx).state.load.track.is_some() {
+                self.playback.read(cx).state.load.autoplay
             } else {
                 self.playback
+                    .read(cx)
+                    .state
                     .audio
                     .as_deref()
                     .is_some_and(AudioPlayer::is_playing)
             },
             queue_empty: self
                 .playback
+                .read(cx)
+                .state
                 .queue
                 .as_ref()
                 .is_none_or(|queue| queue.tracks.is_empty()),
             browsed_tracks_empty: self.track_table.read(cx).delegate().tracks().is_empty(),
-            shuffle: self.playback.shuffle,
-            repeat_mode: self.playback.repeat_mode,
+            shuffle: self.playback.read(cx).state.shuffle,
+            repeat_mode: self.playback.read(cx).state.repeat_mode,
             volume: self.preferences.read(cx).settings.volume,
             color_theme: self.preferences.read(cx).color_theme,
             expanded: self.cover_backdrop_expanded,

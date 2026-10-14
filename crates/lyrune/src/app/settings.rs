@@ -1088,11 +1088,12 @@ impl LyruneView {
             preferences.settings.audio_cache_limit_gb = value;
             cx.notify();
         });
-        if let Some(cache) = &self.audio_cache {
+        if let Some(cache) = &self.playback.read(cx).audio_cache {
             cache.set_max_size_bytes(audio_cache_limit_bytes(value));
         }
         self.preferences.read(cx).save();
-        self.start_audio_cache_maintenance();
+        self.playback
+            .update(cx, |playback, _| playback.start_audio_cache_maintenance());
         cx.notify();
     }
 

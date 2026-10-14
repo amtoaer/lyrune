@@ -11,10 +11,9 @@ use reqwest::Client;
 use reqwest::header::{ACCEPT_ENCODING, COOKIE, RANGE, REFERER};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sha1::{Digest as _, Sha1};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::request::get_search_id;
+use crate::request::{get_search_id, hash33, sign};
 
 use super::{
     CredentialError, CredentialSession, LyricResult, PlaybackOption, PlaylistPage, QqCredential,
@@ -35,12 +34,6 @@ const CDN_PROBE_NODE_LIMIT: usize = 4;
 const CDN_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const DEFAULT_CDN_REFRESH: Duration = Duration::from_secs(30 * 60);
 const MIN_CDN_REFRESH: Duration = Duration::from_secs(60);
-const SIGN_PART_1_INDEXES: [usize; 8] = [23, 14, 6, 36, 16, 40, 7, 19];
-const SIGN_PART_2_INDEXES: [usize; 8] = [16, 1, 32, 12, 19, 27, 8, 5];
-const SIGN_SCRAMBLE_VALUES: [u8; 20] = [
-    89, 39, 179, 150, 218, 82, 58, 252, 177, 52, 186, 123, 120, 64, 242, 133, 143, 161, 121, 179,
-];
-
 #[derive(Clone)]
 pub struct ProtocolClient {
     client: Client,
@@ -692,17 +685,6 @@ impl ProtocolClient {
         })
     }
 
-    pub async fn liked_tracks(
-        &self,
-        credential: &CredentialSession,
-        limit: u64,
-    ) -> Result<Vec<Track>> {
-        Ok(self
-            .playlist_page(credential, &UserPlaylist::liked(), 0, limit)
-            .await?
-            .tracks)
-    }
-
     pub async fn track_liked(&self, credential: &CredentialSession, mid: &str) -> Result<bool> {
         let data = self
             .call(
@@ -805,26 +787,6 @@ impl ProtocolClient {
             .with_context(|| format!("无法加载“{}”的歌词", track.title))?;
         parse_lyric_result(&fallback, &track.mid)
             .with_context(|| format!("无法解析“{}”的歌词", track.title))
-    }
-
-    pub async fn playback_url(
-        &self,
-        credential: &CredentialSession,
-        track: &Track,
-        quality: Quality,
-    ) -> Result<String> {
-        self.playback_options_for(credential, track, &[quality])
-            .await?
-            .into_iter()
-            .next()
-            .map(|option| option.url)
-            .with_context(|| {
-                format!(
-                    "“{}”的{}当前不可播放；可能需要对应会员权益或歌曲受版权限制",
-                    track.title,
-                    quality.label()
-                )
-            })
     }
 
     pub async fn playback_options(
@@ -2028,24 +1990,6 @@ fn playback_url(domain: &str, path: &str) -> String {
     )
 }
 
-#[cfg(test)]
-fn playback_stream_domain(data: &Value) -> &str {
-    data.get("sip")
-        .and_then(Value::as_array)
-        .and_then(|items| {
-            let first = items
-                .iter()
-                .filter_map(Value::as_str)
-                .find(|domain| !domain.trim().is_empty());
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .find(|domain| !domain.trim().is_empty() && !is_ws_stream_domain(domain))
-                .or(first)
-        })
-        .unwrap_or(DEFAULT_STREAM_DOMAIN)
-}
-
 fn is_ws_stream_domain(domain: &str) -> bool {
     let domain = domain.trim();
     let host = domain
@@ -2155,16 +2099,7 @@ fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
     let object = value.as_object()?;
     keys.iter()
         .find_map(|key| object.get(*key))
-        .and_then(|value| match value {
-            Value::Bool(value) => Some(*value),
-            Value::Number(value) => value.as_u64().map(|value| value != 0),
-            Value::String(value) => match value.as_str() {
-                "1" | "true" | "TRUE" => Some(true),
-                "0" | "false" | "FALSE" => Some(false),
-                _ => None,
-            },
-            _ => None,
-        })
+        .and_then(bool_value)
 }
 
 fn parse_track_liked(value: &Value, mid: &str) -> Option<bool> {
@@ -2263,52 +2198,6 @@ fn find_string_in_object(object: &Map<String, Value>, keys: &[&str]) -> Option<S
     })
 }
 
-fn hash33(value: &str) -> u64 {
-    value.chars().fold(5_381_u64, |hash, character| {
-        hash.wrapping_mul(33).wrapping_add(character as u64)
-    }) & 2_147_483_647
-}
-
-// Adapted from netease-qq-music-api (MIT); see THIRD_PARTY_NOTICES.md.
-fn sign(request: &Value) -> String {
-    let payload = serde_json::to_vec(request).expect("serialize QQ Music request");
-    let hash = hex::encode_upper(Sha1::digest(payload));
-    let hash_bytes = hash.as_bytes();
-
-    let part_1: String = SIGN_PART_1_INDEXES
-        .into_iter()
-        .filter(|index| *index < hash_bytes.len())
-        .map(|index| hash_bytes[index] as char)
-        .collect();
-    let part_2: String = SIGN_PART_2_INDEXES
-        .into_iter()
-        .map(|index| hash_bytes[index] as char)
-        .collect();
-
-    let mut scrambled = [0_u8; 20];
-    for (index, value) in SIGN_SCRAMBLE_VALUES.iter().enumerate() {
-        let high = decode_hex_nibble(hash_bytes[index * 2]);
-        let low = decode_hex_nibble(hash_bytes[index * 2 + 1]);
-        scrambled[index] = value ^ ((high << 4) | low);
-    }
-
-    let base64: String = base64::engine::general_purpose::STANDARD
-        .encode(scrambled)
-        .chars()
-        .filter(|character| !matches!(character, '/' | '\\' | '+' | '='))
-        .collect();
-    format!("zzc{part_1}{base64}{part_2}").to_ascii_lowercase()
-}
-
-fn decode_hex_nibble(value: u8) -> u8 {
-    match value {
-        b'0'..=b'9' => value - b'0',
-        b'a'..=b'f' => value - b'a' + 10,
-        b'A'..=b'F' => value - b'A' + 10,
-        _ => unreachable!("SHA-1 hex only contains hexadecimal digits"),
-    }
-}
-
 fn unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2323,12 +2212,6 @@ mod tests {
     use flate2::{Compression, write::ZlibEncoder};
 
     use super::*;
-
-    #[test]
-    fn qq_signature_matches_upstream_vector() {
-        let body = json!({ "foo": "bar", "num": 1 });
-        assert_eq!(sign(&body), "zzcf3ea51dcp3xdwnxisjgufsk0znclehf2t85bc1d3d4");
-    }
 
     #[test]
     fn classifies_only_confirmed_credential_rejection_codes() {
@@ -2808,21 +2691,21 @@ mod tests {
         });
 
         assert_eq!(
-            playback_stream_domain(&data),
-            "https://isure.stream.qqmusic.qq.com/"
+            playback_stream_domains(&data),
+            [
+                "https://isure.stream.qqmusic.qq.com/",
+                "http://dl.stream.qqmusic.qq.com/"
+            ]
         );
         assert_eq!(
-            playback_stream_domain(&json!({
+            playback_stream_domains(&json!({
                 "sip": ["https://ws.stream.qqmusic.qq.com/"]
             })),
-            "https://ws.stream.qqmusic.qq.com/"
+            ["https://ws.stream.qqmusic.qq.com/"]
         );
         assert!(is_ws_stream_domain("http://ws12.stream.qqmusic.qq.com/"));
         assert!(!is_ws_stream_domain("https://isure.stream.qqmusic.qq.com/"));
-        assert_eq!(
-            playback_stream_domain(&json!({ "sip": [] })),
-            DEFAULT_STREAM_DOMAIN
-        );
+        assert!(playback_stream_domains(&json!({ "sip": [] })).is_empty());
     }
 
     #[test]

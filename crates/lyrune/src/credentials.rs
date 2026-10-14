@@ -42,7 +42,7 @@ impl CredentialStore {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use lyrune_api::integration::{CredentialSession, ProtocolClient};
+    use lyrune_api::integration::{CredentialSession, ProtocolClient, UserPlaylist};
 
     use super::CredentialStore;
 
@@ -72,11 +72,12 @@ mod tests {
             Duration::from_secs(30),
             ProtocolClient::new()
                 .expect("create protocol client")
-                .liked_tracks(&credential, 1),
+                .playlist_page(&credential, &UserPlaylist::liked(), 0, 1),
         )
         .await
         .expect("liked tracks request timed out")
-        .expect("load liked tracks");
+        .expect("load liked tracks")
+        .tracks;
         eprintln!(
             "loaded {} liked tracks in {:?}",
             tracks.len(),

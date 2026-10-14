@@ -578,7 +578,7 @@ async fn qr_login(events: &mpsc::UnboundedSender<LoginEvent>) -> Result<()> {
     }
 }
 
-pub async fn refresh_credential(credential: QqCredential) -> Result<QqCredential> {
+async fn refresh_credential(credential: QqCredential) -> Result<QqCredential> {
     let client = LoginClient::new();
     let previous = credential.to_token();
     let token = client

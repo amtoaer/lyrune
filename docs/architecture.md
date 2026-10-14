@@ -122,7 +122,6 @@ MPRIS 在音源加载期间沿用 `Playing` 状态；它与 `Playback::is_advanc
 
 | 位置 | 当前证据与下一步需要的证据 |
 | --- | --- |
-| `ProtocolClient::playback_url` | 应用路径使用 `playback_options`；公共 API 不能仅凭当前应用无调用就删除，还需确认 crate 的外部使用和兼容要求。 |
 | `SearchCardGridDelegate::set_cards` 的参数列表 | Clippy 报告参数过多。参数分别描述数据、布局和分页状态，目前只剩一个调用点；暂未为消除提示引入参数对象，也未关闭提示。后续若布局需要独立复用，再评估其边界。 |
 | `LyruneView::new` 和设置页的长函数 | 设置输入的创建与状态已归入 `SettingsInputs`，领域默认值也已归入各自所有者；主构造仍集中展示其余控件、订阅和启动顺序。三处相同的补页监听已合并；剩余长度本身不足以证明需要新的对象或更多单次调用的函数。 |
 | `AudioCache::prepare_for_seek` | 仅在测试中使用，覆盖跳转 Range 请求且不发送 HEAD 的路径；删除前需要替代这项覆盖，并重新判断 `validate_remote` 的用途。 |

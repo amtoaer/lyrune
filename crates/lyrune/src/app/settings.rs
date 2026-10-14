@@ -10,7 +10,7 @@ use gpui_component::{
     scroll::ScrollableElement as _,
     v_flex,
 };
-use lyrune_api::integration::Quality;
+use lyrune_api::Quality;
 
 use super::{LyricLayoutCache, LyruneView, page_horizontal_padding};
 use crate::cache::audio_cache_limit_bytes;

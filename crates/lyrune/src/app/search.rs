@@ -15,7 +15,7 @@ use gpui_component::{
     table::DataTable,
     v_flex,
 };
-use lyrune_api::integration::{Track, UserPlaylistId};
+use lyrune_api::{Track, UserPlaylistId};
 
 use super::navigation::{
     SearchCategory, SearchMoreResults, SearchVisibleCounts, SharedSearchResource, lock_resource,

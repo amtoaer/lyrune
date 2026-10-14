@@ -14,7 +14,7 @@ use bytes::Bytes;
 use directories::ProjectDirs;
 use futures_util::{Stream, StreamExt as _};
 use hashbrown::HashMap;
-use lyrune_api::integration::{Quality, Track};
+use lyrune_api::{Quality, Track};
 use lyrune_decrypt::{DecryptReader, QmcCipher};
 use reqwest::header::{
     ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderMap, IF_RANGE,
@@ -1712,7 +1712,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use hashbrown::HashMap;
-    use lyrune_api::integration::{Quality, Track};
+    use lyrune_api::{Quality, Track};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
 

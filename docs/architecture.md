@@ -31,7 +31,7 @@
 
 工作区现由三个内部 crate 组成：`crates/lyrune` 是桌面应用，`crates/lyrune-api` 是 QQ 音乐协议实现，`crates/lyrune-decrypt` 负责 QMC 音频解密。包名与目录名一致。
 
-`lyrune-api::integration` 是应用入口，持有凭据会话与应用需要的数据类型；`integration/protocol.rs` 实现曲库、搜索、歌词、音源及 CDN 请求。扫码与刷新直接调用 `login.rs`，响应校验和 MQTT 状态机位于 `login/`，协议标识和签名算法位于 `request.rs`。网易云、跨平台 builder、平台 token 包装，以及应用未使用的旧查询接口已移除。`QqCredential` 和 `LyricResult` 的序列化字段保持原样；登录 Cookie 和 GUID 继续使用原来的规则。
+`lyrune-api` 根入口选择性导出应用需要的能力；`account.rs` 持有凭据会话与扫码/刷新编排，`models.rs` 保留共享数据类型，`client.rs` 实现曲库、搜索、歌词、音源及 CDN 请求。扫码与刷新直接调用 `login.rs`，响应校验和 MQTT 状态机位于 `login/`，协议标识和签名算法位于 `request.rs`。网易云、跨平台 builder、平台 token 包装，以及应用未使用的旧查询接口已移除。`QqCredential` 和 `LyricResult` 的序列化字段保持原样；登录 Cookie 和 GUID 继续使用原来的规则。
 
 ## 关键调用关系
 

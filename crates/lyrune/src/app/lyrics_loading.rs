@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use gpui::Context;
 use hashbrown::HashMap;
-use lyrune_api::integration::{CredentialSession, ProtocolClient, Track};
+use lyrune_api::{CredentialSession, ProtocolClient, Track};
 use tokio::sync::mpsc;
 
 use super::lyrics::{ParsedLyrics, parse_lyrics};

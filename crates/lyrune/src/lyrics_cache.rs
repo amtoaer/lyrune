@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use directories::ProjectDirs;
-use lyrune_api::integration::LyricResult;
+use lyrune_api::LyricResult;
 use serde::{Deserialize, Serialize};
 
 use crate::cache::cache_key;

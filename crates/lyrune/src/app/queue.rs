@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use gpui::Context;
-use lyrune_api::integration::{RecommendationKind, Track, UserPlaylist, UserPlaylistId};
+use lyrune_api::{RecommendationKind, Track, UserPlaylist, UserPlaylistId};
 
 use super::LyruneView;
 use super::navigation::{lock_resource, share_items};

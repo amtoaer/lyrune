@@ -218,3 +218,6 @@
 阶段 1：签名与哈希的常量、运算、编码和已知向量相同，查询改用现有 request 实现；重复布尔转换共用 bool_value。无调用的单地址 playback_url 删除；仅人工测试调用的 liked_tracks 包装删除，测试改用同一 playlist_page 路径取得 tracks。旧的仅测试用域名选择算法删除，现有用例改为验证生产 playback_stream_domains 的完整候选序列。refresh_credential 收窄为私有，刷新语义不变。没有新增微小函数测试，保留已有签名/哈希向量和业务覆盖。
 
 阶段 1 验证：API 测试 42 passed / 1 ignored（少一项重复的签名向量测试）；应用 all-targets 编译、格式和 diff 检查通过。真实联网测试仍未执行。
+
+
+阶段 2a：移除 integration 历史路径，应用从 crate 根入口导入；account.rs 持有凭据会话与登录编排，models.rs 持有共享数据，原 protocol.rs 移到 client.rs，QRC 实现随客户端移动。暂未改动请求和解析函数体。逐段比较确认共享数据声明、凭据转换、扫码/刷新编排及 QRC 内容相同；只有跨模块调用所需的内部可见性调整。API 测试 42 passed / 1 ignored、应用 all-targets 编译、格式及 diff 检查通过。没有为纯移动新增测试。

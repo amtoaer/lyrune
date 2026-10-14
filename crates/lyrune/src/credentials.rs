@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result};
-use lyrune_api::integration::QqCredential;
+use lyrune_api::QqCredential;
 
 const SERVICE: &str = "dev.lyrune";
 const ACCOUNT: &str = "qqmusic";
@@ -42,7 +42,7 @@ impl CredentialStore {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use lyrune_api::integration::{CredentialSession, ProtocolClient, UserPlaylist};
+    use lyrune_api::{CredentialSession, ProtocolClient, UserPlaylist};
 
     use super::CredentialStore;
 

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use gpui::{App, Context, Pixels, Window, px};
 use gpui_component::IndexPath;
 use hashbrown::HashMap;
-use lyrune_api::integration::{
+use lyrune_api::{
     PlaylistPage, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist,
     UserPlaylistId,
 };

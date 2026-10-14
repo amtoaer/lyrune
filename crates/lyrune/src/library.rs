@@ -16,7 +16,7 @@ use gpui_component::{
     table::{Column, TableDelegate, TableState},
     v_flex,
 };
-use lyrune_api::integration::{SearchAlbum, SearchArtist, Track, UserPlaylist, UserPlaylistId};
+use lyrune_api::{SearchAlbum, SearchArtist, Track, UserPlaylist, UserPlaylistId};
 use tokio::sync::mpsc;
 
 #[derive(Clone)]

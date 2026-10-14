@@ -4,7 +4,7 @@ use std::{
 };
 
 use gpui::{Pixels, Rgba, black, px, rgb};
-use lyrune_api::integration::{
+use lyrune_api::{
     PlaylistPage, Quality, SearchAlbum, SearchPage, SearchResults, Track, UserPlaylist,
     UserPlaylistId,
 };

@@ -39,7 +39,7 @@ use gpui_component::{
     v_flex,
 };
 use hashbrown::HashMap;
-use lyrune_api::integration::{PlaylistPage, ProtocolClient};
+use lyrune_api::{PlaylistPage, ProtocolClient};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 

@@ -12,7 +12,7 @@ use gpui_component::{
     table::DataTable,
     v_flex,
 };
-use lyrune_api::integration::{
+use lyrune_api::{
     CredentialSession, PlaylistPage, ProtocolClient, Track, UserPlaylist, UserPlaylistId,
     UserProfile,
 };

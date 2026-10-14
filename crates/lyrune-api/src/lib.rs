@@ -1,6 +1,16 @@
 //! Lyrune 内部使用的 QQ 音乐协议与登录实现。
 
+mod account;
+mod client;
 mod error;
-pub mod integration;
 mod login;
+mod models;
 mod request;
+
+pub use account::{CredentialError, CredentialSession, LoginEvent, QqCredential, run_qr_login};
+pub use client::{CdnCache, ProtocolClient};
+pub use models::{
+    LyricResult, PlaybackOption, PlaylistPage, Quality, RadarTrackPage, RecommendationKind,
+    SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId,
+    UserProfile,
+};

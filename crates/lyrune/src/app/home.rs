@@ -12,7 +12,7 @@ use gpui_component::{
     spinner::Spinner,
     v_flex,
 };
-use lyrune_api::integration::{RecommendationKind, UserPlaylist};
+use lyrune_api::{RecommendationKind, UserPlaylist};
 
 use super::{LyruneView, page_horizontal_padding};
 use crate::icons::{MediaIcon, media_icon_hsla};

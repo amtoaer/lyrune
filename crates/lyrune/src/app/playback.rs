@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use gpui::{Context, Window};
-use lyrune_api::integration::{CredentialSession, PlaybackOption, ProtocolClient, Quality, Track};
+use lyrune_api::{CredentialSession, PlaybackOption, ProtocolClient, Quality, Track};
 use tokio::sync::mpsc;
 
 use crate::cache::{AudioCache, PreparedStream};

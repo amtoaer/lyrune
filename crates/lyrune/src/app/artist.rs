@@ -11,7 +11,7 @@ use gpui_component::{
     spinner::Spinner,
     v_flex,
 };
-use lyrune_api::integration::{SearchAlbum, SearchArtist, Track};
+use lyrune_api::{SearchAlbum, SearchArtist, Track};
 
 use super::navigation::{MainContent, NavigationPage, SharedArtistResource, lock_resource};
 use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, LyruneView, page_horizontal_padding};

@@ -7,9 +7,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use directories::ProjectDirs;
 use gpui::WindowAppearance;
-use lyrune_api::integration::{
-    CdnCache, Quality, Track, UserPlaylist, UserPlaylistId, UserProfile,
-};
+use lyrune_api::{CdnCache, Quality, Track, UserPlaylist, UserPlaylistId, UserProfile};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -787,7 +785,7 @@ mod tests {
             current_playback: Some(PersistedPlayback {
                 account_id: 10001,
                 playlist_id: UserPlaylistId::Recommendation {
-                    kind: lyrune_api::integration::RecommendationKind::Radar,
+                    kind: lyrune_api::RecommendationKind::Radar,
                 },
                 track_mid: "restored-track".to_owned(),
                 position_ms: 92_345,

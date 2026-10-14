@@ -11,9 +11,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
-use lyrune_api::integration::{
-    CredentialSession, LoginEvent, QqCredential, UserProfile, run_qr_login,
-};
+use lyrune_api::{CredentialSession, LoginEvent, QqCredential, UserProfile, run_qr_login};
 use tokio::sync::mpsc;
 
 use crate::credentials::CredentialStore;
@@ -554,7 +552,7 @@ impl LyruneView {
 #[cfg(test)]
 mod tests {
     use super::{Account, AccountState};
-    use lyrune_api::integration::{CredentialSession, QqCredential};
+    use lyrune_api::{CredentialSession, QqCredential};
 
     #[test]
     fn test_login_attempts() {

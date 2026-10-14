@@ -14,7 +14,7 @@ use gpui_component::{
     slider::Slider,
     v_flex,
 };
-use lyrune_api::integration::SearchAlbum;
+use lyrune_api::SearchAlbum;
 
 use super::lyrics_view::LYRIC_BACKGROUND_OVERLAY_OPACITY;
 use super::queue::RepeatMode;

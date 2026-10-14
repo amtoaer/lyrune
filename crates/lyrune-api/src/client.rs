@@ -13,12 +13,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex, RwLock};
 
+mod qrc_des;
+
+use crate::account::{is_credential_rejected, new_client_guid};
 use crate::request::{get_search_id, hash33, sign};
 
-use super::{
+use crate::{
     CredentialError, CredentialSession, LyricResult, PlaybackOption, PlaylistPage, QqCredential,
     Quality, RadarTrackPage, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track,
-    UserPlaylist, UserPlaylistId, UserProfile, is_credential_rejected, new_client_guid, qrc_des,
+    UserPlaylist, UserPlaylistId, UserProfile,
 };
 
 const API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";

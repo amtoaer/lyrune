@@ -12,6 +12,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     list::{ListDelegate, ListItem, ListState},
+    scroll::Scrollbar,
     spinner::Spinner,
     table::{Column, TableDelegate, TableState},
     v_flex,
@@ -1023,8 +1024,8 @@ impl TableDelegate for TrackTableDelegate {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        // 自适应列已占满可用宽度，组件默认的尾部空列会造成横向溢出。
-        gpui::Empty
+        // 为纵向滚动条留位；计算列宽时扣除同一宽度，避免横向溢出。
+        div().w(Scrollbar::width()).h_full().flex_shrink_0()
     }
 
     fn loading(&self, _: &App) -> bool {
@@ -1044,7 +1045,7 @@ impl TableDelegate for TrackTableDelegate {
 
 fn track_columns(available_width: Pixels) -> Vec<Column> {
     let compact = available_width < px(792.);
-    let flexible_width = available_width - px(48. + 84.);
+    let flexible_width = available_width - px(48. + 84.) - Scrollbar::width();
     let album_width = if compact {
         px(0.)
     } else {

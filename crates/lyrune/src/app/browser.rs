@@ -670,7 +670,7 @@ mod tests {
         use std::sync::Arc;
 
         use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point, size};
-        use gpui_component::{list::ListDelegate, table::TableEvent};
+        use gpui_component::{list::ListDelegate, scroll::Scrollbar, table::TableEvent};
         use lyrune_api::{PlaylistPage, SearchAlbum, SearchArtist, SearchPage};
 
         use crate::app::navigation::{NavigationPage, PlaylistCachePolicy, lock_resource};
@@ -804,7 +804,7 @@ mod tests {
             let row = cx.debug_bounds("track-row-0").unwrap();
             let duration = cx.debug_bounds("track-duration-0").unwrap();
             assert!(
-                (row.right() - duration.right() - px(8.)).abs() <= px(1.),
+                (row.right() - duration.right() - px(8.) - Scrollbar::width()).abs() <= px(1.),
                 "duration must align with the row at width {width}: {row:?}, {duration:?}"
             );
             preview.read_with(cx, |table, _| {
@@ -879,13 +879,20 @@ mod tests {
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let row = cx.debug_bounds("track-row-0").unwrap();
             let duration = cx.debug_bounds("track-duration-0").unwrap();
-            assert!((row.right() - duration.right() - px(8.)).abs() <= px(1.));
+            assert!((row.right() - duration.right() - px(8.) - Scrollbar::width()).abs() <= px(1.));
+            let table_right = cx.debug_bounds("track-table-header").unwrap().right();
+            assert!(
+                duration.right() <= table_right - Scrollbar::width(),
+                "duration must not overlap the vertical scrollbar: {duration:?}, {table_right:?}"
+            );
             let title_width = cx.debug_bounds("track-title-0").unwrap().size.width;
             assert!(title_width > previous_title_width);
             previous_title_width = title_width;
             browser.read_with(cx, |browser, cx| {
                 let table = browser.track_table.read(cx);
                 assert_eq!(table.horizontal_scroll_handle.max_offset().x, px(0.));
+                let scroll = table.vertical_scroll_handle.0.borrow();
+                assert!(scroll.base_handle.max_offset().y > px(0.));
             });
         }
         cx.simulate_resize(size(px(1000.), px(1900.)));

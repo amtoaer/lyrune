@@ -322,8 +322,9 @@ impl LyruneView {
 
         audio.stop();
         if !same_track {
-            self.lyric_motion_state = None;
-            self.pending_lyric_reveal_mid = self.cover_backdrop_expanded.then(|| track.mid.clone());
+            self.lyrics_view.update(cx, |view, cx| {
+                view.start_track(&track.mid, self.cover_backdrop_expanded, cx)
+            });
         }
         self.ensure_track_lyrics(
             client.clone(),

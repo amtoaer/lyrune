@@ -12,7 +12,7 @@ use gpui_component::{
 };
 use lyrune_api::Quality;
 
-use super::{LyricLayoutCache, LyruneView, page_horizontal_padding};
+use super::{LyruneView, page_horizontal_padding};
 use crate::cache::audio_cache_limit_bytes;
 use crate::design::{self, ColorTheme};
 use crate::settings::{
@@ -431,7 +431,8 @@ impl LyruneView {
             cx,
         );
         self.apply_theme(window, cx);
-        self.lyric_layout_cache = LyricLayoutCache::default();
+        self.lyrics_view
+            .update(cx, |view, cx| view.reset_layout(cx));
         self.persist_settings();
         cx.notify();
     }
@@ -461,7 +462,8 @@ impl LyruneView {
             return;
         }
         self.settings.lyric_highlight_frame_rate = frame_rate;
-        self.reset_lyric_animation_frames();
+        self.lyrics_view
+            .update(cx, |view, _| view.reset_lyric_animation_frames());
         window.set_inactive_frame_interval(self.inactive_window_frame_interval());
         self.persist_settings();
         cx.notify();
@@ -477,7 +479,8 @@ impl LyruneView {
             return;
         }
         self.settings.lyric_scroll_frame_rate = frame_rate;
-        self.reset_lyric_animation_frames();
+        self.lyrics_view
+            .update(cx, |view, _| view.reset_lyric_animation_frames());
         window.set_inactive_frame_interval(self.inactive_window_frame_interval());
         self.persist_settings();
         cx.notify();

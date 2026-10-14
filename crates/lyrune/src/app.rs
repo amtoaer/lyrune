@@ -52,8 +52,8 @@ use self::{
     home::HomePageState,
     lyrics_loading::LyricsCache,
     lyrics_view::{
-        CachedLyricsPanel, LYRIC_BACKGROUND_OVERLAY_OPACITY, LYRIC_EXPANSION_DURATION,
-        LyricLayoutCache, LyricMotionState, interpolate_color,
+        CollapseLyrics, LYRIC_BACKGROUND_OVERLAY_OPACITY, LYRIC_EXPANSION_DURATION, LyricsContent,
+        LyricsInput, LyricsView, combined_lyric_frame_interval, interpolate_color,
     },
     navigation::{MainContent, NavigationHistory, PageResourceCache},
     playback::Playback,
@@ -154,17 +154,9 @@ pub struct LyruneView {
     cover_backdrop_expanded: bool,
     cover_backdrop_visible: bool,
     cover_backdrop_fully_expanded: bool,
-    backdrop_current_url: Option<String>,
-    backdrop_previous_url: Option<String>,
-    backdrop_crossfade_phase: bool,
-    // 歌词源数据、待下次播放采用的刷新结果、排版缓存和每帧显示缓存各有独立寿命。
     lyrics: LyricsCache,
-    lyric_layout_cache: LyricLayoutCache,
-    lyric_motion_state: Option<LyricMotionState>,
-    cached_lyrics_panel: Option<CachedLyricsPanel>,
-    lyric_panel_frame_pending: bool,
-    pending_lyric_reveal_mid: Option<String>,
-    lyric_reveal_frame_pending: bool,
+    lyrics_view: Entity<LyricsView>,
+    _lyrics_subscription: Option<Subscription>,
     fonts: AppFonts,
     color_theme: ColorTheme,
     settings: AppSettings,
@@ -182,9 +174,6 @@ pub struct LyruneView {
     _window_subscription: Option<Subscription>,
     _appearance_subscription: Option<Subscription>,
     background_tick_wake: Option<mpsc::Sender<()>>,
-    lyric_animation_frame_pending: bool,
-    next_lyric_highlight_frame: Option<Instant>,
-    next_lyric_scroll_frame: Option<Instant>,
     #[cfg(target_os = "linux")]
     mpris: Option<MprisHandle>,
     #[cfg(target_os = "linux")]
@@ -287,6 +276,7 @@ impl LyruneView {
         });
         let progress =
             cx.new(|cx| PlaybackProgressView::new(audio.clone(), fonts.monospace.clone(), cx));
+        let lyrics_view = cx.new(|_| LyricsView::new(audio.clone(), fonts.lyrics.clone()));
         let volume_slider = cx.new(|_| volume_slider_state(settings.volume));
         let image_cache = CachedImageCache::new(settings.image_cache_capacity, cx);
         let subscriptions = vec![
@@ -437,16 +427,9 @@ impl LyruneView {
             cover_backdrop_expanded: false,
             cover_backdrop_visible: false,
             cover_backdrop_fully_expanded: false,
-            backdrop_current_url: None,
-            backdrop_previous_url: None,
-            backdrop_crossfade_phase: false,
             lyrics: LyricsCache::new(lyric_disk_cache),
-            lyric_layout_cache: LyricLayoutCache::default(),
-            lyric_motion_state: None,
-            cached_lyrics_panel: None,
-            lyric_panel_frame_pending: true,
-            pending_lyric_reveal_mid: None,
-            lyric_reveal_frame_pending: false,
+            lyrics_view,
+            _lyrics_subscription: None,
             fonts,
             color_theme,
             settings,
@@ -462,9 +445,6 @@ impl LyruneView {
             _window_subscription: None,
             _appearance_subscription: None,
             background_tick_wake: None,
-            lyric_animation_frame_pending: false,
-            next_lyric_highlight_frame: None,
-            next_lyric_scroll_frame: None,
             #[cfg(target_os = "linux")]
             mpris: None,
             #[cfg(target_os = "linux")]
@@ -512,10 +492,15 @@ impl LyruneView {
         window.set_window_title("Lyrune");
         self.window_handle = window.window_handle();
         Theme::global_mut(cx).notification.margins.bottom = px(PLAYER_BAR_HEIGHT + 16.);
-        self.lyric_animation_frame_pending = false;
-        self.lyric_panel_frame_pending = true;
-        self.next_lyric_highlight_frame = None;
-        self.next_lyric_scroll_frame = None;
+        self.lyrics_view
+            .update(cx, |view, cx| view.attach_window(cx));
+        self._lyrics_subscription = Some(cx.subscribe_in(
+            &self.lyrics_view,
+            window,
+            |this, _, _: &CollapseLyrics, window, cx| {
+                this.set_cover_backdrop_expanded(false, window, cx);
+            },
+        ));
         window.set_inactive_frame_interval(self.inactive_window_frame_interval());
         self._appearance_subscription =
             Some(cx.observe_window_appearance(window, |this, window, cx| {
@@ -781,16 +766,156 @@ impl LyruneView {
             .into_any_element()
     }
 
-    fn render_window_controls(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
-        let expansion_progress = transition(
+    pub(super) fn inactive_window_frame_interval(&self) -> Option<Duration> {
+        let lyrics = if self.cover_backdrop_visible {
+            combined_lyric_frame_interval(
+                self.settings.lyric_highlight_frame_rate,
+                self.settings.lyric_scroll_frame_rate,
+            )
+        } else {
+            Some(crate::INACTIVE_WINDOW_FRAME_INTERVAL)
+        };
+        match (lyrics, self.settings.progress_frame_rate.frame_interval()) {
+            (Some(lyrics), Some(progress)) => Some(lyrics.min(progress)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn set_cover_backdrop_expanded(
+        &mut self,
+        expanded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cover_backdrop_expanded = expanded;
+        if !expanded {
+            self.cover_backdrop_fully_expanded = false;
+        }
+        if expanded && !self.cover_backdrop_visible {
+            self.cover_backdrop_visible = true;
+            self.lyrics_view
+                .update(cx, |view, _| view.reset_lyric_animation_frames());
+        }
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
+        self.wake_playback_tick();
+        cx.notify();
+    }
+
+    fn lyrics_expansion_progress(&mut self, window: &mut Window, cx: &mut Context<Self>) -> f32 {
+        // 裁剪与 CSD 图标取同一条动画；子视图中的同名 transition 会形成独立状态。
+        let progress = transition(
             ("cover-backdrop", "expansion-progress"),
             if self.cover_backdrop_expanded { 1. } else { 0. },
             Transition::new(LYRIC_EXPANSION_DURATION).ease(|progress| 1. - (1. - progress).powi(4)),
             window,
             cx,
         );
+        if self.cover_backdrop_expanded && progress >= 1. {
+            self.cover_backdrop_fully_expanded = true;
+        }
+        let visible = self.cover_backdrop_expanded || progress > 0.;
+        if self.cover_backdrop_visible != visible {
+            self.cover_backdrop_visible = visible;
+            window.set_inactive_frame_interval(self.inactive_window_frame_interval());
+        }
+        progress
+    }
+
+    fn sync_lyrics_view(&mut self, expansion_progress: f32, cx: &mut Context<Self>) {
+        let track = self.playback.track();
+        let mid = track.map(|track| track.mid.clone()).unwrap_or_default();
+        let content = if let Some(lyrics) = self.lyrics.adopted.get(&mid) {
+            LyricsContent::Ready(lyrics.parsed.clone())
+        } else if self.lyrics.loading.contains(&mid) {
+            LyricsContent::Loading
+        } else if let Some(error) = self.lyrics.errors.get(&mid) {
+            LyricsContent::Error(error.clone())
+        } else {
+            LyricsContent::Unloaded
+        };
+        let input = LyricsInput {
+            mid,
+            cover_url: track.and_then(|track| track.cover_url.clone()),
+            duration: self.playback.duration(),
+            content,
+            font: self.fonts.lyrics.clone(),
+            font_scale: self.settings.lyric_font_scale,
+            line_spacing: self.settings.lyric_line_spacing,
+            highlight_frame_rate: self.settings.lyric_highlight_frame_rate,
+            scroll_frame_rate: self.settings.lyric_scroll_frame_rate,
+            advancing: self.playback.is_advancing(),
+            seeking: self.progress.read(cx).seek_preview.is_some(),
+            expanded: self.cover_backdrop_expanded,
+            visible: self.cover_backdrop_visible,
+            expansion_progress,
+        };
+        self.lyrics_view.update(cx, |view, cx| {
+            view.set_input(input, self.playback.position, cx)
+        });
+    }
+
+    fn render_lyrics_layer(&self, expansion_progress: f32, window: &Window) -> AnyElement {
+        if self
+            .playback
+            .track()
+            .and_then(|track| track.cover_url.as_ref())
+            .is_none()
+        {
+            return div().into_any_element();
+        }
+        let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
+        // 只有已展开的裁剪区域遮挡输入，透明的未展开区域仍交给普通页面。
+        div()
+            .id("cover-backdrop")
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(px(PLAYER_BAR_HEIGHT))
+            .h(available_height)
+            .overflow_hidden()
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(available_height * expansion_progress)
+                    .overflow_hidden()
+                    .occlude()
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(available_height)
+                            .child(self.lyrics_view.clone()),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn foreground_target(
+        &self,
+        overlay: Hsla,
+        preferred: Hsla,
+        sample: impl Fn(&crate::http::BlurredCover) -> [f32; 3],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Hsla> {
+        self.lyrics_view.update(cx, |view, cx| {
+            view.foreground_target(overlay, preferred, sample, window, cx)
+        })
+    }
+
+    fn render_window_controls(
+        &self,
+        expansion_progress: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
         let lyrics_controls = self.cover_backdrop_expanded;
         let reveal_start = (1. - 54. / f32::from(available_height).max(54.)).clamp(0., 1.);
         let control_color_progress =
@@ -910,19 +1035,12 @@ impl LyruneView {
             }))
     }
 
-    fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.cover_backdrop_visible && self.playback.is_advancing() {
-            if self.progress.read(cx).seek_preview.is_none() {
-                self.playback.position = self
-                    .playback
-                    .audio
-                    .as_deref()
-                    .map(AudioPlayer::position)
-                    .unwrap_or_default();
-            }
-            self.request_lyric_animation_frame(window, cx);
-        }
-
+    fn render_main(
+        &mut self,
+        expansion_progress: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let compact = window.viewport_size().width < px(1120.);
@@ -938,7 +1056,7 @@ impl LyruneView {
                 .bg(theme.background)
                 .text_color(theme.foreground)
                 .child(div().flex_1().min_h_0())
-                .child(self.render_cover_backdrop(window, cx))
+                .child(self.render_lyrics_layer(expansion_progress, window))
                 .child(self.render_player_bar(compact, narrow, window, cx))
                 .when(popover_open, |this| {
                     this.child(
@@ -959,7 +1077,10 @@ impl LyruneView {
                     )
                 })
                 .when(client_decorations, |this| {
-                    this.child(deferred(self.render_window_controls(window, cx)).with_priority(20))
+                    this.child(
+                        deferred(self.render_window_controls(expansion_progress, window, cx))
+                            .with_priority(20),
+                    )
                 })
                 .into_any_element();
         }
@@ -1175,7 +1296,7 @@ impl LyruneView {
                         ),
                 ),
             )
-            .child(self.render_cover_backdrop(window, cx))
+            .child(self.render_lyrics_layer(expansion_progress, window))
             .child(self.render_player_bar(compact, narrow, window, cx))
             .when(popover_open, |this| {
                 this.child(
@@ -1196,7 +1317,10 @@ impl LyruneView {
                 )
             })
             .when(client_decorations, |this| {
-                this.child(deferred(self.render_window_controls(window, cx)).with_priority(20))
+                this.child(
+                    deferred(self.render_window_controls(expansion_progress, window, cx))
+                        .with_priority(20),
+                )
             })
             .into_any_element()
     }
@@ -1210,6 +1334,19 @@ impl Drop for LyruneView {
 
 impl Render for LyruneView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.cover_backdrop_visible && self.playback.is_advancing() {
+            if self.progress.read(cx).seek_preview.is_none() {
+                self.playback.position = self
+                    .playback
+                    .audio
+                    .as_deref()
+                    .map(AudioPlayer::position)
+                    .unwrap_or_default();
+            }
+        }
+
+        let expansion_progress = self.lyrics_expansion_progress(window, cx);
+        self.sync_lyrics_view(expansion_progress, cx);
         let notification_list = Root::read(window, cx).notification.clone();
         let notification_layer = div()
             .absolute()
@@ -1223,7 +1360,7 @@ impl Render for LyruneView {
             div()
                 .relative()
                 .size_full()
-                .child(self.render_main(window, cx))
+                .child(self.render_main(expansion_progress, window, cx))
                 .child(notification_layer)
                 .into_any_element()
         } else {
@@ -1235,7 +1372,10 @@ impl Render for LyruneView {
                 .child(self.render_login(cx))
                 .child(notification_layer)
                 .when(client_decorations, |this| {
-                    this.child(deferred(self.render_window_controls(window, cx)).with_priority(20))
+                    this.child(
+                        deferred(self.render_window_controls(expansion_progress, window, cx))
+                            .with_priority(20),
+                    )
                 })
                 .into_any_element()
         }

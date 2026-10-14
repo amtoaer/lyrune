@@ -807,6 +807,9 @@ mod tests {
                 (row.right() - duration.right() - px(8.)).abs() <= px(1.),
                 "duration must align with the row at width {width}: {row:?}, {duration:?}"
             );
+            preview.read_with(cx, |table, _| {
+                assert_eq!(table.horizontal_scroll_handle.max_offset().x, px(0.));
+            });
             let view_all = cx.debug_bounds("view-all-artist-albums").unwrap();
             assert!(
                 (last.right() - view_all.right() - px(8.)).abs() <= px(1.),
@@ -872,7 +875,7 @@ mod tests {
         });
         let mut previous_title_width = px(0.);
         for width in [1440., 1920.] {
-            cx.simulate_resize(size(px(width), px(1900.)));
+            cx.simulate_resize(size(px(width), px(850.)));
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let row = cx.debug_bounds("track-row-0").unwrap();
             let duration = cx.debug_bounds("track-duration-0").unwrap();
@@ -880,6 +883,10 @@ mod tests {
             let title_width = cx.debug_bounds("track-title-0").unwrap().size.width;
             assert!(title_width > previous_title_width);
             previous_title_width = title_width;
+            browser.read_with(cx, |browser, cx| {
+                let table = browser.track_table.read(cx);
+                assert_eq!(table.horizontal_scroll_handle.max_offset().x, px(0.));
+            });
         }
         cx.simulate_resize(size(px(1000.), px(1900.)));
         cx.update(|window, cx| browser.update(cx, |browser, cx| browser.navigate_back(window, cx)));

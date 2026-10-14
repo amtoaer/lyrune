@@ -1018,6 +1018,15 @@ impl TableDelegate for TrackTableDelegate {
         }
     }
 
+    fn render_last_empty_col(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        // 自适应列已占满可用宽度，组件默认的尾部空列会造成横向溢出。
+        gpui::Empty
+    }
+
     fn loading(&self, _: &App) -> bool {
         self.loading && self.tracks.is_empty()
     }

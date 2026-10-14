@@ -377,7 +377,14 @@ pub(super) fn browsing_area(
                             .h_full()
                             .min_w_0()
                             .flex_1()
-                            .child(navigation)
+                            .child(
+                                navigation.cached(
+                                    StyleRefinement::default()
+                                        .w_full()
+                                        .h(px(72.))
+                                        .flex_shrink_0(),
+                                ),
+                            )
                             .child(
                                 browser
                                     .clone()
@@ -511,6 +518,8 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let before = browser.read_with(cx, |browser, _| browser.render_count);
         assert!(before > 0);
+        let navigation = browser.read_with(cx, |browser, _| browser.navigation_view.clone());
+        let navigation_before = navigation.read_with(cx, |view, _| view.render_count);
         for step in 1..=30 {
             host.update(cx, |host, cx| {
                 host.reveal = step as f32 * 8.;
@@ -522,6 +531,23 @@ mod tests {
             browser.read_with(cx, |browser, _| browser.render_count),
             before
         );
+        assert_eq!(
+            navigation.read_with(cx, |view, _| view.render_count),
+            navigation_before
+        );
+
+        let input = browser.read_with(cx, |browser, _| browser.search_input.clone());
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| input.set_value("draft", window, cx));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(navigation.read_with(cx, |view, _| view.render_count) > navigation_before);
+        assert_eq!(browser.read_with(cx, |view, _| view.render_count), before);
+        let bounds = input.read_with(cx, |input, _| input.input_bounds());
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_input("typed");
+        assert_eq!(input.read_with(cx, |input, _| input.value()), "typed");
 
         cx.update(|window, cx| browser.update(cx, |browser, cx| browser.show_settings(window, cx)));
         cx.update(|window, cx| window.draw(cx).clear(cx));

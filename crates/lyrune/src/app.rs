@@ -657,7 +657,15 @@ impl LyruneView {
                             .right_0()
                             .bottom_0()
                             .h(available_height)
-                            .child(self.lyrics_view.clone()),
+                            // 零高度裁剪仍会执行子视图布局；隐藏时缓存，保留资源预热与状态失效。
+                            .child(if self.cover_backdrop_visible {
+                                self.lyrics_view.clone().into_any_element()
+                            } else {
+                                self.lyrics_view
+                                    .clone()
+                                    .cached(StyleRefinement::default().size_full())
+                                    .into_any_element()
+                            }),
                     ),
             )
             .into_any_element()

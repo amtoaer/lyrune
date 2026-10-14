@@ -41,6 +41,8 @@ pub(super) struct NavigationView {
     search_input: Entity<InputState>,
     pub(super) input: NavigationInput,
     _subscriptions: Vec<Subscription>,
+    #[cfg(test)]
+    pub(super) render_count: usize,
 }
 impl EventEmitter<NavigationAction> for NavigationView {}
 impl NavigationView {
@@ -67,6 +69,8 @@ impl NavigationView {
                 account_menu_open: false,
             },
             _subscriptions: subscriptions,
+            #[cfg(test)]
+            render_count: 0,
         }
     }
     pub(super) fn render_account(
@@ -171,6 +175,10 @@ impl NavigationView {
 
 impl Render for NavigationView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.render_count += 1;
+        }
         let theme = cx.theme().clone();
         let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);

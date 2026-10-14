@@ -696,7 +696,7 @@ impl LyruneView {
             PlayerAction::Quality(quality) => self.set_playback_quality(*quality, cx),
             PlayerAction::ToggleQuality => {
                 self.quality_menu_open = !self.quality_menu_open;
-                self.account.menu_open = false;
+                self.account_menu_open = false;
                 cx.notify();
             }
             PlayerAction::Volume { value, persist } => {

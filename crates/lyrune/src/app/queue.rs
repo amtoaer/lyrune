@@ -180,7 +180,7 @@ impl LyruneView {
         kind: RecommendationKind,
         cx: &mut Context<Self>,
     ) {
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             self.notify_error("请先登录 QQ 音乐", cx);
             cx.notify();
             return;
@@ -266,7 +266,7 @@ impl LyruneView {
         if !continuation.can_load_more() || (!force && remaining > 2) {
             return;
         }
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -317,7 +317,7 @@ impl LyruneView {
                             queue.continuation = continuation;
                             first_added = queue.append_tracks(tracks.into_iter().map(Arc::new));
                         }
-                        this.persist_current_playback();
+                        this.persist_current_playback(cx);
                         // 已播到队尾时，续播从第一首新加入的歌开始；去重后的空批次不能越界跳歌。
                         if this.playback.waiting_for_recommendation {
                             this.playback.waiting_for_recommendation = false;
@@ -392,7 +392,7 @@ impl LyruneView {
         if !has_more {
             return;
         }
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -462,7 +462,7 @@ impl LyruneView {
                             this.sync_table_playback_state(cx);
                         }
                     }
-                    this.persist_current_playback();
+                    this.persist_current_playback(cx);
                     #[cfg(target_os = "linux")]
                     this.sync_mpris(false);
                     cx.notify();
@@ -472,8 +472,8 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn persist_current_playback(&mut self) {
-        let Some(account_id) = self.account.id() else {
+    pub(super) fn persist_current_playback(&mut self, cx: &gpui::App) {
+        let Some(account_id) = self.account.read(cx).id() else {
             return;
         };
         let Some(current_playback) = self.playback.snapshot(account_id) else {

@@ -89,7 +89,7 @@ pub(super) struct PlaylistPageState {
 
 impl LyruneView {
     pub(super) fn load_library(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(account_id) = credential.snapshot().map(|credential| credential.music_id) else {
@@ -104,7 +104,8 @@ impl LyruneView {
         {
             self.library_loading = false;
             self.apply_library(account_id, profile, playlists, false, cx);
-            self.validate_cached_credential(cx);
+            self.account
+                .update(cx, |account, cx| account.validate_cached_credential(cx));
             return;
         }
         let Some(client) = self.protocol_client.clone() else {
@@ -164,7 +165,10 @@ impl LyruneView {
         force_refresh: bool,
         cx: &mut Context<Self>,
     ) {
-        self.account.profile = Some(profile);
+        self.account.update(cx, |account, cx| {
+            account.profile = Some(profile);
+            cx.notify();
+        });
         let count = playlists.len();
         let viewed_index = self
             .settings
@@ -231,7 +235,7 @@ impl LyruneView {
             return;
         };
 
-        if let Some(account_id) = self.account.id() {
+        if let Some(account_id) = self.account.read(cx).id() {
             let view = PersistedLibraryView {
                 account_id,
                 playlist_id: playlist.id.clone(),
@@ -243,7 +247,7 @@ impl LyruneView {
         }
 
         let resource = self.page_resource_cache.playlist(
-            self.account.id().unwrap_or(0),
+            self.account.read(cx).id().unwrap_or(0),
             playlist.clone(),
             force_refresh,
             PlaylistCachePolicy::Fresh,
@@ -280,7 +284,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) {
         let resource = self.page_resource_cache.playlist(
-            self.account.id().unwrap_or(0),
+            self.account.read(cx).id().unwrap_or(0),
             playlist.clone(),
             false,
             PlaylistCachePolicy::Fresh,
@@ -373,7 +377,7 @@ impl LyruneView {
         });
         let resource = resource.unwrap_or_else(|| {
             self.page_resource_cache.playlist(
-                self.account.id().unwrap_or(0),
+                self.account.read(cx).id().unwrap_or(0),
                 playlist.clone(),
                 force_refresh,
                 cache_policy,
@@ -413,7 +417,7 @@ impl LyruneView {
     }
 
     pub(super) fn load_playlist_page(&mut self, cx: &mut Context<Self>) {
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(resource) = self.playlist.resource.clone() else {
@@ -549,7 +553,7 @@ impl LyruneView {
         if self.liked_tracks.contains_key(&mid) || self.liked_state_loading.contains(&mid) {
             return;
         }
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(account_id) = credential.snapshot().map(|credential| credential.music_id) else {
@@ -589,7 +593,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 this.liked_state_loading.remove(&mid);
-                if this.account.id().is_none_or(|id| id != account_id) {
+                if this.account.read(cx).id().is_none_or(|id| id != account_id) {
                     return;
                 }
                 match result {
@@ -632,7 +636,7 @@ impl LyruneView {
         if self.liked_toggle_loading.contains(&mid) {
             return;
         }
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(account_id) = credential.snapshot().map(|credential| credential.music_id) else {
@@ -668,7 +672,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 this.liked_toggle_loading.remove(&mid);
-                if this.account.id().is_none_or(|id| id != account_id) {
+                if this.account.read(cx).id().is_none_or(|id| id != account_id) {
                     return;
                 }
                 match result {
@@ -796,6 +800,7 @@ impl LyruneView {
             .or_else(|| {
                 if owned_by_profile {
                     self.account
+                        .read(cx)
                         .profile
                         .as_ref()
                         .map(|profile| profile.nickname.clone())
@@ -805,7 +810,7 @@ impl LyruneView {
             });
         let owner_avatar_url = playlist.owner_avatar_url.clone().or_else(|| {
             owned_by_profile
-                .then(|| self.account.profile.as_ref()?.avatar_url.clone())
+                .then(|| self.account.read(cx).profile.as_ref()?.avatar_url.clone())
                 .flatten()
         });
         let owner_identity = owner.zip(owner_avatar_url);

@@ -57,7 +57,7 @@ impl LyruneView {
         if self.home.loading {
             return;
         }
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             self.home.error = Some("请先登录 QQ 音乐".to_owned());
             cx.notify();
             return;

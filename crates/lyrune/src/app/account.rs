@@ -11,7 +11,9 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
-use lyrune_api::{CredentialSession, LoginEvent, QqCredential, UserProfile, run_qr_login};
+use lyrune_api::{
+    CredentialSession, LoginEvent, ProtocolClient, QqCredential, UserProfile, run_qr_login,
+};
 use tokio::sync::mpsc;
 
 use crate::credentials::CredentialStore;
@@ -30,6 +32,7 @@ pub(super) enum AccountState {
     SignedIn,
 }
 
+// 实体随应用存活；关闭窗口不会中断凭据监听或把登录任务交给页面视图。
 pub(super) struct Account {
     pub(super) state: AccountState,
     pub(super) credential: Option<CredentialSession>,
@@ -38,7 +41,7 @@ pub(super) struct Account {
     // 退出和重试时继续递增，不能在清空会话时用 Default 重置。
     generation: u64,
     message: String,
-    pub(super) menu_open: bool,
+    client: Option<ProtocolClient>,
 }
 
 impl Default for Account {
@@ -50,7 +53,7 @@ impl Default for Account {
             qr_image: None,
             generation: 0,
             message: "正在读取已保存的登录状态…".to_owned(),
-            menu_open: false,
+            client: None,
         }
     }
 }
@@ -103,7 +106,25 @@ impl Account {
     }
 }
 
-impl LyruneView {
+pub(super) enum AccountEvent {
+    SignedIn,
+    Rejected {
+        generation: u64,
+        credential: CredentialSession,
+    },
+    Error(String),
+}
+
+impl EventEmitter<AccountEvent> for Account {}
+
+impl Account {
+    pub(super) fn new(client: Option<ProtocolClient>) -> Self {
+        Self {
+            client,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn restore_credential(&mut self, cx: &mut Context<Self>) {
         let task = RUNTIME.spawn(async move {
             tokio::task::spawn_blocking(CredentialStore::load)
@@ -117,28 +138,29 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| match result {
                 Ok(Some(credential)) => {
-                    this.account.state = AccountState::SignedIn;
-                    this.main_content = MainContent::Home;
+                    this.state = AccountState::SignedIn;
                     this.install_credential_session(CredentialSession::new(credential), cx);
-                    this.load_home(cx);
-                    this.load_library(false, cx);
+                    cx.emit(AccountEvent::SignedIn);
+                    cx.notify();
                 }
                 Ok(None) => {
-                    this.account.state = AccountState::SignedOut;
-                    this.begin_login(cx);
+                    this.state = AccountState::SignedOut;
+                    this.start_login(cx);
                 }
                 Err(error) => {
-                    this.account.state = AccountState::SignedOut;
-                    this.notify_error(format!("无法恢复登录：{error:#}；正在加载登录二维码…"), cx);
-                    this.begin_login(cx);
+                    this.state = AccountState::SignedOut;
+                    cx.emit(AccountEvent::Error(format!(
+                        "无法恢复登录：{error:#}；正在加载登录二维码…"
+                    )));
+                    this.start_login(cx);
                 }
             });
         })
         .detach();
     }
 
-    fn begin_login(&mut self, cx: &mut Context<Self>) {
-        let Some(generation) = self.account.begin_login() else {
+    pub(super) fn start_login(&mut self, cx: &mut Context<Self>) {
+        let Some(generation) = self.begin_login() else {
             return;
         };
         cx.notify();
@@ -152,7 +174,7 @@ impl LyruneView {
                     LoginEvent::Succeeded(_) | LoginEvent::Expired | LoginEvent::Failed(_)
                 );
                 let _ = this.update(cx, |this, cx| {
-                    if this.account.generation == generation {
+                    if this.generation == generation {
                         this.handle_login_event(event, cx);
                     }
                 });
@@ -167,31 +189,29 @@ impl LyruneView {
     fn handle_login_event(&mut self, event: LoginEvent, cx: &mut Context<Self>) {
         match event {
             LoginEvent::QrReady(png) => {
-                self.account.qr_image = Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)));
-                self.account.message = "请使用 QQ 音乐 App 扫描二维码".to_owned();
+                self.qr_image = Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)));
+                self.message = "请使用 QQ 音乐 App 扫描二维码".to_owned();
             }
-            LoginEvent::WaitingScan => self.account.message = "等待扫码…".to_owned(),
+            LoginEvent::WaitingScan => self.message = "等待扫码…".to_owned(),
             LoginEvent::WaitingConfirm => {
-                self.account.message = "已扫码，请在手机上确认登录".to_owned();
+                self.message = "已扫码，请在手机上确认登录".to_owned();
             }
             LoginEvent::Succeeded(credential) => {
-                self.account.state = AccountState::SignedIn;
-                self.account.qr_image = None;
-                self.main_content = MainContent::Home;
+                self.state = AccountState::SignedIn;
+                self.qr_image = None;
                 self.install_credential_session(CredentialSession::new(credential), cx);
-                self.load_home(cx);
-                self.load_library(false, cx);
+                cx.emit(AccountEvent::SignedIn);
             }
             LoginEvent::Expired => {
-                self.account.state = AccountState::SignedOut;
-                self.account.qr_image = None;
-                self.begin_login(cx);
+                self.state = AccountState::SignedOut;
+                self.qr_image = None;
+                self.start_login(cx);
             }
             LoginEvent::Failed(error) => {
-                self.account.state = AccountState::SignedOut;
-                self.account.qr_image = None;
-                self.account.message = "扫码登录失败，点击二维码区域重试".to_owned();
-                self.notify_error(format!("扫码登录失败：{error}"), cx);
+                self.state = AccountState::SignedOut;
+                self.qr_image = None;
+                self.message = "扫码登录失败，点击二维码区域重试".to_owned();
+                cx.emit(AccountEvent::Error(format!("扫码登录失败：{error}")));
             }
         }
         cx.notify();
@@ -209,11 +229,10 @@ impl LyruneView {
             let Ok(Err(error)) = task.await else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| {
-                this.notify_error(
-                    format!("登录成功，但凭据未能保存到系统钥匙串：{error:#}"),
-                    cx,
-                );
+            let _ = this.update(cx, |_, cx| {
+                cx.emit(AccountEvent::Error(format!(
+                    "登录成功，但凭据未能保存到系统钥匙串：{error:#}"
+                )));
                 cx.notify();
             });
         })
@@ -225,9 +244,9 @@ impl LyruneView {
         credential: CredentialSession,
         cx: &mut Context<Self>,
     ) {
-        let generation = self.account.generation;
+        let generation = self.generation;
         let mut updates = credential.subscribe();
-        self.account.credential = Some(credential.clone());
+        self.credential = Some(credential.clone());
         if let Some(current) = credential.snapshot() {
             self.persist_credential(current.as_ref().clone(), cx);
         }
@@ -236,11 +255,14 @@ impl LyruneView {
             while updates.changed().await.is_ok() {
                 let keep_watching = this
                     .update(cx, |this, cx| {
-                        if !this.account.is_current_session(generation, &credential) {
+                        if !this.is_current_session(generation, &credential) {
                             return false;
                         }
                         let Some(current) = credential.snapshot() else {
-                            this.handle_credential_rejected(cx);
+                            cx.emit(AccountEvent::Rejected {
+                                generation,
+                                credential: credential.clone(),
+                            });
                             return false;
                         };
                         this.persist_credential(current.as_ref().clone(), cx);
@@ -256,13 +278,13 @@ impl LyruneView {
     }
 
     pub(super) fn validate_cached_credential(&mut self, cx: &mut Context<Self>) {
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.credential.clone() else {
             return;
         };
-        let Some(client) = self.protocol_client.clone() else {
+        let Some(client) = self.client.clone() else {
             return;
         };
-        let generation = self.account.generation;
+        let generation = self.generation;
         let task_credential = credential.clone();
         let task = RUNTIME.spawn(async move {
             tokio::time::timeout(
@@ -279,22 +301,51 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if !this.account.is_current_session(generation, &credential)
+                if !this.is_current_session(generation, &credential)
                     || credential.snapshot().is_none()
                 {
                     return;
                 }
-                this.notify_error(format!("暂时无法验证 QQ 音乐登录凭据：{error:#}"), cx);
+                cx.emit(AccountEvent::Error(format!(
+                    "暂时无法验证 QQ 音乐登录凭据：{error:#}"
+                )));
                 cx.notify();
             });
         })
         .detach();
     }
+}
+
+impl LyruneView {
+    pub(super) fn handle_account_event(&mut self, event: &AccountEvent, cx: &mut Context<Self>) {
+        match event {
+            AccountEvent::SignedIn => {
+                self.main_content = MainContent::Home;
+                self.load_home(cx);
+                self.load_library(false, cx);
+            }
+            AccountEvent::Rejected {
+                generation,
+                credential,
+            } => {
+                // 事件经过实体边界后再次核对身份，不能清理期间新安装的会话。
+                if self
+                    .account
+                    .read(cx)
+                    .is_current_session(*generation, credential)
+                {
+                    self.handle_credential_rejected(cx);
+                }
+            }
+            AccountEvent::Error(message) => self.notify_error(message.clone(), cx),
+        }
+    }
 
     fn logout(&mut self, cx: &mut Context<Self>) {
-        if let (Some(client), Some(credential)) =
-            (self.protocol_client.clone(), self.account.snapshot())
-        {
+        if let (Some(client), Some(credential)) = (
+            self.protocol_client.clone(),
+            self.account.read(cx).snapshot(),
+        ) {
             drop(RUNTIME.spawn(async move {
                 let _ = client.logout(&credential).await;
             }));
@@ -304,13 +355,18 @@ impl LyruneView {
 
     fn handle_credential_rejected(&mut self, cx: &mut Context<Self>) {
         self.clear_account_session(false, cx);
-        self.account.message = "QQ 音乐登录凭据已失效，请重新登录".to_owned();
-        self.notify_error(self.account.message.clone(), cx);
+        let message = "QQ 音乐登录凭据已失效，请重新登录".to_owned();
+        self.account.update(cx, |account, cx| {
+            account.message = message.clone();
+            cx.notify();
+        });
+        self.notify_error(message, cx);
     }
 
     fn clear_account_session(&mut self, restart_login: bool, cx: &mut Context<Self>) {
         // 这些计数器阻止晚到结果覆盖新状态，并不取消已发出的网络请求。
-        self.account.invalidate_login();
+        self.account
+            .update(cx, |account, _| account.invalidate_login());
         self.library_generation = self.library_generation.wrapping_add(1);
         self.home.generation = self.home.generation.wrapping_add(1);
         self.playback.queue_generation = self.playback.queue_generation.wrapping_add(1);
@@ -318,12 +374,17 @@ impl LyruneView {
         if let Some(audio) = &self.playback.audio {
             audio.stop();
         }
-        self.account.revoke();
+        self.account.update(cx, |account, cx| {
+            account.revoke();
+            cx.notify();
+        });
         self.liked_tracks.clear();
         self.liked_state_loading.clear();
         self.liked_toggle_loading.clear();
-        self.account.profile = None;
-        self.account.qr_image = None;
+        self.account.update(cx, |account, _| {
+            account.profile = None;
+            account.qr_image = None;
+        });
         self.library_loading = false;
         self.main_content = MainContent::Home;
         self.navigation_history.clear();
@@ -351,7 +412,7 @@ impl LyruneView {
         self.playback.available_qualities.clear();
         self.quality_menu_open = false;
         self.playback.position = Duration::ZERO;
-        self.account.menu_open = false;
+        self.account_menu_open = false;
         self.clear_persisted_playback();
         #[cfg(target_os = "linux")]
         self.sync_mpris(false);
@@ -366,9 +427,12 @@ impl LyruneView {
             table.refresh(cx);
             cx.notify();
         });
-        self.account.message = "使用 QQ 音乐 App 扫码登录".to_owned();
+        self.account.update(cx, |account, _| {
+            account.message = "使用 QQ 音乐 App 扫码登录".to_owned()
+        });
         if restart_login {
-            self.begin_login(cx);
+            self.account
+                .update(cx, |account, cx| account.start_login(cx));
         } else {
             cx.notify();
         }
@@ -380,7 +444,7 @@ impl LyruneView {
 
     pub(super) fn render_login(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let qr = match &self.account.qr_image {
+        let qr = match &self.account.read(cx).qr_image {
             Some(image) => img(image.clone())
                 .size(px(240.))
                 .rounded(theme.radius_lg)
@@ -395,7 +459,7 @@ impl LyruneView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(match self.account.state {
+                .child(match self.account.read(cx).state {
                     AccountState::Restoring => "正在恢复登录…",
                     AccountState::SigningIn => "正在生成二维码…",
                     _ => "使用 QQ 音乐 App 扫码登录",
@@ -432,10 +496,16 @@ impl LyruneView {
                     .child(
                         div()
                             .id("login-qr")
-                            .when(self.account.state == AccountState::SignedOut, |this| {
-                                this.cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| this.begin_login(cx)))
-                            })
+                            .when(
+                                self.account.read(cx).state == AccountState::SignedOut,
+                                |this| {
+                                    this.cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.account
+                                                .update(cx, |account, cx| account.start_login(cx))
+                                        }))
+                                },
+                            )
                             .child(qr),
                     )
                     .child(
@@ -443,7 +513,7 @@ impl LyruneView {
                             .text_sm()
                             .text_center()
                             .text_color(theme.muted_foreground)
-                            .child(self.account.message.clone()),
+                            .child(self.account.read(cx).message.clone()),
                     ),
             )
             .into_any_element()
@@ -457,6 +527,7 @@ impl LyruneView {
         let theme = cx.theme().clone();
         let name = self
             .account
+            .read(cx)
             .profile
             .as_ref()
             .map(|profile| profile.nickname.clone())
@@ -464,6 +535,7 @@ impl LyruneView {
         let mut avatar = Avatar::new().name(name.clone()).with_size(px(38.));
         if let Some(url) = self
             .account
+            .read(cx)
             .profile
             .as_ref()
             .and_then(|profile| profile.avatar_url.clone())
@@ -481,13 +553,13 @@ impl LyruneView {
                     .p_0()
                     .tooltip(name.clone())
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.account.menu_open = !this.account.menu_open;
+                        this.account_menu_open = !this.account_menu_open;
                         this.quality_menu_open = false;
                         cx.notify();
                     }))
                     .child(avatar),
             )
-            .when(self.account.menu_open, |this| {
+            .when(self.account_menu_open, |this| {
                 this.child(
                     deferred(
                         v_flex()

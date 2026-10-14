@@ -46,7 +46,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use self::{
-    account::{Account, AccountState},
+    account::{Account, AccountEvent, AccountState},
     artist::ArtistPageState,
     home::HomePageState,
     lyrics_loading::LyricsCache,
@@ -111,7 +111,8 @@ fn unix_timestamp_secs() -> u64 {
 
 pub struct LyruneView {
     // 账号和浏览状态；当前浏览的歌单可以与下面的播放队列不同。
-    account: Account,
+    account: Entity<Account>,
+    account_menu_open: bool,
     library_loading: bool,
     playlist: PlaylistPageState,
     library_generation: u64,
@@ -221,6 +222,7 @@ impl LyruneView {
         let playback_quality = settings.playback_quality;
         let pending_playback_restore = settings.current_playback.clone();
         let library_cache = LibraryCache::default();
+        let account = cx.new(|_| Account::new(protocol_client.clone()));
 
         let playlist_list =
             cx.new(|cx| ListState::new(PlaylistListDelegate::new(), window, cx).searchable(false));
@@ -280,6 +282,10 @@ impl LyruneView {
         });
         let image_cache = CachedImageCache::new(settings.image_cache_capacity, cx);
         let subscriptions = vec![
+            cx.observe(&account, |_, _, cx| cx.notify()),
+            cx.subscribe(&account, |this, _, event: &AccountEvent, cx| {
+                this.handle_account_event(event, cx)
+            }),
             cx.subscribe_in(
                 &playlist_list,
                 window,
@@ -387,7 +393,8 @@ impl LyruneView {
 
         let color_theme = settings.active_color_theme(cx.window_appearance());
         let mut view = Self {
-            account: Account::default(),
+            account,
+            account_menu_open: false,
             library_loading: false,
             playlist: PlaylistPageState::default(),
             library_generation: 0,
@@ -449,14 +456,17 @@ impl LyruneView {
         }
         view.start_audio_cache_maintenance();
         view.start_cdn_maintenance();
-        view.restore_credential(cx);
+        view.account
+            .update(cx, |account, cx| account.restore_credential(cx));
         if view.settings.check_updates_on_startup {
             view.schedule_update_check(cx);
         }
-        cx.on_app_quit(|this, _| {
+        // release 仍可读取账号实体；Rust Drop 阶段已没有 GPUI App 可供生成最后的快照。
+        cx.on_release(|this, cx| this.shutdown(cx)).detach();
+        cx.on_app_quit(|this, cx| {
             // GPUI 只等待退出 future 200ms，macOS 终止后也不保证返回 main。
             // 在回调返回前排空写入；后台任务不访问 GPUI，退出时同步等待不会形成互相等待。
-            this.shutdown();
+            this.shutdown(cx);
             async {}
         })
         .detach();
@@ -662,8 +672,8 @@ impl LyruneView {
     }
 
     fn dismiss_popovers(&mut self, cx: &mut Context<Self>) {
-        if self.account.menu_open || self.quality_menu_open {
-            self.account.menu_open = false;
+        if self.account_menu_open || self.quality_menu_open {
+            self.account_menu_open = false;
             self.quality_menu_open = false;
             cx.notify();
         }
@@ -675,9 +685,9 @@ impl LyruneView {
         }
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown(&mut self, cx: &App) {
         if self.settings_writer.is_some() {
-            self.persist_current_playback();
+            self.persist_current_playback(cx);
         }
         if let Some(audio) = self.playback.audio.take() {
             audio.stop();
@@ -1044,7 +1054,7 @@ impl LyruneView {
         let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);
         let scale_factor = window.scale_factor();
-        let popover_open = self.account.menu_open || self.quality_menu_open;
+        let popover_open = self.account_menu_open || self.quality_menu_open;
         if self.cover_backdrop_fully_expanded {
             return v_flex()
                 .relative()
@@ -1324,12 +1334,6 @@ impl LyruneView {
     }
 }
 
-impl Drop for LyruneView {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
 impl Render for LyruneView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.cover_backdrop_visible && self.playback.is_advancing() {
@@ -1354,7 +1358,7 @@ impl Render for LyruneView {
             .flex()
             .justify_center()
             .child(div().relative().left(px(-42.)).child(notification_list));
-        if self.account.state == AccountState::SignedIn {
+        if self.account.read(cx).state == AccountState::SignedIn {
             div()
                 .relative()
                 .size_full()

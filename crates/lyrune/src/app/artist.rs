@@ -48,7 +48,7 @@ impl LyruneView {
     ) {
         let resource = self
             .page_resource_cache
-            .artist(self.account.id().unwrap_or(0), &artist.mid);
+            .artist(self.account.read(cx).id().unwrap_or(0), &artist.mid);
         let target = NavigationPage::Artist {
             artist,
             visible_song_count: ARTIST_PAGE_SIZE as usize,
@@ -92,7 +92,7 @@ impl LyruneView {
         let Some(artist) = self.artist.selected.clone() else {
             return;
         };
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -164,7 +164,7 @@ impl LyruneView {
         let Some(artist) = self.artist.selected.clone() else {
             return;
         };
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {

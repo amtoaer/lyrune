@@ -271,7 +271,7 @@ impl LyruneView {
         autoplay: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             self.notify_error("请先登录 QQ 音乐", cx);
             cx.notify();
             return;
@@ -344,7 +344,7 @@ impl LyruneView {
             view.start_track(resume_at, Duration::from_secs(track.duration_seconds), cx);
         });
         self.playback.waiting_for_recommendation = false;
-        self.persist_current_playback();
+        self.persist_current_playback(cx);
         self.sync_table_playback_state(cx);
         #[cfg(target_os = "linux")]
         self.sync_mpris(!same_track && !resume_at.is_zero());
@@ -465,7 +465,7 @@ impl LyruneView {
         }
         audio.toggle();
         self.wake_playback_tick();
-        self.persist_current_playback();
+        self.persist_current_playback(cx);
         self.sync_table_playback_state(cx);
         #[cfg(target_os = "linux")]
         self.sync_mpris(false);
@@ -522,7 +522,7 @@ impl LyruneView {
         self.wake_playback_tick();
         self.playback.position = Duration::ZERO;
         self.progress.update(cx, |view, cx| view.stop(cx));
-        self.persist_current_playback();
+        self.persist_current_playback(cx);
         self.sync_table_playback_state(cx);
         self.sync_mpris(false);
         self.sync_inhibit();
@@ -671,7 +671,7 @@ impl LyruneView {
         } else {
             self.playback.position = self.playback.duration().unwrap_or_default();
         }
-        self.persist_current_playback();
+        self.persist_current_playback(cx);
         #[cfg(target_os = "linux")]
         self.sync_mpris(false);
         #[cfg(target_os = "linux")]

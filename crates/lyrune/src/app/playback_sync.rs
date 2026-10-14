@@ -14,7 +14,6 @@ use super::LyruneView;
 #[cfg(target_os = "linux")]
 use super::queue::RepeatMode;
 #[cfg(target_os = "linux")]
-#[cfg(target_os = "linux")]
 use crate::inhibit::InhibitHandle;
 #[cfg(target_os = "linux")]
 use crate::mpris::{
@@ -268,7 +267,7 @@ impl LyruneView {
         if self.playback.current_track.is_some()
             && self.playback.last_persisted_at.elapsed() >= PLAYBACK_PERSIST_INTERVAL
         {
-            self.persist_current_playback();
+            self.persist_current_playback(cx);
         }
         #[cfg(target_os = "linux")]
         if self.playback.current_track.is_some()

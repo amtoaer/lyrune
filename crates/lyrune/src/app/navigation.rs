@@ -735,7 +735,7 @@ impl LyruneView {
                 self.search.query = query.clone();
                 let resource = resource.unwrap_or_else(|| {
                     self.page_resource_cache
-                        .search(self.account.id().unwrap_or(0), &query)
+                        .search(self.account.read(cx).id().unwrap_or(0), &query)
                 });
                 self.search.resource = Some(resource.clone());
                 self.search.pending_results_sync = true;
@@ -756,7 +756,7 @@ impl LyruneView {
                 self.artist.visible_album_count = visible_album_count;
                 let resource = resource.unwrap_or_else(|| {
                     self.page_resource_cache
-                        .artist(self.account.id().unwrap_or(0), artist.mid.as_str())
+                        .artist(self.account.read(cx).id().unwrap_or(0), artist.mid.as_str())
                 });
                 self.open_artist(artist, resource, cx);
             }
@@ -813,7 +813,7 @@ impl LyruneView {
         let target = NavigationPage::Settings;
         let current = self.current_navigation_page(cx);
         self.record_navigation(current, &target, window, cx);
-        self.account.menu_open = false;
+        self.account_menu_open = false;
         self.apply_navigation_page(target, window, cx);
     }
 
@@ -825,7 +825,7 @@ impl LyruneView {
         window.blur();
         let resource = self
             .page_resource_cache
-            .search(self.account.id().unwrap_or(0), &query);
+            .search(self.account.read(cx).id().unwrap_or(0), &query);
         let target = NavigationPage::Search {
             query,
             category: SearchCategory::Songs,

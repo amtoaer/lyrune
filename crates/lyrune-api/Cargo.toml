@@ -1,0 +1,28 @@
+[package]
+name = "lyrune-api"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Lyrune 内部使用的 QQ 音乐协议与登录实现"
+readme = "README.md"
+license = "MIT"
+
+[dependencies]
+anyhow.workspace = true
+arc-swap.workspace = true
+async-tungstenite.workspace = true
+base64.workspace = true
+bytes.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+rumqttc.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true

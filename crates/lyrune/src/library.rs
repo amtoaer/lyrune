@@ -1049,7 +1049,7 @@ fn track_columns(available_width: Pixels) -> Vec<Column> {
     let title_width = if compact {
         flexible_width
     } else {
-        available_width * 0.45 - px(48.)
+        available_width * 0.5 - px(48.)
     };
     let mut columns = vec![
         Column::new("number", "#")

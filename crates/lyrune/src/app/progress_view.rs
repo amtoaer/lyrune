@@ -29,7 +29,6 @@ pub(super) struct ProgressInput {
 }
 
 pub(super) struct SeekTo(pub(super) Duration);
-pub(super) struct Seeking(pub(super) bool);
 
 pub(super) struct PlaybackProgressView {
     slider: Entity<SliderState>,
@@ -40,14 +39,13 @@ pub(super) struct PlaybackProgressView {
     frame_pending: bool,
     window_generation: u64,
     input: ProgressInput,
-    pub(super) seek_preview: Option<Duration>,
+    seek_preview: Option<Duration>,
     hovered: bool,
     hover_fraction: Option<f32>,
     _subscription: Subscription,
 }
 
 impl EventEmitter<SeekTo> for PlaybackProgressView {}
-impl EventEmitter<Seeking> for PlaybackProgressView {}
 
 impl PlaybackProgressView {
     pub(super) fn new(audio: Option<Arc<AudioPlayer>>, font: Font, cx: &mut Context<Self>) -> Self {
@@ -55,18 +53,16 @@ impl PlaybackProgressView {
         let subscription = cx.subscribe(&slider, |this, _, event, cx| {
             match event {
                 SliderEvent::Change(value) => {
-                    if this.seek_preview.is_none() && this.input.duration.is_some() {
-                        cx.emit(Seeking(true));
-                    }
-                    // 音频进度同步不能覆盖拖动预览，Release 才真正 seek。
+                    let fraction = value.end().clamp(0., 1.);
+                    // 拖动只预览滑块和提示时间；歌词及实际播放位置继续跟随音频时钟。
                     this.seek_preview = this
                         .input
                         .duration
-                        .map(|duration| duration.mul_f32(value.end().clamp(0., 1.)));
+                        .map(|duration| duration.mul_f32(fraction));
+                    this.hover_fraction = Some(fraction);
                 }
                 SliderEvent::Release(value) => {
                     this.seek_preview = None;
-                    cx.emit(Seeking(false));
                     if let Some(duration) = this.input.duration {
                         cx.emit(SeekTo(duration.mul_f32(value.end().clamp(0., 1.))));
                     }
@@ -131,7 +127,6 @@ impl PlaybackProgressView {
     fn request_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.frame_pending
             || !self.input.advancing
-            || self.seek_preview.is_some()
             || !self.audio.as_deref().is_some_and(AudioPlayer::is_playing)
         {
             return;
@@ -143,9 +138,7 @@ impl PlaybackProgressView {
                 return;
             }
             this.frame_pending = false;
-            if !this.input.advancing
-                || this.seek_preview.is_some()
-                || !this.audio.as_deref().is_some_and(AudioPlayer::is_playing)
+            if !this.input.advancing || !this.audio.as_deref().is_some_and(AudioPlayer::is_playing)
             {
                 this.next_frame = None;
                 return;
@@ -253,7 +246,8 @@ impl Render for PlaybackProgressView {
         let bar_color = theme.slider_bar;
         let thumb_color = theme.slider_thumb;
         let hover_fraction = interactive.then_some(self.hover_fraction).flatten();
-        let hover_visible = self.hovered && hover_fraction.is_some();
+        let hover_visible =
+            (self.hovered || self.seek_preview.is_some()) && hover_fraction.is_some();
         let hover_opacity = transition(
             ("player-progress", "hover-opacity"),
             if hover_visible { 1. } else { 0. },
@@ -434,10 +428,10 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use gpui::{AppContext as _, TestAppContext, font};
+    use gpui::{AppContext as _, MouseButton, TestAppContext, font, point, px};
     use gpui_component::{ActiveTheme as _, slider::SliderEvent};
 
-    use super::{PlaybackProgressView, ProgressInput, SeekTo, Seeking};
+    use super::{PlaybackProgressView, ProgressInput, SeekTo};
     use crate::settings::FrameRate;
 
     #[gpui::test]
@@ -454,18 +448,10 @@ mod tests {
                 received.borrow_mut().push(event.0)
             })
         });
-        let gestures = Rc::new(RefCell::new(Vec::new()));
-        let received = gestures.clone();
-        let _gesture_subscription = cx.update(|cx| {
-            cx.subscribe(&progress, move |_, event: &Seeking, _| {
-                received.borrow_mut().push(event.0)
-            })
-        });
         let slider = progress.read_with(cx, |view, _| view.slider.clone());
         slider.update(cx, |_, cx| cx.emit(SliderEvent::Change(0.5.into())));
         cx.run_until_parked();
         assert!(seeks.borrow().is_empty());
-        assert_eq!(*gestures.borrow(), [true]);
         progress.read_with(cx, |view, _| {
             assert_eq!(view.seek_preview, Some(Duration::from_secs(50)));
             assert_eq!(view.position, Duration::from_secs(10));
@@ -474,7 +460,50 @@ mod tests {
         slider.update(cx, |_, cx| cx.emit(SliderEvent::Release(0.5.into())));
         cx.run_until_parked();
         assert_eq!(*seeks.borrow(), [Duration::from_secs(50)]);
-        assert_eq!(*gestures.borrow(), [true, false]);
+        progress.read_with(cx, |view, _| assert_eq!(view.seek_preview, None));
+    }
+
+    #[gpui::test]
+    fn test_drag_time_outside_track(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (progress, cx) =
+            cx.add_window_view(|_, cx| PlaybackProgressView::new(None, font(".SystemUIFont"), cx));
+        progress.update(cx, |view, cx| {
+            view.start_track(Duration::from_secs(10), Duration::from_secs(100), cx);
+            view.input.interactive = true;
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = progress.read_with(cx, |view, cx| view.slider.read(cx).bounds());
+        assert!(bounds.size.width > px(0.));
+        let start = point(bounds.left() + bounds.size.width * 0.2, bounds.center().y);
+        cx.simulate_mouse_move(start, None, Default::default());
+        cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(
+            start + point(px(10.), px(0.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        for (fraction, y) in [
+            (0.5, bounds.bottom() + px(40.)),
+            (0.75, bounds.top() - px(40.)),
+        ] {
+            cx.simulate_mouse_move(
+                point(bounds.left() + bounds.size.width * fraction, y),
+                MouseButton::Left,
+                Default::default(),
+            );
+            progress.read_with(cx, |view, _| {
+                assert!(!view.hovered);
+                assert!((view.seek_preview.unwrap().as_secs_f32() - 100. * fraction).abs() < 0.001);
+                assert!((view.hover_fraction.unwrap() - fraction).abs() < 0.001);
+                assert_eq!(view.position, Duration::from_secs(10));
+            });
+        }
+        cx.simulate_mouse_up(
+            point(bounds.center().x, bounds.top() - px(40.)),
+            MouseButton::Left,
+            Default::default(),
+        );
         progress.read_with(cx, |view, _| assert_eq!(view.seek_preview, None));
     }
 

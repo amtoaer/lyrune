@@ -984,7 +984,6 @@ pub(super) struct LyricsInput {
     pub(super) highlight_frame_rate: FrameRate,
     pub(super) scroll_frame_rate: FrameRate,
     pub(super) advancing: bool,
-    pub(super) seeking: bool,
     pub(super) expanded: bool,
     pub(super) visible: bool,
     pub(super) expansion_progress: f32,
@@ -1029,7 +1028,6 @@ impl LyricsView {
                 highlight_frame_rate: FrameRate::Fps60,
                 scroll_frame_rate: FrameRate::Fps60,
                 advancing: false,
-                seeking: false,
                 expanded: false,
                 visible: false,
                 expansion_progress: 0.,
@@ -1066,7 +1064,7 @@ impl LyricsView {
             self.backdrop_previous_url = self.backdrop_current_url.replace(url.clone());
             self.backdrop_crossfade_phase = !self.backdrop_crossfade_phase;
         }
-        let position_changed = self.position != position && (!input.advancing || input.seeking);
+        let position_changed = self.position != position && !input.advancing;
         if position_changed
             || self.input.visible != input.visible
             || self.input.highlight_frame_rate != input.highlight_frame_rate
@@ -1806,13 +1804,11 @@ impl LyricsView {
 impl Render for LyricsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.input.visible && self.input.advancing {
-            if !self.input.seeking {
-                self.position = self
-                    .audio
-                    .as_deref()
-                    .map(AudioPlayer::position)
-                    .unwrap_or(self.position);
-            }
+            self.position = self
+                .audio
+                .as_deref()
+                .map(AudioPlayer::position)
+                .unwrap_or(self.position);
             self.request_lyric_animation_frame(window, cx);
         }
         self.render_cover_backdrop(window, cx)
@@ -1909,7 +1905,6 @@ mod tests {
             highlight_frame_rate: FrameRate::Display,
             scroll_frame_rate: FrameRate::Display,
             advancing: false,
-            seeking: false,
             expanded: true,
             visible: true,
             expansion_progress: 1.,

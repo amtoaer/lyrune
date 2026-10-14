@@ -240,7 +240,7 @@ impl Playback {
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
-        if !self.seeking && self.state.load.track.is_none() && self.state.started {
+        if self.state.load.track.is_none() && self.state.started {
             self.state.position = self
                 .state
                 .audio

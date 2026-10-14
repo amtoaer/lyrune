@@ -49,7 +49,7 @@ use self::{
     playback::{Playback, PlaybackEvent, PlaybackState},
     player_view::{PlayerAction, PlayerControlsView},
     preferences::Preferences,
-    progress_view::{PlaybackProgressView, SeekTo, Seeking},
+    progress_view::{PlaybackProgressView, SeekTo},
     settings::{SettingsAction, SettingsPage},
 };
 use crate::cache::{AudioCache, audio_cache_limit_bytes};
@@ -225,10 +225,6 @@ impl LyruneView {
             cx.observe(&account, |_, _, cx| cx.notify()),
             cx.subscribe(&account, |this, _, event: &AccountEvent, cx| {
                 this.handle_account_event(event, cx)
-            }),
-            cx.subscribe(&progress, |this, _, event: &Seeking, cx| {
-                this.playback
-                    .update(cx, |playback, _| playback.seeking = event.0);
             }),
             cx.subscribe(&progress, |this, _, event: &SeekTo, cx| {
                 this.playback
@@ -605,7 +601,6 @@ impl LyruneView {
                 .lyric_highlight_frame_rate,
             scroll_frame_rate: self.preferences.read(cx).settings.lyric_scroll_frame_rate,
             advancing: self.playback.read(cx).state.is_advancing(),
-            seeking: self.progress.read(cx).seek_preview.is_some(),
             expanded: self.cover_backdrop_expanded,
             visible: self.cover_backdrop_visible,
             expansion_progress,
@@ -851,10 +846,7 @@ impl LyruneView {
 
 impl Render for LyruneView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.cover_backdrop_visible
-            && self.playback.read(cx).state.is_advancing()
-            && self.progress.read(cx).seek_preview.is_none()
-        {
+        if self.cover_backdrop_visible && self.playback.read(cx).state.is_advancing() {
             self.playback.update(cx, |playback, _| {
                 playback.state.position = playback
                     .state

@@ -38,7 +38,6 @@ pub(crate) struct Playback {
     audio_cache_maintenance: Option<JoinHandle<()>>,
     pub(super) protocol_client: Option<ProtocolClient>,
     pub(super) playlist_page_requests: SingleFlight<PlaylistPageKey, PlaylistPage>,
-    pub(super) seeking: bool,
     pub(super) background_tick_wake: Option<mpsc::Sender<()>>,
     #[cfg(target_os = "linux")]
     pub(super) mpris: Option<MprisHandle>,
@@ -85,7 +84,6 @@ impl Playback {
             audio_cache_maintenance: None,
             protocol_client,
             playlist_page_requests,
-            seeking: false,
             background_tick_wake: None,
             #[cfg(target_os = "linux")]
             mpris: None,
@@ -682,7 +680,6 @@ impl Playback {
         self.state.started = false;
         self.wake_playback_tick();
         self.state.position = Duration::ZERO;
-        self.seeking = false;
         cx.emit(PlaybackEvent::Stopped);
         self.persist_current_playback(cx);
 

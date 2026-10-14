@@ -1,15 +1,16 @@
-//! GPUI 应用实体：集中创建控件、连接事件和组合主窗口，各职责的实现放在子模块。
-//! 子模块中的 impl LyruneView 共享这个实体，保持现有订阅、任务及退出保存的寿命。
+//! 主窗口组合与跨域操作顺序。页面、歌词、播放控制和进度分别由独立实体持有。
 //! 阅读顺序和跨模块约束见 docs/architecture.md。
 
 mod account;
 mod animation;
 mod artist;
+mod browser;
 mod home;
 mod lyrics;
 mod lyrics_loading;
 mod lyrics_view;
 mod navigation;
+mod navigation_view;
 mod playback;
 mod playback_sync;
 mod player_view;
@@ -23,59 +24,42 @@ mod settings;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{prelude::*, *};
 use gpui_base::motion::{Transition, transition};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, ResizableState, Root, Sizable as _, StyledExt as _, Theme,
-    WindowExt as _,
+    ActiveTheme as _, Root, Theme, WindowExt as _,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
-    h_flex, h_resizable,
-    input::{Input, InputEvent, InputState},
-    list::{List, ListEvent, ListState},
+    h_flex,
     notification::Notification,
-    resizable_panel,
-    table::{TableEvent, TableState},
     v_flex,
 };
-use hashbrown::HashMap;
-use lyrune_api::{PlaylistPage, ProtocolClient};
-use tokio::sync::mpsc;
+use lyrune_api::ProtocolClient;
 
 use self::{
     account::{Account, AccountEvent, AccountState},
-    artist::ArtistPageState,
-    home::HomePageState,
+    browser::{BrowserEvent, BrowserView},
     lyrics_loading::LyricsCache,
     lyrics_view::{
         CollapseLyrics, LYRIC_BACKGROUND_OVERLAY_OPACITY, LYRIC_EXPANSION_DURATION, LyricsContent,
         LyricsInput, LyricsView, combined_lyric_frame_interval, interpolate_color,
     },
-    navigation::{MainContent, NavigationHistory, PageResourceCache},
     playback::{Playback, PlaybackEvent, PlaybackState},
     player_view::{PlayerAction, PlayerControlsView},
-    playlists::{PlaylistPageKey, PlaylistPageState},
     preferences::Preferences,
     progress_view::{PlaybackProgressView, SeekTo, Seeking},
-    search::SearchPageState,
     settings::{SettingsAction, SettingsPage},
 };
 use crate::cache::{AudioCache, audio_cache_limit_bytes};
 use crate::design::AppFonts;
 use crate::http::CachedImageCache;
-use crate::icons::{MediaIcon, lyrune_icon, media_icon_hsla};
-use crate::library::{
-    PlaylistListDelegate, SearchCardGridDelegate, TrackTableDelegate, TrackTableEvent,
-};
+use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::lyrics_cache::LyricDiskCache;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
-use crate::settings::{
-    AppSettings, CdnCacheStore, LibraryCache, PersistedWindowSize, WindowDecoration,
-};
+use crate::settings::{AppSettings, CdnCacheStore, PersistedWindowSize, WindowDecoration};
 use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
 
@@ -106,32 +90,15 @@ fn unix_timestamp_secs() -> u64 {
 }
 
 pub struct LyruneView {
-    // 账号和浏览状态；当前浏览的歌单可以与下面的播放队列不同。
     account: Entity<Account>,
     account_menu_open: bool,
-    library_loading: bool,
-    playlist: PlaylistPageState,
-    library_generation: u64,
-    playlist_page_requests: SingleFlight<PlaylistPageKey, PlaylistPage>,
-    main_content: MainContent,
-    navigation_history: NavigationHistory,
-    home: HomePageState,
-    search: SearchPageState,
-    artist: ArtistPageState,
+    browser: Entity<BrowserView>,
 
-    // GPUI 控件由实体持有，子模块更新它们；订阅句柄保存在下方，不能创建后立即丢弃。
-    playlist_list: Entity<ListState<PlaylistListDelegate>>,
-    track_table: Entity<TableState<TrackTableDelegate>>,
-    search_track_table: Entity<TableState<TrackTableDelegate>>,
-    search_card_grid: Entity<ListState<SearchCardGridDelegate>>,
-    search_input: Entity<InputState>,
     settings_page: Entity<SettingsPage>,
     progress: Entity<PlaybackProgressView>,
     player_controls: Entity<PlayerControlsView>,
     image_cache: Entity<CachedImageCache>,
-    window_drag_pressed: bool,
 
-    // 音频、网络服务及维护任务。队列版本与单次音源加载版本分别失效。
     pub(crate) playback: Entity<Playback>,
     protocol_client: Option<ProtocolClient>,
     quality_menu_open: bool,
@@ -142,11 +109,6 @@ pub struct LyruneView {
     lyrics: Entity<LyricsCache>,
     lyrics_view: Entity<LyricsView>,
     preferences: Entity<Preferences>,
-    library_cache: LibraryCache,
-    page_resource_cache: PageResourceCache,
-    liked_tracks: HashMap<String, bool>,
-    liked_state_loading: HashSet<String>,
-    liked_toggle_loading: HashSet<String>,
     update_check_in_progress: bool,
 
     window_handle: AnyWindowHandle,
@@ -200,53 +162,8 @@ impl LyruneView {
         };
         let playback_quality = settings.playback_quality;
         let pending_playback_restore = settings.current_playback.clone();
-        let library_cache = LibraryCache::default();
         let account = cx.new(|_| Account::new(protocol_client.clone()));
 
-        let playlist_list =
-            cx.new(|cx| ListState::new(PlaylistListDelegate::new(), window, cx).searchable(false));
-        let search_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("想播放什么？")
-                .context_menu(false)
-        });
-        // Delegate 只发出交互/补页信号；这里把信号接回应用实体，避免控件直接管理网络状态。
-        let (load_more_sender, load_more_receiver) = mpsc::channel(1);
-        let (search_load_more_sender, search_load_more_receiver) = mpsc::channel(1);
-        let (search_card_load_more_sender, search_card_load_more_receiver) = mpsc::channel(1);
-        let (track_event_sender, mut track_event_receiver) = mpsc::unbounded_channel();
-        let track_table = cx.new(|cx| {
-            TableState::new(
-                TrackTableDelegate::new(load_more_sender, track_event_sender.clone()),
-                window,
-                cx,
-            )
-            .col_selectable(false)
-            .col_movable(false)
-            .sortable(false)
-        });
-        let search_track_table = cx.new(|cx| {
-            TableState::new(
-                TrackTableDelegate::new(search_load_more_sender, track_event_sender.clone()),
-                window,
-                cx,
-            )
-            .col_selectable(false)
-            .col_movable(false)
-            .sortable(false)
-        });
-        let search_card_grid = cx.new(|cx| {
-            ListState::new(
-                SearchCardGridDelegate::new(
-                    track_event_sender.clone(),
-                    search_card_load_more_sender,
-                ),
-                window,
-                cx,
-            )
-            .searchable(false)
-            .selectable(false)
-        });
         let progress =
             cx.new(|cx| PlaybackProgressView::new(audio.clone(), fonts.monospace.clone(), cx));
         let lyrics_view = cx.new(|_| LyricsView::new(audio.clone(), fonts.lyrics.clone()));
@@ -259,7 +176,6 @@ impl LyruneView {
             )
         });
         let image_cache = CachedImageCache::new(settings.image_cache_capacity, cx);
-        let history_limit = settings.navigation_history_limit;
         let preferences = cx.new(|cx| Preferences::new(settings, fonts, cx));
         let settings_page = cx.new(|cx| SettingsPage::new(preferences.clone(), window, cx));
         let lyrics = cx.new(|_| LyricsCache::new(lyric_disk_cache));
@@ -275,11 +191,31 @@ impl LyruneView {
                 playlist_page_requests.clone(),
             )
         });
+        let browser = cx.new(|cx| {
+            BrowserView::new(
+                window,
+                account.clone(),
+                preferences.clone(),
+                playback.clone(),
+                settings_page.clone(),
+                cx,
+            )
+        });
         let subscriptions = vec![
-            cx.observe(&playback, |this, _, cx| {
-                this.sync_table_playback_state(cx);
+            cx.observe(&browser, |_, _, cx| cx.notify()),
+            cx.subscribe(&browser, |this, _, event: &BrowserEvent, cx| {
+                match event {
+                    BrowserEvent::ToggleAccountMenu => {
+                        this.account_menu_open = !this.account_menu_open;
+                        this.quality_menu_open = false;
+                    }
+                    BrowserEvent::CloseAccountMenu => this.account_menu_open = false,
+                    BrowserEvent::Logout => this.logout(cx),
+                    BrowserEvent::Error(message) => this.notify_error(message.clone(), cx),
+                }
                 cx.notify();
             }),
+            cx.observe(&playback, |_, _, cx| cx.notify()),
             cx.observe(&lyrics, |_, _, cx| cx.notify()),
             cx.subscribe(&playback, |this, _, event: &PlaybackEvent, cx| {
                 this.handle_playback_event(event, cx)
@@ -288,16 +224,6 @@ impl LyruneView {
             cx.observe(&account, |_, _, cx| cx.notify()),
             cx.subscribe(&account, |this, _, event: &AccountEvent, cx| {
                 this.handle_account_event(event, cx)
-            }),
-            cx.subscribe(&track_table, |this, _, event: &TableEvent, cx| {
-                if let TableEvent::DoubleClickedRow(index) = event {
-                    this.select_track(*index, cx);
-                }
-            }),
-            cx.subscribe(&search_track_table, |this, _, event: &TableEvent, cx| {
-                if let TableEvent::DoubleClickedRow(index) = event {
-                    this.select_search_track(*index, cx);
-                }
             }),
             cx.subscribe(&progress, |this, _, event: &Seeking, cx| {
                 this.playback
@@ -309,56 +235,14 @@ impl LyruneView {
             }),
         ];
 
-        Self::listen_for_load_more(load_more_receiver, Self::load_playlist_page, cx);
-        Self::listen_for_load_more(search_load_more_receiver, Self::load_more_search, cx);
-        Self::listen_for_load_more(search_card_load_more_receiver, Self::load_more_search, cx);
-
-        cx.spawn(async move |this, cx| {
-            while let Some(event) = track_event_receiver.recv().await {
-                let Ok(window) = this.read_with(cx, |this, _| this.window_handle) else {
-                    break;
-                };
-                // 监听按应用寿命运行；窗口关闭时忽略残留的 UI 事件，重开后使用新窗口。
-                let _ = window.update(cx, |_, window, cx| {
-                    this.update(cx, |this, cx| match event {
-                        TrackTableEvent::Artist(artist) => {
-                            this.open_search_artist(artist, window, cx)
-                        }
-                        TrackTableEvent::Album(album) => {
-                            this.open_home_playlist(album.into_playlist(), window, cx)
-                        }
-                        TrackTableEvent::Unlike(track) => this.unlike_track(track, cx),
-                        TrackTableEvent::Playlist(playlist) => {
-                            this.open_home_playlist(playlist, window, cx)
-                        }
-                    })
-                });
-            }
-        })
-        .detach();
-
         let mut view = Self {
             account,
             account_menu_open: false,
-            library_loading: false,
-            playlist: PlaylistPageState::default(),
-            library_generation: 0,
-            playlist_page_requests,
-            main_content: MainContent::Home,
-            navigation_history: NavigationHistory::new(history_limit),
-            home: HomePageState::default(),
-            search: SearchPageState::default(),
-            artist: ArtistPageState::default(),
-            playlist_list,
-            track_table,
-            search_track_table,
-            search_card_grid,
-            search_input,
+            browser,
             settings_page,
             progress,
             player_controls,
             image_cache,
-            window_drag_pressed: false,
             playback,
             protocol_client,
             quality_menu_open: false,
@@ -368,11 +252,6 @@ impl LyruneView {
             lyrics,
             lyrics_view,
             preferences,
-            library_cache,
-            page_resource_cache: PageResourceCache::default(),
-            liked_tracks: HashMap::new(),
-            liked_state_loading: HashSet::new(),
-            liked_toggle_loading: HashSet::new(),
             update_check_in_progress: false,
             window_handle: window.window_handle(),
             _subscriptions: subscriptions,
@@ -403,25 +282,11 @@ impl LyruneView {
         view
     }
 
-    fn listen_for_load_more(
-        mut receiver: mpsc::Receiver<()>,
-        load_more: fn(&mut Self, &mut Context<Self>),
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            while receiver.recv().await.is_some() {
-                // 控件通道关闭或应用实体销毁后结束监听；窗口关闭本身不会结束实体的寿命。
-                if this.update(cx, load_more).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
     pub(crate) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.set_window_title("Lyrune");
         self.window_handle = window.window_handle();
+        self.browser
+            .update(cx, |browser, cx| browser.attach_window(window, cx));
         Theme::global_mut(cx).notification.margins.bottom = px(PLAYER_BAR_HEIGHT + 16.);
         self.lyrics_view
             .update(cx, |view, cx| view.attach_window(cx));
@@ -468,24 +333,6 @@ impl LyruneView {
                     this.handle_settings_action(action, window, cx)
                 },
             ),
-            cx.subscribe_in(
-                &self.playlist_list,
-                window,
-                |this, _, event: &ListEvent, window, cx| {
-                    if let ListEvent::Select(index) | ListEvent::Confirm(index) = event {
-                        this.select_playlist(index.row, window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &self.search_input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.submit_search(window, cx);
-                    }
-                },
-            ),
         ];
         self.progress
             .update(cx, |view, cx| view.attach_window(window, cx));
@@ -504,40 +351,16 @@ impl LyruneView {
                         view.start_track(mid, self.cover_backdrop_expanded, cx)
                     });
                 }
-                self.ensure_track_like_state(mid.clone(), cx);
                 self.progress
                     .update(cx, |view, cx| view.start_track(*position, *duration, cx));
             }
             PlaybackEvent::Stopped => self.progress.update(cx, |view, cx| view.stop(cx)),
-            PlaybackEvent::PlayBrowsedTrack => {
-                if !self.track_table.read(cx).delegate().tracks().is_empty() {
-                    self.select_track(0, cx);
-                }
-            }
             PlaybackEvent::CloseQualityMenu => self.quality_menu_open = false,
             PlaybackEvent::VolumeChanged(volume) => self
                 .player_controls
                 .update(cx, |view, cx| view.reset_volume(*volume, cx)),
-            PlaybackEvent::PlaylistLoaded(resource) => {
-                if self
-                    .playlist
-                    .resource
-                    .as_ref()
-                    .is_some_and(|current| Arc::ptr_eq(current, resource))
-                {
-                    let state = navigation::lock_resource(resource);
-                    let tracks = state.tracks.clone();
-                    let has_more = state.has_more;
-                    drop(state);
-                    self.track_table.update(cx, |table, cx| {
-                        table.delegate_mut().set_tracks(tracks, has_more, false);
-                        cx.notify();
-                    });
-                    self.restore_pending_playlist_scroll(cx);
-                    self.sync_table_playback_state(cx);
-                }
-            }
             PlaybackEvent::Error(message) => self.notify_error(message.clone(), cx),
+            PlaybackEvent::PlayBrowsedTrack | PlaybackEvent::PlaylistLoaded(_) => {}
         }
         cx.notify();
     }
@@ -573,6 +396,10 @@ impl LyruneView {
             return;
         }
         self.update_check_in_progress = true;
+        self.settings_page.update(cx, |page, cx| {
+            page.update_check_in_progress = true;
+            cx.notify();
+        });
         let task = RUNTIME.spawn(crate::update::check());
         cx.spawn(async move |this, cx| {
             let result = task
@@ -581,6 +408,10 @@ impl LyruneView {
                 .and_then(|result| result);
             this.update(cx, |this, cx| {
                 this.update_check_in_progress = false;
+                this.settings_page.update(cx, |page, cx| {
+                    page.update_check_in_progress = false;
+                    cx.notify();
+                });
                 match result {
                     Ok(Some(update)) => this.notify_update(update, cx),
                     Ok(None) if manual => this.notify_success("当前已是最新版本", cx),
@@ -673,75 +504,6 @@ impl LyruneView {
             .update(cx, |preferences, _| preferences.finish());
         self.playback
             .update(cx, |playback, _| playback.stop_maintenance());
-    }
-
-    fn render_sidebar(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
-        let logo = h_flex()
-            .id("window-drag-logo")
-            .h(px(64.))
-            .mb_2()
-            .px_5()
-            .gap_3()
-            .child(lyrune_icon(self.preferences.read(cx).color_theme, px(42.)))
-            .child(
-                v_flex()
-                    .gap_0p5()
-                    .child(div().font_semibold().child("Lyrune"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("QQ Music Player"),
-                    ),
-            )
-            .when(client_decorations, |logo| self.window_drag_region(logo, cx));
-        v_flex()
-            .w_full()
-            .h_full()
-            .flex_shrink_0()
-            .bg(theme.sidebar)
-            .child(logo)
-            .child(
-                h_flex().h(px(60.)).px_5().justify_between().child(
-                    h_flex()
-                        .gap_3()
-                        .child(
-                            div()
-                                .size(px(34.))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(media_icon_hsla(
-                                    MediaIcon::Library,
-                                    theme.secondary_foreground,
-                                    px(20.),
-                                )),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_0p5()
-                                .child(div().font_semibold().child("音乐库"))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child("你的 QQ 音乐歌单"),
-                                ),
-                        ),
-                ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .px_3()
-                    .pb_3()
-                    .child(List::new(&self.playlist_list).size_full()),
-            )
-            .into_any_element()
     }
 
     pub(super) fn inactive_window_frame_interval(&self, cx: &App) -> Option<Duration> {
@@ -1016,25 +778,6 @@ impl LyruneView {
             .into_any_element()
     }
 
-    fn window_drag_region(&self, region: Stateful<Div>, cx: &Context<Self>) -> Stateful<Div> {
-        region
-            .on_mouse_down_out(cx.listener(|this, _, _, _| this.window_drag_pressed = false))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.window_drag_pressed = true),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.window_drag_pressed = false),
-            )
-            .on_mouse_move(cx.listener(|this, _, window, _| {
-                if this.window_drag_pressed {
-                    this.window_drag_pressed = false;
-                    window.start_window_move();
-                }
-            }))
-    }
-
     fn render_main(
         &mut self,
         expansion_progress: f32,
@@ -1043,242 +786,13 @@ impl LyruneView {
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
-        let compact = window.viewport_size().width < px(1120.);
-        let narrow = window.viewport_size().width < px(900.);
-        let scale_factor = window.scale_factor();
         let popover_open = self.account_menu_open || self.quality_menu_open;
-        if self.cover_backdrop_fully_expanded {
-            return v_flex()
-                .relative()
-                .size_full()
-                .image_cache(self.image_cache.clone())
-                .font(self.preferences.read(cx).fonts.ui.clone())
-                .bg(theme.background)
-                .text_color(theme.foreground)
-                .child(div().flex_1().min_h_0())
-                .child(self.render_lyrics_layer(expansion_progress, window, cx))
-                .child(self.render_player_bar(window, cx))
-                .when(popover_open, |this| {
-                    this.child(
-                        deferred(
-                            div()
-                                .id("popover-dismiss-layer")
-                                .absolute()
-                                .inset_0()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.dismiss_popovers(cx);
-                                    }),
-                                ),
-                        )
-                        .with_priority(5),
-                    )
-                })
-                .when(client_decorations, |this| {
-                    this.child(
-                        deferred(self.render_window_controls(expansion_progress, window, cx))
-                            .with_priority(20),
-                    )
-                })
-                .into_any_element();
-        }
-        self.track_table.update(cx, |table, cx| {
-            if table.delegate_mut().set_compact(compact) {
-                table.refresh(cx);
+        self.browser.update(cx, |browser, cx| {
+            if browser.account_menu_open != self.account_menu_open {
+                browser.account_menu_open = self.account_menu_open;
+                cx.notify();
             }
         });
-        let (default_sidebar_width, min_sidebar_width, max_sidebar_width) = if narrow {
-            (216., 196., 240.)
-        } else if compact {
-            (248., 220., 300.)
-        } else {
-            (272., 236., 340.)
-        };
-        let sidebar_width = px(self
-            .preferences
-            .read(cx)
-            .settings
-            .sidebar_width
-            .map(|width| width as f32)
-            .unwrap_or(default_sidebar_width)
-            .clamp(min_sidebar_width, max_sidebar_width));
-        let sidebar_range = px(min_sidebar_width)..px(max_sidebar_width);
-        let sidebar = self.render_sidebar(window, cx);
-        let page = match self.main_content {
-            MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
-            MainContent::Search => self.render_search(
-                compact,
-                narrow,
-                scale_factor,
-                window.viewport_size().width - sidebar_width,
-                cx,
-            ),
-            MainContent::Artist => self.render_artist_content(compact, narrow, scale_factor, cx),
-            MainContent::Playlist => {
-                self.render_playlist_content(compact, narrow, scale_factor, cx)
-            }
-            MainContent::Settings => {
-                self.settings_page.update(cx, |page, cx| {
-                    if page.update_check_in_progress != self.update_check_in_progress {
-                        page.update_check_in_progress = self.update_check_in_progress;
-                        cx.notify();
-                    }
-                });
-                self.settings_page
-                    .clone()
-                    .cached(StyleRefinement::default().flex_1().w_full().min_h_0())
-                    .into_any_element()
-            }
-        };
-        let search_width = if narrow {
-            px(268.)
-        } else if compact {
-            px(376.)
-        } else {
-            px(480.)
-        };
-        let home_selected = self.main_content == MainContent::Home;
-        let can_navigate_back = !self.navigation_history.back.is_empty();
-        let can_navigate_forward = !self.navigation_history.forward.is_empty();
-        let history_navigation = h_flex()
-            .gap_1()
-            .child(
-                Button::new("navigate-back")
-                    .ghost()
-                    .rounded(px(999.))
-                    .size(px(44.))
-                    .p_0()
-                    .tooltip("返回")
-                    .disabled(!can_navigate_back)
-                    .child(media_icon_hsla(
-                        MediaIcon::Back,
-                        if can_navigate_back {
-                            theme.foreground
-                        } else {
-                            theme.muted_foreground
-                        },
-                        px(22.),
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| this.navigate_back(window, cx))),
-            )
-            .child(
-                Button::new("navigate-forward")
-                    .ghost()
-                    .rounded(px(999.))
-                    .size(px(44.))
-                    .p_0()
-                    .tooltip("前进")
-                    .disabled(!can_navigate_forward)
-                    .child(media_icon_hsla(
-                        MediaIcon::Forward,
-                        if can_navigate_forward {
-                            theme.foreground
-                        } else {
-                            theme.muted_foreground
-                        },
-                        px(22.),
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| this.navigate_forward(window, cx))),
-            );
-        let navigation = h_flex()
-            .gap_3()
-            .when(client_decorations, |this| {
-                this.flex_1().min_w_0().justify_center()
-            })
-            .child(
-                Button::new("home")
-                    .ghost()
-                    .rounded(px(999.))
-                    .size(px(44.))
-                    .p_0()
-                    .tooltip("主页")
-                    .child(media_icon_hsla(
-                        MediaIcon::Home,
-                        if home_selected {
-                            theme.primary
-                        } else {
-                            theme.secondary_foreground
-                        },
-                        px(24.),
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| this.show_home(window, cx))),
-            )
-            .child(
-                div()
-                    .id("search-input")
-                    .when(client_decorations, |this| {
-                        this.flex_1().min_w_0().max_w(search_width)
-                    })
-                    .on_mouse_down_out(|_, window, _| window.blur())
-                    .child(
-                        Input::new(&self.search_input)
-                            .large()
-                            .w(search_width)
-                            .when(client_decorations, |this| this.w_full())
-                            .border_2()
-                            .rounded(px(999.))
-                            .text_size(theme.font_size)
-                            .aria_label("搜索")
-                            .prefix(media_icon_hsla(
-                                MediaIcon::Search,
-                                theme.muted_foreground,
-                                px(22.),
-                            )),
-                    ),
-            );
-        let account = self.render_account(scale_factor, cx);
-        let content = v_flex()
-            .h_full()
-            .min_w_0()
-            .flex_1()
-            .child(
-                div()
-                    .relative()
-                    .h(px(72.))
-                    .w_full()
-                    .flex_shrink_0()
-                    .map(|header| {
-                        if client_decorations {
-                            header.child(
-                                h_flex()
-                                    .size_full()
-                                    .px_4()
-                                    .gap_2()
-                                    .child(history_navigation.flex_shrink_0())
-                                    .child(navigation)
-                                    .child(div().size(px(44.)).flex_shrink_0().child(account))
-                                    .child(div().w(px(108.)).flex_shrink_0()),
-                            )
-                        } else {
-                            header
-                                .child(
-                                    h_flex()
-                                        .size_full()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(navigation),
-                                )
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .top(px(14.))
-                                        .left(px(24.))
-                                        .child(history_navigation),
-                                )
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .top(px(17.))
-                                        .right(px(24.))
-                                        .size(px(44.))
-                                        .child(account),
-                                )
-                        }
-                    }),
-            )
-            .child(page);
         v_flex()
             .relative()
             .size_full()
@@ -1286,33 +800,11 @@ impl LyruneView {
             .font(self.preferences.read(cx).fonts.ui.clone())
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(
-                div().flex_1().min_h_0().child(
-                    h_resizable("library-layout")
-                        .on_resize(cx.listener(|this, state: &Entity<ResizableState>, _, cx| {
-                            if let Some(width) = state.read(cx).sizes().first() {
-                                {
-                                    let value = Some(f32::from(*width).round() as u32);
-                                    this.preferences.update(cx, |preferences, _| {
-                                        preferences.settings.sidebar_width = value;
-                                    });
-                                }
-                            }
-                        }))
-                        .child(
-                            resizable_panel()
-                                .size(sidebar_width)
-                                .size_range(sidebar_range)
-                                .flex_none()
-                                .child(sidebar),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size_range(px(480.)..Pixels::MAX)
-                                .child(content),
-                        ),
-                ),
-            )
+            .child(if self.cover_backdrop_fully_expanded {
+                div().flex_1().min_h_0().into_any_element()
+            } else {
+                browser::browsing_area(&self.browser, window, cx)
+            })
             .child(self.render_lyrics_layer(expansion_progress, window, cx))
             .child(self.render_player_bar(window, cx))
             .when(popover_open, |this| {

@@ -17,14 +17,13 @@ use lyrune_api::{
     UserProfile,
 };
 
+use super::browser::BrowserView;
 use super::navigation::{
     MainContent, NavigationPage, PlaylistCachePolicy, PlaylistScrollPosition,
     SharedPlaylistResource, lock_resource, resolved_playlist_scroll_row, share_items,
     update_liked_playlist_resource,
 };
-use super::{
-    LIBRARY_CACHE_TTL, LyruneView, PAGE_SIZE, page_horizontal_padding, unix_timestamp_secs,
-};
+use super::{LIBRARY_CACHE_TTL, PAGE_SIZE, page_horizontal_padding, unix_timestamp_secs};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon};
 use crate::library::playlist_cover;
@@ -87,7 +86,7 @@ pub(super) struct PlaylistPageState {
     pub(super) force_refresh: bool,
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn load_library(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
         let Some(credential) = self.account.read(cx).credential.clone() else {
             return;

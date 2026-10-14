@@ -1128,8 +1128,11 @@ impl LyruneView {
             preferences.settings.navigation_history_limit = value;
             cx.notify();
         });
-        self.navigation_history.set_limit(value);
-        self.page_resource_cache.prune();
+        self.browser.update(cx, |browser, cx| {
+            browser.navigation_history.set_limit(value);
+            browser.page_resource_cache.prune();
+            cx.notify();
+        });
         self.preferences.read(cx).save();
         cx.notify();
     }

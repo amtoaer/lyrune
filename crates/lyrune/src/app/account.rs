@@ -5,20 +5,14 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use gpui::{prelude::*, *};
-use gpui_component::{
-    ActiveTheme as _, Sizable as _, StyledExt as _,
-    avatar::Avatar,
-    button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
-};
+use gpui_component::{ActiveTheme as _, StyledExt as _, v_flex};
 use lyrune_api::{
     CredentialSession, LoginEvent, ProtocolClient, QqCredential, UserProfile, run_qr_login,
 };
 use tokio::sync::mpsc;
 
 use crate::credentials::CredentialStore;
-use crate::http::cached_image_source;
-use crate::icons::{MediaIcon, lyrune_icon, media_icon_hsla};
+use crate::icons::lyrune_icon;
 use crate::runtime::RUNTIME;
 
 use super::LyruneView;
@@ -320,9 +314,11 @@ impl LyruneView {
     pub(super) fn handle_account_event(&mut self, event: &AccountEvent, cx: &mut Context<Self>) {
         match event {
             AccountEvent::SignedIn => {
-                self.main_content = MainContent::Home;
-                self.load_home(cx);
-                self.load_library(false, cx);
+                self.browser.update(cx, |browser, cx| {
+                    browser.main_content = MainContent::Home;
+                    browser.load_home(cx);
+                    browser.load_library(false, cx);
+                });
             }
             AccountEvent::Rejected {
                 generation,
@@ -341,7 +337,7 @@ impl LyruneView {
         }
     }
 
-    fn logout(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn logout(&mut self, cx: &mut Context<Self>) {
         if let (Some(client), Some(credential)) = (
             self.protocol_client.clone(),
             self.account.read(cx).snapshot(),
@@ -367,47 +363,59 @@ impl LyruneView {
         // 这些计数器阻止晚到结果覆盖新状态，并不取消已发出的网络请求。
         self.account
             .update(cx, |account, _| account.invalidate_login());
-        self.library_generation = self.library_generation.wrapping_add(1);
-        self.home.generation = self.home.generation.wrapping_add(1);
+        self.browser.update(cx, |browser, cx| {
+            browser.library_generation = browser.library_generation.wrapping_add(1);
+            browser.home.generation = browser.home.generation.wrapping_add(1);
+            cx.notify();
+        });
         self.playback
             .update(cx, |playback, _| playback.invalidate_session());
         self.account.update(cx, |account, cx| {
             account.revoke();
             cx.notify();
         });
-        self.liked_tracks.clear();
-        self.liked_state_loading.clear();
-        self.liked_toggle_loading.clear();
+        self.browser.update(cx, |browser, cx| {
+            browser.liked_tracks.clear();
+            browser.liked_state_loading.clear();
+            browser.liked_toggle_loading.clear();
+            cx.notify();
+        });
         self.account.update(cx, |account, _| {
             account.profile = None;
             account.qr_image = None;
         });
-        self.library_loading = false;
-        self.main_content = MainContent::Home;
-        self.navigation_history.clear();
-        self.home.playlists.clear();
-        self.home.loading = false;
-        self.home.loaded = false;
-        self.home.error = None;
-        self.home.recommendation_loading = None;
-        self.search.resource = None;
-        self.artist.selected = None;
-        self.artist.resource = None;
-        self.playlist.selected_index = None;
-        self.playlist.selected = None;
-        self.playlist.resource = None;
-        self.page_resource_cache = PageResourceCache::default();
+        self.browser.update(cx, |browser, cx| {
+            browser.library_loading = false;
+            browser.main_content = MainContent::Home;
+            browser.navigation_history.clear();
+            browser.home.playlists.clear();
+            browser.home.loading = false;
+            browser.home.loaded = false;
+            browser.home.error = None;
+            browser.home.recommendation_loading = None;
+            browser.search.resource = None;
+            browser.artist.selected = None;
+            browser.artist.resource = None;
+            browser.playlist.selected_index = None;
+            browser.playlist.selected = None;
+            browser.playlist.resource = None;
+            browser.page_resource_cache = PageResourceCache::default();
+            cx.notify();
+        });
         self.quality_menu_open = false;
         self.account_menu_open = false;
         self.playback
             .update(cx, |playback, cx| playback.clear_session(cx));
-        self.playlist_list.update(cx, |list, cx| {
-            list.delegate_mut().clear();
-            cx.notify();
-        });
-        self.track_table.update(cx, |table, cx| {
-            table.delegate_mut().clear();
-            table.refresh(cx);
+        self.browser.update(cx, |browser, cx| {
+            browser.playlist_list.update(cx, |list, cx| {
+                list.delegate_mut().clear();
+                cx.notify();
+            });
+            browser.track_table.update(cx, |table, cx| {
+                table.delegate_mut().clear();
+                table.refresh(cx);
+                cx.notify();
+            });
             cx.notify();
         });
         self.account.update(cx, |account, _| {
@@ -499,107 +507,6 @@ impl LyruneView {
                             .child(self.account.read(cx).message.clone()),
                     ),
             )
-            .into_any_element()
-    }
-
-    pub(super) fn render_account(
-        &mut self,
-        scale_factor: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let name = self
-            .account
-            .read(cx)
-            .profile
-            .as_ref()
-            .map(|profile| profile.nickname.clone())
-            .unwrap_or_else(|| "QQ 音乐用户".to_owned());
-        let mut avatar = Avatar::new().name(name.clone()).with_size(px(38.));
-        if let Some(url) = self
-            .account
-            .read(cx)
-            .profile
-            .as_ref()
-            .and_then(|profile| profile.avatar_url.clone())
-        {
-            avatar = avatar.src(cached_image_source(url, px(38.), scale_factor));
-        }
-
-        div()
-            .relative()
-            .child(
-                Button::new("account-avatar")
-                    .ghost()
-                    .rounded(px(999.))
-                    .size(px(44.))
-                    .p_0()
-                    .tooltip(name.clone())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.account_menu_open = !this.account_menu_open;
-                        this.quality_menu_open = false;
-                        cx.notify();
-                    }))
-                    .child(avatar),
-            )
-            .when(self.account_menu_open, |this| {
-                this.child(
-                    deferred(
-                        v_flex()
-                            .absolute()
-                            .top(px(46.))
-                            .right_0()
-                            .w(px(220.))
-                            .gap_2()
-                            .p_3()
-                            .rounded(theme.radius_lg)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.popover)
-                            .shadow_lg()
-                            .occlude()
-                            .child(div().truncate().font_medium().child(name))
-                            .child(
-                                Button::new("open-settings")
-                                    .ghost()
-                                    .w_full()
-                                    .h(px(44.))
-                                    .child(
-                                        h_flex()
-                                            .w_full()
-                                            .gap_2()
-                                            .child(media_icon_hsla(
-                                                MediaIcon::Settings,
-                                                theme.secondary_foreground,
-                                                px(18.),
-                                            ))
-                                            .child("设置"),
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.show_settings(window, cx)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .border_t_1()
-                                    .border_color(theme.border)
-                                    .pt_2()
-                                    .child(
-                                        Button::new("logout")
-                                            .label("退出登录")
-                                            .outline()
-                                            .w_full()
-                                            .h(px(44.))
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| this.logout(cx)),
-                                            ),
-                                    ),
-                            ),
-                    )
-                    .with_priority(10),
-                )
-            })
             .into_any_element()
     }
 }

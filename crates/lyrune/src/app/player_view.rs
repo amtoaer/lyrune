@@ -668,15 +668,21 @@ impl LyruneView {
                 if self.cover_backdrop_expanded {
                     self.set_cover_backdrop_expanded(false, window, cx);
                 }
-                self.open_home_playlist(album.clone().into_playlist(), window, cx);
+                self.browser.update(cx, |browser, cx| {
+                    browser.open_home_playlist(album.clone().into_playlist(), window, cx)
+                });
             }
             PlayerAction::Artist(artist) => {
                 if self.cover_backdrop_expanded {
                     self.set_cover_backdrop_expanded(false, window, cx);
                 }
-                self.open_search_artist(artist.clone(), window, cx);
+                self.browser.update(cx, |browser, cx| {
+                    browser.open_search_artist(artist.clone(), window, cx)
+                });
             }
-            PlayerAction::ToggleLike => self.toggle_current_track_liked(cx),
+            PlayerAction::ToggleLike => self
+                .browser
+                .update(cx, |browser, cx| browser.toggle_current_track_liked(cx)),
             PlayerAction::Shuffle => self.playback.update(cx, |playback, cx| {
                 playback.state.shuffle = !playback.state.shuffle;
                 #[cfg(target_os = "linux")]
@@ -779,7 +785,7 @@ impl LyruneView {
         let input = PlayerInput {
             liked: track
                 .as_ref()
-                .and_then(|track| self.liked_tracks.get(&track.mid))
+                .and_then(|track| self.browser.read(cx).liked_tracks.get(&track.mid))
                 .copied(),
             active_quality: self.playback.read(cx).state.active_quality,
             available_qualities: self.playback.read(cx).state.available_qualities.clone(),
@@ -801,7 +807,14 @@ impl LyruneView {
                 .queue
                 .as_ref()
                 .is_none_or(|queue| queue.tracks.is_empty()),
-            browsed_tracks_empty: self.track_table.read(cx).delegate().tracks().is_empty(),
+            browsed_tracks_empty: self
+                .browser
+                .read(cx)
+                .track_table
+                .read(cx)
+                .delegate()
+                .tracks()
+                .is_empty(),
             shuffle: self.playback.read(cx).state.shuffle,
             repeat_mode: self.playback.read(cx).state.repeat_mode,
             volume: self.preferences.read(cx).settings.volume,

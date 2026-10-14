@@ -17,11 +17,12 @@ use gpui_component::{
 };
 use lyrune_api::{Track, UserPlaylistId};
 
+use super::browser::BrowserView;
 use super::navigation::{
     SearchCategory, SearchMoreResults, SearchVisibleCounts, SharedSearchResource, lock_resource,
 };
 use super::queue::{PlaybackQueue, insert_external_track_after_current};
-use super::{LyruneView, SEARCH_PAGE_SIZE, page_horizontal_padding};
+use super::{SEARCH_PAGE_SIZE, page_horizontal_padding};
 use crate::icons::media_icon_hsla;
 use crate::library::SearchCard;
 use crate::player::AudioPlayer;
@@ -134,7 +135,7 @@ impl SearchPageState {
     }
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn start_search(
         &mut self,
         resource: SharedSearchResource,

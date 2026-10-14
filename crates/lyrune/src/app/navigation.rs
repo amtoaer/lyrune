@@ -14,7 +14,8 @@ use lyrune_api::{
 use crate::icons::MediaIcon;
 use crate::settings::DEFAULT_NAVIGATION_HISTORY_LIMIT;
 
-use super::{LIBRARY_CACHE_TTL, LyruneView, SEARCH_PAGE_SIZE, unix_timestamp_secs};
+use super::browser::BrowserView;
+use super::{LIBRARY_CACHE_TTL, SEARCH_PAGE_SIZE, unix_timestamp_secs};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum MainContent {
@@ -610,7 +611,7 @@ impl NavigationHistory {
     }
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn current_search_scroll_offsets(&self, cx: &App) -> [Pixels; 4] {
         let mut offsets = self.search.scroll_offsets;
         if !self.search.pending_scroll {
@@ -813,7 +814,7 @@ impl LyruneView {
         let target = NavigationPage::Settings;
         let current = self.current_navigation_page(cx);
         self.record_navigation(current, &target, window, cx);
-        self.account_menu_open = false;
+        cx.emit(super::browser::BrowserEvent::CloseAccountMenu);
         self.apply_navigation_page(target, window, cx);
     }
 

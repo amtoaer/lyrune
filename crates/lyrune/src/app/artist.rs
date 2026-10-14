@@ -13,8 +13,9 @@ use gpui_component::{
 };
 use lyrune_api::{SearchAlbum, SearchArtist, Track};
 
+use super::browser::BrowserView;
 use super::navigation::{MainContent, NavigationPage, SharedArtistResource, lock_resource};
-use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, LyruneView, page_horizontal_padding};
+use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, page_horizontal_padding};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
 use crate::library::format_duration;
@@ -39,7 +40,7 @@ impl Default for ArtistPageState {
     }
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn open_search_artist(
         &mut self,
         artist: SearchArtist,

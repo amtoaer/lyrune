@@ -8,7 +8,7 @@ use gpui::Context;
 use hashbrown::HashSet;
 use lyrune_api::{RecommendationKind, Track, UserPlaylist, UserPlaylistId};
 
-use super::LyruneView;
+use super::browser::BrowserView;
 use super::navigation::SharedPlaylistResource;
 use super::navigation::{lock_resource, share_items};
 use super::playback::{Playback, PlaybackEvent};
@@ -145,7 +145,7 @@ impl RepeatMode {
     }
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn select_playlist_track(
         &mut self,
         playlist: UserPlaylist,

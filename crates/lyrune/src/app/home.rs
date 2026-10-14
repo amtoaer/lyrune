@@ -14,7 +14,8 @@ use gpui_component::{
 };
 use lyrune_api::{RecommendationKind, UserPlaylist};
 
-use super::{LyruneView, page_horizontal_padding};
+use super::browser::BrowserView;
+use super::page_horizontal_padding;
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::library::playlist_cover;
 use crate::runtime::RUNTIME;
@@ -52,7 +53,7 @@ impl HomePageState {
     }
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn load_home(&mut self, cx: &mut Context<Self>) {
         if self.home.loading {
             return;

@@ -886,7 +886,7 @@ impl Render for SettingsPage {
                                             div()
                                                 .text_xs()
                                                 .text_color(theme.secondary_foreground)
-                                                .child("逐字高亮与横向跟随"),
+                                                .child("歌词逐字高亮与横向跟随"),
                                         )
                                         .child(
                                             h_flex()
@@ -899,7 +899,7 @@ impl Render for SettingsPage {
                                                 .pt_1()
                                                 .text_xs()
                                                 .text_color(theme.secondary_foreground)
-                                                .child("平滑滚动"),
+                                                .child("歌词平滑滚动"),
                                         )
                                         .child(
                                             h_flex()
@@ -913,12 +913,6 @@ impl Render for SettingsPage {
                                                 .text_xs()
                                                 .text_color(theme.secondary_foreground)
                                                 .child("播放进度条"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("控制播放进度条的刷新率"),
                                         )
                                         .child(
                                             h_flex()

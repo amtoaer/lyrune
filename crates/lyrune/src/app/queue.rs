@@ -332,7 +332,7 @@ impl LyruneView {
                     }
                 }
                 #[cfg(target_os = "linux")]
-                this.sync_mpris(false);
+                this.sync_mpris(false, cx);
                 cx.notify();
             });
         })
@@ -359,7 +359,7 @@ impl LyruneView {
             });
             self.start_playback(index, resume_at, None, false, cx);
         } else {
-            self.clear_persisted_playback();
+            self.clear_persisted_playback(cx);
         }
     }
 
@@ -464,7 +464,7 @@ impl LyruneView {
                     }
                     this.persist_current_playback(cx);
                     #[cfg(target_os = "linux")]
-                    this.sync_mpris(false);
+                    this.sync_mpris(false, cx);
                     cx.notify();
                 }
             });
@@ -472,24 +472,28 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn persist_current_playback(&mut self, cx: &gpui::App) {
+    pub(super) fn persist_current_playback(&mut self, cx: &mut gpui::App) {
         let Some(account_id) = self.account.read(cx).id() else {
             return;
         };
         let Some(current_playback) = self.playback.snapshot(account_id) else {
             return;
         };
-        if self.settings.current_playback.as_ref() != Some(&current_playback) {
-            self.settings.current_playback = Some(current_playback);
-            self.persist_settings();
+        if self.preferences.read(cx).settings.current_playback.as_ref() != Some(&current_playback) {
+            self.preferences.update(cx, |preferences, _| {
+                preferences.settings.current_playback = Some(current_playback);
+            });
+            self.preferences.read(cx).save();
         }
         self.playback.last_persisted_at = Instant::now();
     }
 
-    pub(super) fn clear_persisted_playback(&mut self) {
+    pub(super) fn clear_persisted_playback(&mut self, cx: &mut gpui::App) {
         self.playback.pending_restore = None;
-        if self.settings.current_playback.take().is_some() {
-            self.persist_settings();
+        if self.preferences.update(cx, |preferences, _| {
+            preferences.settings.current_playback.take().is_some()
+        }) {
+            self.preferences.read(cx).save();
         }
         self.playback.last_persisted_at = Instant::now();
     }

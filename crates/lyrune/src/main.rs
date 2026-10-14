@@ -109,7 +109,7 @@ fn open_restored_window(
 ) -> anyhow::Result<WindowHandle<Root>> {
     let (window_size, decoration) = {
         let view_state = view.read(cx);
-        (view_state.window_size(), view_state.window_decoration())
+        (view_state.window_size(cx), view_state.window_decoration(cx))
     };
     let options = main_window_options(window_size, decoration, cx);
     cx.open_window(options, move |window, cx| {
@@ -243,8 +243,8 @@ fn main() {
             match mpris::install() {
                 Ok((service, mut mpris_events)) => {
                     let mpris_handle = service.handle();
-                    main_window.borrow().view.update(cx, |view, _| {
-                        view.attach_mpris(mpris_handle);
+                    main_window.borrow().view.update(cx, |view, cx| {
+                        view.attach_mpris(mpris_handle, cx);
                     });
                     cx.set_global(MprisState { _service: service });
 

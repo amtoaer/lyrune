@@ -14,6 +14,7 @@ mod playback;
 mod playback_sync;
 mod player_view;
 mod playlists;
+mod preferences;
 mod progress_view;
 mod queue;
 mod search;
@@ -58,12 +59,13 @@ use self::{
     playback::Playback,
     player_view::{PlayerAction, PlayerControlsView},
     playlists::{PlaylistPageKey, PlaylistPageState},
+    preferences::Preferences,
     progress_view::{PlaybackProgressView, SeekTo},
     search::SearchPageState,
     settings::SettingsInputs,
 };
 use crate::cache::{AudioCache, audio_cache_limit_bytes};
-use crate::design::{AppFonts, ColorTheme};
+use crate::design::AppFonts;
 use crate::http::CachedImageCache;
 use crate::icons::{MediaIcon, lyrune_icon, media_icon_hsla};
 #[cfg(target_os = "linux")]
@@ -77,7 +79,7 @@ use crate::mpris::MprisHandle;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 use crate::settings::{
-    AppSettings, CdnCacheStore, LibraryCache, PersistedWindowSize, SettingsWriter, WindowDecoration,
+    AppSettings, CdnCacheStore, LibraryCache, PersistedWindowSize, WindowDecoration,
 };
 use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
@@ -151,10 +153,7 @@ pub struct LyruneView {
     lyrics: LyricsCache,
     lyrics_view: Entity<LyricsView>,
     _lyrics_subscription: Option<Subscription>,
-    fonts: AppFonts,
-    color_theme: ColorTheme,
-    settings: AppSettings,
-    settings_writer: Option<SettingsWriter>,
+    preferences: Entity<Preferences>,
     library_cache: LibraryCache,
     page_resource_cache: PageResourceCache,
     liked_tracks: HashMap<String, bool>,
@@ -281,7 +280,10 @@ impl LyruneView {
             )
         });
         let image_cache = CachedImageCache::new(settings.image_cache_capacity, cx);
+        let history_limit = settings.navigation_history_limit;
+        let preferences = cx.new(|cx| Preferences::new(settings, fonts, cx));
         let subscriptions = vec![
+            cx.observe(&preferences, |_, _, cx| cx.notify()),
             cx.observe(&account, |_, _, cx| cx.notify()),
             cx.subscribe(&account, |this, _, event: &AccountEvent, cx| {
                 this.handle_account_event(event, cx)
@@ -391,7 +393,6 @@ impl LyruneView {
         })
         .detach();
 
-        let color_theme = settings.active_color_theme(cx.window_appearance());
         let mut view = Self {
             account,
             account_menu_open: false,
@@ -400,7 +401,7 @@ impl LyruneView {
             library_generation: 0,
             playlist_page_requests: SingleFlight::default(),
             main_content: MainContent::Home,
-            navigation_history: NavigationHistory::new(settings.navigation_history_limit),
+            navigation_history: NavigationHistory::new(history_limit),
             home: HomePageState::default(),
             search: SearchPageState::default(),
             artist: ArtistPageState::default(),
@@ -428,10 +429,7 @@ impl LyruneView {
             lyrics: LyricsCache::new(lyric_disk_cache),
             lyrics_view,
             _lyrics_subscription: None,
-            fonts,
-            color_theme,
-            settings,
-            settings_writer: SettingsWriter::new().ok(),
+            preferences,
             library_cache,
             page_resource_cache: PageResourceCache::default(),
             liked_tracks: HashMap::new(),
@@ -458,7 +456,7 @@ impl LyruneView {
         view.start_cdn_maintenance();
         view.account
             .update(cx, |account, cx| account.restore_credential(cx));
-        if view.settings.check_updates_on_startup {
+        if view.preferences.read(cx).settings.check_updates_on_startup {
             view.schedule_update_check(cx);
         }
         // release 仍可读取账号实体；Rust Drop 阶段已没有 GPUI App 可供生成最后的快照。
@@ -502,17 +500,23 @@ impl LyruneView {
                 this.set_cover_backdrop_expanded(false, window, cx);
             },
         ));
-        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
         self._appearance_subscription =
             Some(cx.observe_window_appearance(window, |this, window, cx| {
-                this.apply_theme(window, cx)
+                this.preferences
+                    .update(cx, |preferences, cx| preferences.apply_theme(window, cx))
             }));
         self._window_subscription = Some(cx.observe_window_bounds(window, |this, window, cx| {
             let size = window.window_bounds().get_bounds().size;
             let width = f32::from(size.width).round() as u32;
             let height = f32::from(size.height).round() as u32;
             if width > 0 && height > 0 {
-                this.settings.window_size = Some(PersistedWindowSize { width, height });
+                {
+                    let value = Some(PersistedWindowSize { width, height });
+                    this.preferences.update(cx, |preferences, _| {
+                        preferences.settings.window_size = value;
+                    });
+                }
             }
             cx.notify();
         }));
@@ -540,8 +544,9 @@ impl LyruneView {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(3)).await;
             if this
-                .read_with(cx, |this, _| {
-                    this.settings.check_updates_on_startup && !this.update_check_in_progress
+                .read_with(cx, |this, cx| {
+                    this.preferences.read(cx).settings.check_updates_on_startup
+                        && !this.update_check_in_progress
                 })
                 .unwrap_or(false)
             {
@@ -627,12 +632,12 @@ impl LyruneView {
         });
     }
 
-    pub(crate) fn window_size(&self) -> Option<PersistedWindowSize> {
-        self.settings.window_size
+    pub(crate) fn window_size(&self, cx: &App) -> Option<PersistedWindowSize> {
+        self.preferences.read(cx).settings.window_size
     }
 
-    pub(crate) fn window_decoration(&self) -> WindowDecoration {
-        self.settings.window_decoration
+    pub(crate) fn window_decoration(&self, cx: &App) -> WindowDecoration {
+        self.preferences.read(cx).settings.window_decoration
     }
 
     fn start_cdn_maintenance(&mut self) {
@@ -679,24 +684,15 @@ impl LyruneView {
         }
     }
 
-    fn persist_settings(&self) {
-        if let Some(writer) = &self.settings_writer {
-            writer.save(&self.settings);
-        }
-    }
-
-    fn shutdown(&mut self, cx: &App) {
-        if self.settings_writer.is_some() {
+    fn shutdown(&mut self, cx: &mut App) {
+        if self.preferences.read(cx).writer.is_some() {
             self.persist_current_playback(cx);
         }
         if let Some(audio) = self.playback.audio.take() {
             audio.stop();
         }
-        if let Some(writer) = self.settings_writer.take() {
-            // 播放快照未变化时上面的保存会跳过；这里仍需保存窗口大小等其他偏好。
-            writer.save(&self.settings);
-            writer.finish();
-        }
+        self.preferences
+            .update(cx, |preferences, _| preferences.finish());
         if let Some(task) = self.cdn_maintenance.take() {
             task.abort();
         }
@@ -714,7 +710,7 @@ impl LyruneView {
             .mb_2()
             .px_5()
             .gap_3()
-            .child(lyrune_icon(self.color_theme, px(42.)))
+            .child(lyrune_icon(self.preferences.read(cx).color_theme, px(42.)))
             .child(
                 v_flex()
                     .gap_0p5()
@@ -774,16 +770,26 @@ impl LyruneView {
             .into_any_element()
     }
 
-    pub(super) fn inactive_window_frame_interval(&self) -> Option<Duration> {
+    pub(super) fn inactive_window_frame_interval(&self, cx: &App) -> Option<Duration> {
         let lyrics = if self.cover_backdrop_visible {
             combined_lyric_frame_interval(
-                self.settings.lyric_highlight_frame_rate,
-                self.settings.lyric_scroll_frame_rate,
+                self.preferences
+                    .read(cx)
+                    .settings
+                    .lyric_highlight_frame_rate,
+                self.preferences.read(cx).settings.lyric_scroll_frame_rate,
             )
         } else {
             Some(crate::INACTIVE_WINDOW_FRAME_INTERVAL)
         };
-        match (lyrics, self.settings.progress_frame_rate.frame_interval()) {
+        match (
+            lyrics,
+            self.preferences
+                .read(cx)
+                .settings
+                .progress_frame_rate
+                .frame_interval(),
+        ) {
             (Some(lyrics), Some(progress)) => Some(lyrics.min(progress)),
             _ => None,
         }
@@ -804,7 +810,7 @@ impl LyruneView {
             self.lyrics_view
                 .update(cx, |view, _| view.reset_lyric_animation_frames());
         }
-        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
         self.wake_playback_tick();
         cx.notify();
     }
@@ -824,7 +830,7 @@ impl LyruneView {
         let visible = self.cover_backdrop_expanded || progress > 0.;
         if self.cover_backdrop_visible != visible {
             self.cover_backdrop_visible = visible;
-            window.set_inactive_frame_interval(self.inactive_window_frame_interval());
+            window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
         }
         progress
     }
@@ -846,11 +852,15 @@ impl LyruneView {
             cover_url: track.and_then(|track| track.cover_url.clone()),
             duration: self.playback.duration(),
             content,
-            font: self.fonts.lyrics.clone(),
-            font_scale: self.settings.lyric_font_scale,
-            line_spacing: self.settings.lyric_line_spacing,
-            highlight_frame_rate: self.settings.lyric_highlight_frame_rate,
-            scroll_frame_rate: self.settings.lyric_scroll_frame_rate,
+            font: self.preferences.read(cx).fonts.lyrics.clone(),
+            font_scale: self.preferences.read(cx).settings.lyric_font_scale,
+            line_spacing: self.preferences.read(cx).settings.lyric_line_spacing,
+            highlight_frame_rate: self
+                .preferences
+                .read(cx)
+                .settings
+                .lyric_highlight_frame_rate,
+            scroll_frame_rate: self.preferences.read(cx).settings.lyric_scroll_frame_rate,
             advancing: self.playback.is_advancing(),
             seeking: self.progress.read(cx).seek_preview.is_some(),
             expanded: self.cover_backdrop_expanded,
@@ -1060,7 +1070,7 @@ impl LyruneView {
                 .relative()
                 .size_full()
                 .image_cache(self.image_cache.clone())
-                .font(self.fonts.ui.clone())
+                .font(self.preferences.read(cx).fonts.ui.clone())
                 .bg(theme.background)
                 .text_color(theme.foreground)
                 .child(div().flex_1().min_h_0())
@@ -1105,6 +1115,8 @@ impl LyruneView {
             (272., 236., 340.)
         };
         let sidebar_width = px(self
+            .preferences
+            .read(cx)
             .settings
             .sidebar_width
             .map(|width| width as f32)
@@ -1278,7 +1290,7 @@ impl LyruneView {
             .relative()
             .size_full()
             .image_cache(self.image_cache.clone())
-            .font(self.fonts.ui.clone())
+            .font(self.preferences.read(cx).fonts.ui.clone())
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(
@@ -1286,8 +1298,12 @@ impl LyruneView {
                     h_resizable("library-layout")
                         .on_resize(cx.listener(|this, state: &Entity<ResizableState>, _, cx| {
                             if let Some(width) = state.read(cx).sizes().first() {
-                                this.settings.sidebar_width =
-                                    Some(f32::from(*width).round() as u32);
+                                {
+                                    let value = Some(f32::from(*width).round() as u32);
+                                    this.preferences.update(cx, |preferences, _| {
+                                        preferences.settings.sidebar_width = value;
+                                    });
+                                }
                             }
                         }))
                         .child(

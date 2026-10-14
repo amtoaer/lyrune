@@ -135,26 +135,6 @@ impl SettingsInputs {
 }
 
 impl LyruneView {
-    pub(super) fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let appearance = cx.window_appearance();
-        let mode = self.settings.color_theme_mode.resolve(appearance);
-        self.color_theme = match mode {
-            gpui_component::ThemeMode::Light => self.settings.light_color_theme,
-            gpui_component::ThemeMode::Dark => self.settings.dark_color_theme,
-        };
-        design::apply(
-            self.settings.light_color_theme,
-            self.settings.dark_color_theme,
-            mode,
-            matches!(self.settings.color_theme_mode, ColorThemeMode::Auto),
-            &self.fonts,
-            Some(window),
-            cx,
-        );
-        crate::set_tray_icon_style(self.settings.tray_icon_style.resolve(appearance), cx);
-        cx.notify();
-    }
-
     fn set_color_theme(
         &mut self,
         color_theme: ColorTheme,
@@ -162,17 +142,25 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let selected = if light {
-            &mut self.settings.light_color_theme
-        } else {
-            &mut self.settings.dark_color_theme
-        };
-        if *selected == color_theme {
+        let changed = self.preferences.update(cx, |preferences, cx| {
+            let selected = if light {
+                &mut preferences.settings.light_color_theme
+            } else {
+                &mut preferences.settings.dark_color_theme
+            };
+            if *selected == color_theme {
+                return false;
+            }
+            *selected = color_theme;
+            cx.notify();
+            true
+        });
+        if !changed {
             return;
         }
-        *selected = color_theme;
-        self.apply_theme(window, cx);
-        self.persist_settings();
+        self.preferences
+            .update(cx, |preferences, cx| preferences.apply_theme(window, cx));
+        self.preferences.read(cx).save();
     }
 
     fn set_color_theme_mode(
@@ -181,30 +169,40 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings.color_theme_mode == mode {
+        if self.preferences.read(cx).settings.color_theme_mode == mode {
             return;
         }
-        self.settings.color_theme_mode = mode;
-        self.apply_theme(window, cx);
-        self.persist_settings();
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.color_theme_mode = mode;
+            cx.notify();
+        });
+        self.preferences
+            .update(cx, |preferences, cx| preferences.apply_theme(window, cx));
+        self.preferences.read(cx).save();
     }
 
     fn set_tray_icon_style(&mut self, style: TrayIconStyle, cx: &mut Context<Self>) {
-        if self.settings.tray_icon_style == style {
+        if self.preferences.read(cx).settings.tray_icon_style == style {
             return;
         }
-        self.settings.tray_icon_style = style;
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.tray_icon_style = style;
+            cx.notify();
+        });
         crate::set_tray_icon_style(style.resolve(cx.window_appearance()), cx);
-        self.persist_settings();
+        self.preferences.read(cx).save();
         cx.notify();
     }
 
     fn set_check_updates_on_startup(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.settings.check_updates_on_startup == enabled {
+        if self.preferences.read(cx).settings.check_updates_on_startup == enabled {
             return;
         }
-        self.settings.check_updates_on_startup = enabled;
-        self.persist_settings();
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.check_updates_on_startup = enabled;
+            cx.notify();
+        });
+        self.preferences.read(cx).save();
         cx.notify();
     }
 
@@ -214,15 +212,18 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings.window_decoration == decoration {
+        if self.preferences.read(cx).settings.window_decoration == decoration {
             return;
         }
-        self.settings.window_decoration = decoration;
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.window_decoration = decoration;
+            cx.notify();
+        });
         window.request_decorations(match decoration {
             WindowDecoration::Ssd => WindowDecorations::Server,
             WindowDecoration::Csd => WindowDecorations::Client,
         });
-        self.persist_settings();
+        self.preferences.read(cx).save();
         window.set_background_appearance(match window.window_decorations() {
             Decorations::Client { .. } => WindowBackgroundAppearance::Transparent,
             Decorations::Server => WindowBackgroundAppearance::Opaque,
@@ -232,16 +233,19 @@ impl LyruneView {
     }
 
     fn set_preferred_playback_quality(&mut self, quality: Quality, cx: &mut Context<Self>) {
-        if self.settings.playback_quality == quality {
+        if self.preferences.read(cx).settings.playback_quality == quality {
             return;
         }
-        self.settings.playback_quality = quality;
-        self.persist_settings();
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.playback_quality = quality;
+            cx.notify();
+        });
+        self.preferences.read(cx).save();
         cx.notify();
     }
 
     pub(super) fn apply_audio_cache_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.settings.audio_cache_limit_gb;
+        let current = self.preferences.read(cx).settings.audio_cache_limit_gb;
         let value = self
             .settings_inputs
             .audio_cache_limit
@@ -260,11 +264,14 @@ impl LyruneView {
             return;
         }
 
-        self.settings.audio_cache_limit_gb = value;
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.audio_cache_limit_gb = value;
+            cx.notify();
+        });
         if let Some(cache) = &self.audio_cache {
             cache.set_max_size_bytes(audio_cache_limit_bytes(value));
         }
-        self.persist_settings();
+        self.preferences.read(cx).save();
         self.start_audio_cache_maintenance();
         cx.notify();
     }
@@ -274,7 +281,7 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = self.settings.image_cache_capacity;
+        let current = self.preferences.read(cx).settings.image_cache_capacity;
         let value = self
             .settings_inputs
             .image_cache_capacity
@@ -294,10 +301,13 @@ impl LyruneView {
             return;
         }
 
-        self.settings.image_cache_capacity = value;
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.image_cache_capacity = value;
+            cx.notify();
+        });
         self.image_cache
             .update(cx, |cache, cx| cache.set_capacity(value, window, cx));
-        self.persist_settings();
+        self.preferences.read(cx).save();
         cx.notify();
     }
 
@@ -306,7 +316,7 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = self.settings.navigation_history_limit;
+        let current = self.preferences.read(cx).settings.navigation_history_limit;
         let value = self
             .settings_inputs
             .navigation_history_limit
@@ -326,10 +336,13 @@ impl LyruneView {
             return;
         }
 
-        self.settings.navigation_history_limit = value;
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.navigation_history_limit = value;
+            cx.notify();
+        });
         self.navigation_history.set_limit(value);
         self.page_resource_cache.prune();
-        self.persist_settings();
+        self.preferences.read(cx).save();
         cx.notify();
     }
 
@@ -343,13 +356,13 @@ impl LyruneView {
         };
         let lyric = read(
             &self.settings_inputs.lyric_font_scale,
-            self.settings.lyric_font_scale,
+            self.preferences.read(cx).settings.lyric_font_scale,
             MAX_LYRIC_SCALE_PERCENT,
             cx,
         );
         let spacing = read(
             &self.settings_inputs.lyric_line_spacing,
-            self.settings.lyric_line_spacing,
+            self.preferences.read(cx).settings.lyric_line_spacing,
             MAX_LYRIC_SCALE_PERCENT,
             cx,
         );
@@ -361,13 +374,21 @@ impl LyruneView {
                 input.set_value(value.to_string(), window, cx)
             });
         }
-        if lyric == self.settings.lyric_font_scale && spacing == self.settings.lyric_line_spacing {
+        if lyric == self.preferences.read(cx).settings.lyric_font_scale
+            && spacing == self.preferences.read(cx).settings.lyric_line_spacing
+        {
             return;
         }
 
-        self.settings.lyric_font_scale = lyric;
-        self.settings.lyric_line_spacing = spacing;
-        self.persist_settings();
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.lyric_font_scale = lyric;
+            cx.notify();
+        });
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.lyric_line_spacing = spacing;
+            cx.notify();
+        });
+        self.preferences.read(cx).save();
         cx.notify();
     }
 
@@ -421,19 +442,23 @@ impl LyruneView {
     ) {
         self.settings_inputs
             .set_fonts(&ui, &monospace, &lyrics, window, cx);
-        self.settings.ui_font_families = ui;
-        self.settings.monospace_font_families = monospace;
-        self.settings.lyric_font_families = lyrics;
-        self.fonts = design::resolve_fonts(
-            &self.settings.ui_font_families,
-            &self.settings.monospace_font_families,
-            &self.settings.lyric_font_families,
-            cx,
-        );
-        self.apply_theme(window, cx);
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.ui_font_families = ui;
+            preferences.settings.monospace_font_families = monospace;
+            preferences.settings.lyric_font_families = lyrics;
+            preferences.fonts = design::resolve_fonts(
+                &preferences.settings.ui_font_families,
+                &preferences.settings.monospace_font_families,
+                &preferences.settings.lyric_font_families,
+                cx,
+            );
+            cx.notify();
+        });
+        self.preferences
+            .update(cx, |preferences, cx| preferences.apply_theme(window, cx));
         self.lyrics_view
             .update(cx, |view, cx| view.reset_layout(cx));
-        self.persist_settings();
+        self.preferences.read(cx).save();
         cx.notify();
     }
 
@@ -443,12 +468,15 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings.progress_frame_rate == frame_rate {
+        if self.preferences.read(cx).settings.progress_frame_rate == frame_rate {
             return;
         }
-        self.settings.progress_frame_rate = frame_rate;
-        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
-        self.persist_settings();
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.progress_frame_rate = frame_rate;
+            cx.notify();
+        });
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
+        self.preferences.read(cx).save();
         cx.notify();
     }
 
@@ -458,14 +486,23 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings.lyric_highlight_frame_rate == frame_rate {
+        if self
+            .preferences
+            .read(cx)
+            .settings
+            .lyric_highlight_frame_rate
+            == frame_rate
+        {
             return;
         }
-        self.settings.lyric_highlight_frame_rate = frame_rate;
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.lyric_highlight_frame_rate = frame_rate;
+            cx.notify();
+        });
         self.lyrics_view
             .update(cx, |view, _| view.reset_lyric_animation_frames());
-        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
-        self.persist_settings();
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
+        self.preferences.read(cx).save();
         cx.notify();
     }
 
@@ -475,14 +512,17 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.settings.lyric_scroll_frame_rate == frame_rate {
+        if self.preferences.read(cx).settings.lyric_scroll_frame_rate == frame_rate {
             return;
         }
-        self.settings.lyric_scroll_frame_rate = frame_rate;
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.lyric_scroll_frame_rate = frame_rate;
+            cx.notify();
+        });
         self.lyrics_view
             .update(cx, |view, _| view.reset_lyric_animation_frames());
-        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
-        self.persist_settings();
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
+        self.preferences.read(cx).save();
         cx.notify();
     }
 
@@ -492,6 +532,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
+        let settings = &self.preferences.read(cx).settings;
         let font_field = |label: &'static str, detail: &'static str, input: &Entity<InputState>| {
             v_flex()
                 .gap_2()
@@ -571,9 +612,9 @@ impl LyruneView {
                     })
                 })
         };
-        let light_theme_picker = theme_picker("light", self.settings.light_color_theme, true);
-        let dark_theme_picker = theme_picker("dark", self.settings.dark_color_theme, false);
-        let selected_theme_mode = self.settings.color_theme_mode;
+        let light_theme_picker = theme_picker("light", settings.light_color_theme, true);
+        let dark_theme_picker = theme_picker("dark", settings.dark_color_theme, false);
+        let selected_theme_mode = settings.color_theme_mode;
         let theme_mode_buttons = ColorThemeMode::ALL
             .into_iter()
             .map(|mode| {
@@ -588,7 +629,7 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
-        let selected_tray_icon_style = self.settings.tray_icon_style;
+        let selected_tray_icon_style = settings.tray_icon_style;
         let tray_icon_buttons = TrayIconStyle::ALL
             .into_iter()
             .map(|style| {
@@ -603,8 +644,8 @@ impl LyruneView {
                     )
             })
             .collect::<Vec<_>>();
-        let check_updates_on_startup = self.settings.check_updates_on_startup;
-        let selected_window_decoration = self.settings.window_decoration;
+        let check_updates_on_startup = settings.check_updates_on_startup;
+        let selected_window_decoration = settings.window_decoration;
         let window_decoration_buttons = WindowDecoration::ALL
             .into_iter()
             .map(|decoration| {
@@ -619,7 +660,7 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
-        let preferred_quality = self.settings.playback_quality;
+        let preferred_quality = settings.playback_quality;
         let quality_rows = Quality::ALL
             .chunks(2)
             .map(|row| {
@@ -639,7 +680,7 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
-        let selected_progress_frame_rate = self.settings.progress_frame_rate;
+        let selected_progress_frame_rate = settings.progress_frame_rate;
         let progress_frame_rate_buttons = FrameRate::ALL
             .into_iter()
             .map(|frame_rate| {
@@ -658,7 +699,11 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
-        let selected_highlight_frame_rate = self.settings.lyric_highlight_frame_rate;
+        let selected_highlight_frame_rate = self
+            .preferences
+            .read(cx)
+            .settings
+            .lyric_highlight_frame_rate;
         let highlight_frame_rate_buttons = FrameRate::ALL
             .into_iter()
             .map(|frame_rate| {
@@ -673,7 +718,7 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
-        let selected_scroll_frame_rate = self.settings.lyric_scroll_frame_rate;
+        let selected_scroll_frame_rate = settings.lyric_scroll_frame_rate;
         let scroll_frame_rate_buttons = FrameRate::ALL
             .into_iter()
             .map(|frame_rate| {

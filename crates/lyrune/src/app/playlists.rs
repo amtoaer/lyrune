@@ -171,6 +171,8 @@ impl LyruneView {
         });
         let count = playlists.len();
         let viewed_index = self
+            .preferences
+            .read(cx)
             .settings
             .last_library_view
             .as_ref()
@@ -186,7 +188,7 @@ impl LyruneView {
             .clone()
             .filter(|restore| restore.account_id == account_id);
         if self.playback.pending_restore.is_some() && playback_restore.is_none() {
-            self.clear_persisted_playback();
+            self.clear_persisted_playback(cx);
         }
         self.playlist_list.update(cx, |list, cx| {
             list.delegate_mut().set_playlists(playlists);
@@ -240,9 +242,18 @@ impl LyruneView {
                 account_id,
                 playlist_id: playlist.id.clone(),
             };
-            if self.settings.last_library_view.as_ref() != Some(&view) {
-                self.settings.last_library_view = Some(view);
-                self.persist_settings();
+            if self
+                .preferences
+                .read(cx)
+                .settings
+                .last_library_view
+                .as_ref()
+                != Some(&view)
+            {
+                self.preferences.update(cx, |preferences, _| {
+                    preferences.settings.last_library_view = Some(view);
+                });
+                self.preferences.read(cx).save();
             }
         }
 
@@ -956,7 +967,11 @@ impl LyruneView {
                                                 .text_color(theme.primary_foreground)
                                                 .child(media_icon(
                                                     MediaIcon::Play,
-                                                    self.color_theme.palette().primary_foreground,
+                                                    self.preferences
+                                                        .read(cx)
+                                                        .color_theme
+                                                        .palette()
+                                                        .primary_foreground,
                                                     px(17.),
                                                 ))
                                                 .child("播放全部"),

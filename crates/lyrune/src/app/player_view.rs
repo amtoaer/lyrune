@@ -680,7 +680,7 @@ impl LyruneView {
             PlayerAction::Shuffle => {
                 self.playback.shuffle = !self.playback.shuffle;
                 #[cfg(target_os = "linux")]
-                self.sync_mpris(false);
+                self.sync_mpris(false, cx);
                 cx.notify();
             }
             PlayerAction::Previous => self.play_previous(cx),
@@ -689,7 +689,7 @@ impl LyruneView {
             PlayerAction::Repeat => {
                 self.playback.repeat_mode = self.playback.repeat_mode.next();
                 #[cfg(target_os = "linux")]
-                self.sync_mpris(false);
+                self.sync_mpris(false, cx);
                 cx.notify();
             }
             PlayerAction::ToggleMute => self.toggle_mute(window, cx),
@@ -702,7 +702,7 @@ impl LyruneView {
             PlayerAction::Volume { value, persist } => {
                 self.set_volume(*value, cx);
                 if *persist {
-                    self.persist_settings();
+                    self.preferences.read(cx).save();
                 }
             }
         }
@@ -738,8 +738,8 @@ impl LyruneView {
             duration: self.playback.duration(),
             interactive: has_track && self.playback.started && self.playback.load.track.is_none(),
             advancing: self.playback.is_advancing(),
-            frame_rate: self.settings.progress_frame_rate,
-            font: self.fonts.monospace.clone(),
+            frame_rate: self.preferences.read(cx).settings.progress_frame_rate,
+            font: self.preferences.read(cx).fonts.monospace.clone(),
             foreground,
         };
         self.progress.update(cx, |progress, cx| {
@@ -770,8 +770,8 @@ impl LyruneView {
             browsed_tracks_empty: self.track_table.read(cx).delegate().tracks().is_empty(),
             shuffle: self.playback.shuffle,
             repeat_mode: self.playback.repeat_mode,
-            volume: self.settings.volume,
-            color_theme: self.color_theme,
+            volume: self.preferences.read(cx).settings.volume,
+            color_theme: self.preferences.read(cx).color_theme,
             expanded: self.cover_backdrop_expanded,
             quality_menu_open: self.quality_menu_open,
         };

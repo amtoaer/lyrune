@@ -380,7 +380,11 @@ impl LyruneView {
                                                 .text_color(theme.primary_foreground)
                                                 .child(media_icon(
                                                     MediaIcon::Play,
-                                                    self.color_theme.palette().primary_foreground,
+                                                    self.preferences
+                                                        .read(cx)
+                                                        .color_theme
+                                                        .palette()
+                                                        .primary_foreground,
                                                     px(17.),
                                                 ))
                                                 .child("播放全部"),
@@ -631,7 +635,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let monospace_font = self.fonts.monospace.clone();
+        let monospace_font = self.preferences.read(cx).fonts.monospace.clone();
         let current_mid = self.playback.track().map(|track| track.mid.clone());
         let loading_mid = self
             .playback

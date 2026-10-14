@@ -408,14 +408,14 @@ impl LyruneView {
         self.playback.started = false;
         self.wake_playback_tick();
         self.playback.location = None;
-        self.playback.active_quality = self.settings.playback_quality;
+        self.playback.active_quality = self.preferences.read(cx).settings.playback_quality;
         self.playback.available_qualities.clear();
         self.quality_menu_open = false;
         self.playback.position = Duration::ZERO;
         self.account_menu_open = false;
-        self.clear_persisted_playback();
+        self.clear_persisted_playback(cx);
         #[cfg(target_os = "linux")]
-        self.sync_mpris(false);
+        self.sync_mpris(false, cx);
         #[cfg(target_os = "linux")]
         self.sync_inhibit();
         self.playlist_list.update(cx, |list, cx| {
@@ -469,7 +469,7 @@ impl LyruneView {
 
         v_flex()
             .size_full()
-            .font(self.fonts.ui.clone())
+            .font(self.preferences.read(cx).fonts.ui.clone())
             .items_center()
             .justify_center()
             .bg(theme.background)
@@ -485,7 +485,7 @@ impl LyruneView {
                     .border_color(theme.border)
                     .bg(theme.group_box)
                     .shadow_lg()
-                    .child(lyrune_icon(self.color_theme, px(46.)))
+                    .child(lyrune_icon(self.preferences.read(cx).color_theme, px(46.)))
                     .child(div().text_2xl().font_bold().child("登录 Lyrune"))
                     .child(
                         div()

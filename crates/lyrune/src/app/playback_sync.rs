@@ -89,9 +89,9 @@ impl LyruneView {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn attach_mpris(&mut self, mpris: MprisHandle) {
+    pub(crate) fn attach_mpris(&mut self, mpris: MprisHandle, cx: &gpui::App) {
         self.mpris = Some(mpris);
-        self.sync_mpris(false);
+        self.sync_mpris(false, cx);
     }
 
     #[cfg(target_os = "linux")]
@@ -120,12 +120,12 @@ impl LyruneView {
                     MprisLoopStatus::Track => RepeatMode::One,
                     MprisLoopStatus::Playlist => RepeatMode::All,
                 };
-                self.sync_mpris(false);
+                self.sync_mpris(false, cx);
                 cx.notify();
             }
             MprisCommand::SetShuffle(shuffle) => {
                 self.playback.shuffle = shuffle;
-                self.sync_mpris(false);
+                self.sync_mpris(false, cx);
                 cx.notify();
             }
             MprisCommand::SetVolume(volume) => {
@@ -133,13 +133,13 @@ impl LyruneView {
                 self.player_controls
                     .update(cx, |view, cx| view.reset_volume(volume, cx));
                 self.set_volume(volume, cx);
-                self.persist_settings();
+                self.preferences.read(cx).save();
             }
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn mpris_snapshot(&self) -> MprisSnapshot {
+    fn mpris_snapshot(&self, cx: &gpui::App) -> MprisSnapshot {
         let audio_available = self.playback.audio.is_some();
         let loading = self.playback.load.track.is_some();
         // 系统媒体状态在加载期间沿用 Playing，区别于设备时钟是否实际推进。
@@ -203,7 +203,7 @@ impl LyruneView {
                 RepeatMode::One => MprisLoopStatus::Track,
             },
             shuffle: self.playback.shuffle,
-            volume: self.settings.volume as f64,
+            volume: self.preferences.read(cx).settings.volume as f64,
             position_micros: duration_micros(self.playback.position),
             track,
             can_go_next,
@@ -215,9 +215,9 @@ impl LyruneView {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn sync_mpris(&self, seeked: bool) {
+    pub(super) fn sync_mpris(&self, seeked: bool, cx: &gpui::App) {
         if let Some(mpris) = &self.mpris {
-            let snapshot = self.mpris_snapshot();
+            let snapshot = self.mpris_snapshot(cx);
             if seeked {
                 mpris.seeked(snapshot);
             } else {

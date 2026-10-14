@@ -301,7 +301,8 @@ impl LyruneView {
             return;
         };
 
-        let desired_quality = requested_quality.unwrap_or(self.settings.playback_quality);
+        let desired_quality =
+            requested_quality.unwrap_or(self.preferences.read(cx).settings.playback_quality);
         let same_track = (self.playback.current_track == Some(index)
             && self.playback.load.track.is_some())
             || self
@@ -347,7 +348,7 @@ impl LyruneView {
         self.persist_current_playback(cx);
         self.sync_table_playback_state(cx);
         #[cfg(target_os = "linux")]
-        self.sync_mpris(!same_track && !resume_at.is_zero());
+        self.sync_mpris(!same_track && !resume_at.is_zero(), cx);
         #[cfg(target_os = "linux")]
         self.sync_inhibit();
         cx.notify();
@@ -418,7 +419,7 @@ impl LyruneView {
                             match playback_result {
                                 Ok(()) => {
                                     if let Some(audio) = &this.playback.audio {
-                                        audio.set_volume(this.settings.volume);
+                                        audio.set_volume(this.preferences.read(cx).settings.volume);
                                     }
                                     this.playback.started = true;
                                     this.wake_playback_tick();
@@ -433,7 +434,7 @@ impl LyruneView {
                     this.sync_table_playback_state(cx);
                     #[cfg(target_os = "linux")]
                     if finished {
-                        this.sync_mpris(seeked);
+                        this.sync_mpris(seeked, cx);
                         this.sync_inhibit();
                     }
                     cx.notify();
@@ -468,7 +469,7 @@ impl LyruneView {
         self.persist_current_playback(cx);
         self.sync_table_playback_state(cx);
         #[cfg(target_os = "linux")]
-        self.sync_mpris(false);
+        self.sync_mpris(false, cx);
         #[cfg(target_os = "linux")]
         self.sync_inhibit();
         cx.notify();
@@ -524,7 +525,7 @@ impl LyruneView {
         self.progress.update(cx, |view, cx| view.stop(cx));
         self.persist_current_playback(cx);
         self.sync_table_playback_state(cx);
-        self.sync_mpris(false);
+        self.sync_mpris(false, cx);
         self.sync_inhibit();
         cx.notify();
     }
@@ -550,7 +551,7 @@ impl LyruneView {
             cx,
         );
         #[cfg(target_os = "linux")]
-        self.sync_mpris(true);
+        self.sync_mpris(true, cx);
         #[cfg(target_os = "linux")]
         self.sync_inhibit();
     }
@@ -673,7 +674,7 @@ impl LyruneView {
         }
         self.persist_current_playback(cx);
         #[cfg(target_os = "linux")]
-        self.sync_mpris(false);
+        self.sync_mpris(false, cx);
         #[cfg(target_os = "linux")]
         self.sync_inhibit();
         cx.notify();
@@ -693,15 +694,18 @@ impl LyruneView {
     }
 
     pub(super) fn set_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
-        self.settings.volume = volume.clamp(0., 1.);
-        if self.settings.volume > 0. {
-            self.settings.last_nonzero_volume = self.settings.volume;
-        }
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.volume = volume.clamp(0., 1.);
+            if preferences.settings.volume > 0. {
+                preferences.settings.last_nonzero_volume = preferences.settings.volume;
+            }
+            cx.notify();
+        });
         if let Some(audio) = &self.playback.audio {
-            audio.set_volume(self.settings.volume);
+            audio.set_volume(self.preferences.read(cx).settings.volume);
         }
         #[cfg(target_os = "linux")]
-        self.sync_mpris(false);
+        self.sync_mpris(false, cx);
         cx.notify();
     }
 
@@ -710,9 +714,12 @@ impl LyruneView {
             return;
         }
         self.quality_menu_open = false;
-        if self.settings.playback_quality != quality {
-            self.settings.playback_quality = quality;
-            self.persist_settings();
+        if self.preferences.read(cx).settings.playback_quality != quality {
+            self.preferences.update(cx, |preferences, cx| {
+                preferences.settings.playback_quality = quality;
+                cx.notify();
+            });
+            self.preferences.read(cx).save();
         }
         if self.playback.active_quality == quality {
             cx.notify();
@@ -744,14 +751,14 @@ impl LyruneView {
     }
 
     pub(super) fn toggle_mute(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let volume = if self.settings.volume > 0. {
+        let volume = if self.preferences.read(cx).settings.volume > 0. {
             0.
         } else {
-            self.settings.last_nonzero_volume
+            self.preferences.read(cx).settings.last_nonzero_volume
         };
         self.player_controls
             .update(cx, |view, cx| view.set_volume(volume, window, cx));
         self.set_volume(volume, cx);
-        self.persist_settings();
+        self.preferences.read(cx).save();
     }
 }

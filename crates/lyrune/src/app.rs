@@ -37,7 +37,6 @@ use gpui_component::{
     list::{List, ListEvent, ListState},
     notification::Notification,
     resizable_panel,
-    slider::{SliderEvent, SliderState},
     table::{TableEvent, TableState},
     v_flex,
 };
@@ -57,6 +56,7 @@ use self::{
     },
     navigation::{MainContent, NavigationHistory, PageResourceCache},
     playback::Playback,
+    player_view::{PlayerAction, PlayerControlsView},
     playlists::{PlaylistPageKey, PlaylistPageState},
     progress_view::{PlaybackProgressView, SeekTo},
     search::SearchPageState,
@@ -92,14 +92,6 @@ const PLAYER_BAR_HEIGHT: f32 = 112.;
 
 fn page_horizontal_padding(narrow: bool) -> Pixels {
     if narrow { px(20.) } else { px(24.) }
-}
-
-fn volume_slider_state(value: f32) -> SliderState {
-    SliderState::new()
-        .min(0.)
-        .max(1.)
-        .step(0.01)
-        .default_value(value)
 }
 
 fn progress_fraction(position: Duration, duration: Duration) -> f32 {
@@ -139,7 +131,8 @@ pub struct LyruneView {
     settings_inputs: SettingsInputs,
     settings_scroll_handle: ScrollHandle,
     progress: Entity<PlaybackProgressView>,
-    volume_slider: Entity<SliderState>,
+    player_controls: Entity<PlayerControlsView>,
+    _player_subscription: Option<Subscription>,
     image_cache: Entity<CachedImageCache>,
     window_drag_pressed: bool,
 
@@ -277,7 +270,14 @@ impl LyruneView {
         let progress =
             cx.new(|cx| PlaybackProgressView::new(audio.clone(), fonts.monospace.clone(), cx));
         let lyrics_view = cx.new(|_| LyricsView::new(audio.clone(), fonts.lyrics.clone()));
-        let volume_slider = cx.new(|_| volume_slider_state(settings.volume));
+        let player_controls = cx.new(|cx| {
+            PlayerControlsView::new(
+                settings.volume,
+                settings.active_color_theme(cx.window_appearance()),
+                settings.playback_quality,
+                cx,
+            )
+        });
         let image_cache = CachedImageCache::new(settings.image_cache_capacity, cx);
         let subscriptions = vec![
             cx.subscribe_in(
@@ -356,16 +356,6 @@ impl LyruneView {
             cx.subscribe(&progress, |this, _, event: &SeekTo, cx| {
                 this.seek_to(event.0, cx);
             }),
-            cx.subscribe(
-                &volume_slider,
-                |this, _, event: &SliderEvent, cx| match event {
-                    SliderEvent::Change(value) => this.set_volume(value.end(), cx),
-                    SliderEvent::Release(value) => {
-                        this.set_volume(value.end(), cx);
-                        this.persist_settings();
-                    }
-                },
-            ),
         ];
 
         Self::listen_for_load_more(load_more_receiver, Self::load_playlist_page, cx);
@@ -415,7 +405,8 @@ impl LyruneView {
             settings_inputs,
             settings_scroll_handle: ScrollHandle::new(),
             progress,
-            volume_slider,
+            player_controls,
+            _player_subscription: None,
             image_cache,
             window_drag_pressed: false,
             playback: Playback::new(audio, playback_quality, pending_playback_restore),
@@ -515,6 +506,13 @@ impl LyruneView {
             }
             cx.notify();
         }));
+        self._player_subscription = Some(cx.subscribe_in(
+            &self.player_controls,
+            window,
+            |this, _, action: &PlayerAction, window, cx| {
+                this.handle_player_action(action, window, cx)
+            },
+        ));
         self.progress
             .update(cx, |view, cx| view.attach_window(window, cx));
     }
@@ -1057,7 +1055,7 @@ impl LyruneView {
                 .text_color(theme.foreground)
                 .child(div().flex_1().min_h_0())
                 .child(self.render_lyrics_layer(expansion_progress, window))
-                .child(self.render_player_bar(compact, narrow, window, cx))
+                .child(self.render_player_bar(window, cx))
                 .when(popover_open, |this| {
                     this.child(
                         deferred(
@@ -1297,7 +1295,7 @@ impl LyruneView {
                 ),
             )
             .child(self.render_lyrics_layer(expansion_progress, window))
-            .child(self.render_player_bar(compact, narrow, window, cx))
+            .child(self.render_player_bar(window, cx))
             .when(popover_open, |this| {
                 this.child(
                     deferred(

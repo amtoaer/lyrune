@@ -1,30 +1,155 @@
-//! 播放栏、进度预览和音质菜单。音频加载与控制动作在 playback。
+//! 歌曲信息、播放按钮与音量控件；进度条是同级视图，逐帧刷新不重建这里。
+
+use std::sync::Arc;
 
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Selectable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    slider::Slider,
+    slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
-use lyrune_api::SearchAlbum;
+use lyrune_api::{Quality, SearchAlbum, SearchArtist, Track};
 
 use super::lyrics_view::LYRIC_BACKGROUND_OVERLAY_OPACITY;
-use super::progress_view::ProgressInput;
+use super::progress_view::{PlaybackProgressView, ProgressInput};
 use super::queue::RepeatMode;
 use super::{LyruneView, PLAYER_BAR_HEIGHT};
+use crate::design::ColorTheme;
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
 use crate::player::AudioPlayer;
 
-impl LyruneView {
+#[derive(PartialEq)]
+pub(super) struct PlayerInput {
+    pub(super) liked: Option<bool>,
+    pub(super) active_quality: Quality,
+    pub(super) available_qualities: Vec<Quality>,
+    pub(super) loading: bool,
+    pub(super) show_pause: bool,
+    pub(super) queue_empty: bool,
+    pub(super) browsed_tracks_empty: bool,
+    pub(super) shuffle: bool,
+    pub(super) repeat_mode: RepeatMode,
+    pub(super) volume: f32,
+    pub(super) color_theme: ColorTheme,
+    pub(super) expanded: bool,
+    pub(super) quality_menu_open: bool,
+}
+
+pub(super) enum PlayerAction {
+    ToggleLyrics,
+    Album(SearchAlbum),
+    Artist(SearchArtist),
+    ToggleLike,
+    Shuffle,
+    Previous,
+    TogglePlayback,
+    Next,
+    Repeat,
+    ToggleMute,
+    Quality(Quality),
+    ToggleQuality,
+    Volume { value: f32, persist: bool },
+}
+
+pub(super) struct PlayerControlsView {
+    track: Option<Arc<Track>>,
+    input: PlayerInput,
+    volume_slider: Entity<SliderState>,
+    _subscription: Subscription,
+    #[cfg(test)]
+    render_count: usize,
+}
+
+impl EventEmitter<PlayerAction> for PlayerControlsView {}
+
+fn volume_slider_state(value: f32) -> SliderState {
+    SliderState::new()
+        .min(0.)
+        .max(1.)
+        .step(0.01)
+        .default_value(value)
+}
+
+impl PlayerControlsView {
+    pub(super) fn new(
+        volume: f32,
+        color_theme: ColorTheme,
+        quality: Quality,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let volume_slider = cx.new(|_| volume_slider_state(volume));
+        let subscription = cx.subscribe(&volume_slider, |_, _, event, cx| {
+            let (value, persist) = match event {
+                SliderEvent::Change(value) => (value.end(), false),
+                SliderEvent::Release(value) => (value.end(), true),
+            };
+            cx.emit(PlayerAction::Volume { value, persist });
+        });
+        Self {
+            track: None,
+            input: PlayerInput {
+                liked: None,
+                active_quality: quality,
+                available_qualities: Vec::new(),
+                loading: false,
+                show_pause: false,
+                queue_empty: true,
+                browsed_tracks_empty: true,
+                shuffle: false,
+                repeat_mode: RepeatMode::Off,
+                volume,
+                color_theme,
+                expanded: false,
+                quality_menu_open: false,
+            },
+            volume_slider,
+            _subscription: subscription,
+            #[cfg(test)]
+            render_count: 0,
+        }
+    }
+
+    pub(super) fn set_input(
+        &mut self,
+        track: Option<Arc<Track>>,
+        input: PlayerInput,
+        cx: &mut Context<Self>,
+    ) {
+        let same_track = match (&self.track, &track) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        };
+        if same_track && self.input == input {
+            return;
+        }
+        self.track = track;
+        self.input = input;
+        cx.notify();
+    }
+
+    pub(super) fn set_volume(&mut self, volume: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.volume_slider
+            .update(cx, |slider, cx| slider.set_value(volume, window, cx));
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn reset_volume(&mut self, volume: f32, cx: &mut Context<Self>) {
+        self.volume_slider.update(cx, |slider, cx| {
+            *slider = volume_slider_state(volume);
+            cx.notify();
+        });
+    }
+
     fn render_quality_selector(&mut self, has_track: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let active_quality = self.playback.active_quality;
+        let active_quality = self.input.active_quality;
         let active_label = active_quality.badge_label();
         let options = self
-            .playback
+            .input
             .available_qualities
             .iter()
             .rev()
@@ -37,7 +162,7 @@ impl LyruneView {
                     .h(px(44.))
                     .selected(quality == active_quality)
                     .on_click(
-                        cx.listener(move |this, _, _, cx| this.set_playback_quality(quality, cx)),
+                        cx.listener(move |_, _, _, cx| cx.emit(PlayerAction::Quality(quality))),
                     )
             })
             .collect::<Vec<_>>();
@@ -54,7 +179,7 @@ impl LyruneView {
                     .text_size(px(11.))
                     .rounded(px(7.))
                     .tooltip("切换音质")
-                    .when(self.playback.load.track.is_some(), |button| {
+                    .when(self.input.loading, |button| {
                         button
                             .bg(theme.input_background())
                             .border_color(theme.input)
@@ -62,16 +187,12 @@ impl LyruneView {
                     })
                     .disabled(
                         !has_track
-                            || self.playback.load.track.is_some()
-                            || self.playback.available_qualities.is_empty(),
+                            || self.input.loading
+                            || self.input.available_qualities.is_empty(),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.quality_menu_open = !this.quality_menu_open;
-                        this.account.menu_open = false;
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(PlayerAction::ToggleQuality))),
             )
-            .when(self.quality_menu_open, |this| {
+            .when(self.input.quality_menu_open, |this| {
                 this.child(
                     deferred(
                         v_flex()
@@ -103,60 +224,23 @@ impl LyruneView {
             })
             .into_any_element()
     }
+}
 
-    pub(super) fn render_player_bar(
-        &mut self,
-        compact: bool,
-        narrow: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let track = self
-            .playback
-            .queue
-            .as_ref()
-            .and_then(|queue| queue.tracks.get(self.playback.current_track?).cloned());
+impl Render for PlayerControlsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.render_count += 1;
+        }
+        let compact = window.viewport_size().width < px(1120.);
+        let narrow = window.viewport_size().width < px(900.);
+        let track = self.track.clone();
         let has_track = track.is_some();
         let quality_selector = self.render_quality_selector(has_track, cx);
-        let foreground = if self.cover_backdrop_expanded {
-            self.foreground_target(
-                cx.theme()
-                    .background
-                    .opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY),
-                cx.theme().foreground,
-                |cover| cover.sampled_rgb(narrow),
-                window,
-                cx,
-            )
-            .unwrap_or(cx.theme().foreground)
-        } else {
-            cx.theme().secondary_foreground
-        };
-        let input = ProgressInput {
-            duration: self.playback.duration(),
-            interactive: has_track && self.playback.started && self.playback.load.track.is_none(),
-            advancing: self.playback.is_advancing(),
-            frame_rate: self.settings.progress_frame_rate,
-            font: self.fonts.monospace.clone(),
-            foreground,
-        };
-        self.progress.update(cx, |progress, cx| {
-            progress.set_input(input, self.playback.position, window, cx);
-        });
-        let progress = self.progress.clone();
         let theme = cx.theme();
-        let is_playing = self
-            .playback
-            .audio
-            .as_deref()
-            .is_some_and(AudioPlayer::is_playing);
-        let loading = self.playback.load.track.is_some();
-        let show_pause = if loading {
-            self.playback.load.autoplay
-        } else {
-            is_playing
-        };
-        let palette = self.color_theme.palette();
+        let loading = self.input.loading;
+        let show_pause = self.input.show_pause;
+        let palette = self.input.color_theme.palette();
         let icon_foreground = palette.foreground;
         let icon_accent = palette.primary;
         let cover_size = if narrow { px(44.) } else { px(52.) };
@@ -188,7 +272,7 @@ impl LyruneView {
                         .items_center()
                         .justify_center()
                         .child(media_icon(
-                            if self.cover_backdrop_expanded {
+                            if self.input.expanded {
                                 MediaIcon::ChevronDown
                             } else {
                                 MediaIcon::ChevronUp
@@ -196,13 +280,7 @@ impl LyruneView {
                             "#ffffff",
                             px(24.),
                         ))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_cover_backdrop_expanded(
-                                !this.cover_backdrop_expanded,
-                                window,
-                                cx,
-                            );
-                        })),
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(PlayerAction::ToggleLyrics))),
                 )
                 .into_any_element(),
             None => div()
@@ -252,18 +330,12 @@ impl LyruneView {
                 let hover_color = theme.primary;
                 this.cursor_pointer()
                     .hover(move |style| style.text_color(hover_color))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.cover_backdrop_expanded {
-                            this.set_cover_backdrop_expanded(false, window, cx);
-                        }
-                        this.open_home_playlist(album.clone().into_playlist(), window, cx);
-                    }))
+                    .on_click(
+                        cx.listener(move |_, _, _, cx| cx.emit(PlayerAction::Album(album.clone()))),
+                    )
             })
             .child(title_text);
-        let liked = track
-            .as_ref()
-            .and_then(|track| self.liked_tracks.get(&track.mid))
-            .copied();
+        let liked = self.input.liked;
         let artists = match track.as_ref() {
             Some(track) if !track.artist_details.is_empty() => {
                 let mut links = Vec::with_capacity(track.artist_details.len() * 2 - 1);
@@ -286,11 +358,8 @@ impl LyruneView {
                             .cursor_pointer()
                             .text_color(theme.secondary_foreground)
                             .hover(move |style| style.text_color(hover_color))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if this.cover_backdrop_expanded {
-                                    this.set_cover_backdrop_expanded(false, window, cx);
-                                }
-                                this.open_search_artist(artist.clone(), window, cx);
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(PlayerAction::Artist(artist.clone()))
                             }))
                             .child(name)
                             .into_any_element(),
@@ -376,8 +445,8 @@ impl LyruneView {
                                             },
                                             px(18.),
                                         ))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.toggle_current_track_liked(cx)
+                                        .on_click(cx.listener(|_, _, _, cx| {
+                                            cx.emit(PlayerAction::ToggleLike)
                                         })),
                                 )
                             }),
@@ -405,18 +474,13 @@ impl LyruneView {
                                             .size(px(44.))
                                             .p_0()
                                             .tooltip("随机播放")
-                                            .toggled(self.playback.shuffle)
-                                            .selected(self.playback.shuffle)
-                                            .disabled(
-                                                self.playback
-                                                    .queue
-                                                    .as_ref()
-                                                    .is_none_or(|queue| queue.tracks.is_empty()),
-                                            )
+                                            .toggled(self.input.shuffle)
+                                            .selected(self.input.shuffle)
+                                            .disabled(self.input.queue_empty)
                                             .child(div().w(px(28.)).flex().justify_center().child(
                                                 media_icon(
                                                     MediaIcon::Shuffle,
-                                                    if self.playback.shuffle {
+                                                    if self.input.shuffle {
                                                         icon_accent
                                                     } else {
                                                         icon_foreground
@@ -424,14 +488,11 @@ impl LyruneView {
                                                     px(18.),
                                                 ),
                                             ))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.playback.shuffle = !this.playback.shuffle;
-                                                #[cfg(target_os = "linux")]
-                                                this.sync_mpris(false);
-                                                cx.notify();
+                                            .on_click(cx.listener(|_, _, _, cx| {
+                                                cx.emit(PlayerAction::Shuffle)
                                             })),
                                     )
-                                    .when(self.playback.shuffle, |this| {
+                                    .when(self.input.shuffle, |this| {
                                         this.child(
                                             div()
                                                 .absolute()
@@ -450,11 +511,13 @@ impl LyruneView {
                                     .size(px(44.))
                                     .p_0()
                                     .tooltip("上一首")
-                                    .disabled(self.playback.current_track.is_none())
+                                    .disabled(self.track.is_none())
                                     .child(div().w(px(28.)).flex().justify_center().child(
                                         media_icon(MediaIcon::SkipBack, icon_foreground, px(20.)),
                                     ))
-                                    .on_click(cx.listener(|this, _, _, cx| this.play_previous(cx))),
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(PlayerAction::Previous)),
+                                    ),
                             )
                             .child(
                                 Button::new("play-pause")
@@ -466,13 +529,8 @@ impl LyruneView {
                                     .when(loading, |button| button.bg(theme.button_primary))
                                     .disabled(
                                         loading
-                                            || (self.playback.current_track.is_none()
-                                                && self
-                                                    .track_table
-                                                    .read(cx)
-                                                    .delegate()
-                                                    .tracks()
-                                                    .is_empty()),
+                                            || (self.track.is_none()
+                                                && self.input.browsed_tracks_empty),
                                     )
                                     .child(media_icon(
                                         if show_pause {
@@ -480,12 +538,12 @@ impl LyruneView {
                                         } else {
                                             MediaIcon::Play
                                         },
-                                        self.color_theme.palette().primary_foreground,
+                                        self.input.color_theme.palette().primary_foreground,
                                         px(21.),
                                     ))
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.toggle_playback(cx)),
-                                    ),
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        cx.emit(PlayerAction::TogglePlayback)
+                                    })),
                             )
                             .child(
                                 Button::new("next")
@@ -494,7 +552,7 @@ impl LyruneView {
                                     .size(px(44.))
                                     .p_0()
                                     .tooltip("下一首")
-                                    .disabled(self.playback.current_track.is_none())
+                                    .disabled(self.track.is_none())
                                     .child(div().w(px(28.)).flex().justify_center().child(
                                         media_icon(
                                             MediaIcon::SkipForward,
@@ -503,7 +561,7 @@ impl LyruneView {
                                         ),
                                     ))
                                     .on_click(
-                                        cx.listener(|this, _, _, cx| this.play_next(false, cx)),
+                                        cx.listener(|_, _, _, cx| cx.emit(PlayerAction::Next)),
                                     ),
                             )
                             .child(
@@ -515,25 +573,18 @@ impl LyruneView {
                                             .rounded(px(999.))
                                             .size(px(44.))
                                             .p_0()
-                                            .tooltip(self.playback.repeat_mode.label())
-                                            .toggled(self.playback.repeat_mode != RepeatMode::Off)
-                                            .selected(self.playback.repeat_mode != RepeatMode::Off)
-                                            .disabled(
-                                                self.playback
-                                                    .queue
-                                                    .as_ref()
-                                                    .is_none_or(|queue| queue.tracks.is_empty()),
-                                            )
+                                            .tooltip(self.input.repeat_mode.label())
+                                            .toggled(self.input.repeat_mode != RepeatMode::Off)
+                                            .selected(self.input.repeat_mode != RepeatMode::Off)
+                                            .disabled(self.input.queue_empty)
                                             .child(div().w(px(28.)).flex().justify_center().child(
                                                 media_icon(
-                                                    if self.playback.repeat_mode == RepeatMode::One
-                                                    {
+                                                    if self.input.repeat_mode == RepeatMode::One {
                                                         MediaIcon::RepeatOne
                                                     } else {
                                                         MediaIcon::Repeat
                                                     },
-                                                    if self.playback.repeat_mode != RepeatMode::Off
-                                                    {
+                                                    if self.input.repeat_mode != RepeatMode::Off {
                                                         icon_accent
                                                     } else {
                                                         icon_foreground
@@ -541,15 +592,11 @@ impl LyruneView {
                                                     px(18.),
                                                 ),
                                             ))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.playback.repeat_mode =
-                                                    this.playback.repeat_mode.next();
-                                                #[cfg(target_os = "linux")]
-                                                this.sync_mpris(false);
-                                                cx.notify();
+                                            .on_click(cx.listener(|_, _, _, cx| {
+                                                cx.emit(PlayerAction::Repeat)
                                             })),
                                     )
-                                    .when(self.playback.repeat_mode != RepeatMode::Off, |this| {
+                                    .when(self.input.repeat_mode != RepeatMode::Off, |this| {
                                         this.child(
                                             div()
                                                 .absolute()
@@ -576,13 +623,13 @@ impl LyruneView {
                                 .rounded(px(999.))
                                 .size(px(44.))
                                 .p_0()
-                                .tooltip(if self.settings.volume > 0. {
+                                .tooltip(if self.input.volume > 0. {
                                     "静音"
                                 } else {
                                     "取消静音"
                                 })
                                 .child(div().w(px(28.)).flex().justify_center().child(media_icon(
-                                    if self.settings.volume > 0. {
+                                    if self.input.volume > 0. {
                                         MediaIcon::Volume
                                     } else {
                                         MediaIcon::VolumeMuted
@@ -591,7 +638,7 @@ impl LyruneView {
                                     px(19.),
                                 )))
                                 .on_click(
-                                    cx.listener(|this, _, window, cx| this.toggle_mute(window, cx)),
+                                    cx.listener(|_, _, _, cx| cx.emit(PlayerAction::ToggleMute)),
                                 ),
                         )
                         .child(Slider::new(&self.volume_slider).w(if compact {
@@ -602,14 +649,211 @@ impl LyruneView {
                 )
             });
 
-        div()
-            .relative()
-            .h(px(PLAYER_BAR_HEIGHT))
-            .w_full()
-            .flex_shrink_0()
-            .bg(theme.group_box)
-            .child(progress)
-            .child(content)
-            .into_any_element()
+        content.into_any_element()
+    }
+}
+
+impl LyruneView {
+    pub(super) fn handle_player_action(
+        &mut self,
+        action: &PlayerAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            PlayerAction::ToggleLyrics => {
+                self.set_cover_backdrop_expanded(!self.cover_backdrop_expanded, window, cx)
+            }
+            PlayerAction::Album(album) => {
+                if self.cover_backdrop_expanded {
+                    self.set_cover_backdrop_expanded(false, window, cx);
+                }
+                self.open_home_playlist(album.clone().into_playlist(), window, cx);
+            }
+            PlayerAction::Artist(artist) => {
+                if self.cover_backdrop_expanded {
+                    self.set_cover_backdrop_expanded(false, window, cx);
+                }
+                self.open_search_artist(artist.clone(), window, cx);
+            }
+            PlayerAction::ToggleLike => self.toggle_current_track_liked(cx),
+            PlayerAction::Shuffle => {
+                self.playback.shuffle = !self.playback.shuffle;
+                #[cfg(target_os = "linux")]
+                self.sync_mpris(false);
+                cx.notify();
+            }
+            PlayerAction::Previous => self.play_previous(cx),
+            PlayerAction::TogglePlayback => self.toggle_playback(cx),
+            PlayerAction::Next => self.play_next(false, cx),
+            PlayerAction::Repeat => {
+                self.playback.repeat_mode = self.playback.repeat_mode.next();
+                #[cfg(target_os = "linux")]
+                self.sync_mpris(false);
+                cx.notify();
+            }
+            PlayerAction::ToggleMute => self.toggle_mute(window, cx),
+            PlayerAction::Quality(quality) => self.set_playback_quality(*quality, cx),
+            PlayerAction::ToggleQuality => {
+                self.quality_menu_open = !self.quality_menu_open;
+                self.account.menu_open = false;
+                cx.notify();
+            }
+            PlayerAction::Volume { value, persist } => {
+                self.set_volume(*value, cx);
+                if *persist {
+                    self.persist_settings();
+                }
+            }
+        }
+    }
+
+    pub(super) fn render_player_bar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let narrow = window.viewport_size().width < px(900.);
+        let track = self
+            .playback
+            .queue
+            .as_ref()
+            .and_then(|queue| queue.tracks.get(self.playback.current_track?).cloned());
+        let has_track = track.is_some();
+        let foreground = if self.cover_backdrop_expanded {
+            self.foreground_target(
+                cx.theme()
+                    .background
+                    .opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY),
+                cx.theme().foreground,
+                |cover| cover.sampled_rgb(narrow),
+                window,
+                cx,
+            )
+            .unwrap_or(cx.theme().foreground)
+        } else {
+            cx.theme().secondary_foreground
+        };
+        let input = ProgressInput {
+            duration: self.playback.duration(),
+            interactive: has_track && self.playback.started && self.playback.load.track.is_none(),
+            advancing: self.playback.is_advancing(),
+            frame_rate: self.settings.progress_frame_rate,
+            font: self.fonts.monospace.clone(),
+            foreground,
+        };
+        self.progress.update(cx, |progress, cx| {
+            progress.set_input(input, self.playback.position, window, cx);
+        });
+
+        let input = PlayerInput {
+            liked: track
+                .as_ref()
+                .and_then(|track| self.liked_tracks.get(&track.mid))
+                .copied(),
+            active_quality: self.playback.active_quality,
+            available_qualities: self.playback.available_qualities.clone(),
+            loading: self.playback.load.track.is_some(),
+            show_pause: if self.playback.load.track.is_some() {
+                self.playback.load.autoplay
+            } else {
+                self.playback
+                    .audio
+                    .as_deref()
+                    .is_some_and(AudioPlayer::is_playing)
+            },
+            queue_empty: self
+                .playback
+                .queue
+                .as_ref()
+                .is_none_or(|queue| queue.tracks.is_empty()),
+            browsed_tracks_empty: self.track_table.read(cx).delegate().tracks().is_empty(),
+            shuffle: self.playback.shuffle,
+            repeat_mode: self.playback.repeat_mode,
+            volume: self.settings.volume,
+            color_theme: self.color_theme,
+            expanded: self.cover_backdrop_expanded,
+            quality_menu_open: self.quality_menu_open,
+        };
+        self.player_controls
+            .update(cx, |view, cx| view.set_input(track, input, cx));
+        player_bar(&self.progress, &self.player_controls, cx.theme().group_box)
+    }
+}
+
+// 组合边界保持集中，便于用实际 GPUI 布局验证独立刷新不会穿透到控制区。
+fn player_bar(
+    progress: &Entity<PlaybackProgressView>,
+    controls: &Entity<PlayerControlsView>,
+    background: Hsla,
+) -> AnyElement {
+    div()
+        .relative()
+        .h(px(PLAYER_BAR_HEIGHT))
+        .w_full()
+        .flex_shrink_0()
+        .bg(background)
+        .child(progress.clone())
+        // 进度条与控制区为同级边界；若缓存共同父视图，进度变脏会连带刷新整个子树。
+        .child(
+            controls
+                .clone()
+                .cached(StyleRefinement::default().size_full()),
+        )
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, Render, TestAppContext, Window, font,
+    };
+    use gpui_component::ActiveTheme as _;
+    use lyrune_api::Quality;
+
+    use super::{PlayerControlsView, player_bar};
+    use crate::app::progress_view::PlaybackProgressView;
+    use crate::design::ColorTheme;
+
+    struct TestPlayerBar {
+        progress: Entity<PlaybackProgressView>,
+        controls: Entity<PlayerControlsView>,
+    }
+
+    impl Render for TestPlayerBar {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            player_bar(&self.progress, &self.controls, cx.theme().group_box)
+        }
+    }
+
+    #[gpui::test]
+    fn test_progress_keeps_controls_cached(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let progress = cx.new(|cx| PlaybackProgressView::new(None, font(".SystemUIFont"), cx));
+        let controls = cx
+            .new(|cx| PlayerControlsView::new(0.5, ColorTheme::default(), Quality::default(), cx));
+        let (_, cx) = cx.add_window_view(|_, _| TestPlayerBar {
+            progress: progress.clone(),
+            controls: controls.clone(),
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let before = controls.read_with(cx, |view, _| view.render_count);
+        assert!(before > 0);
+        for _ in 0..3 {
+            progress.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(controls.read_with(cx, |view, _| view.render_count), before);
+
+        controls.update(cx, |view, cx| {
+            view.input.quality_menu_open = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            controls.read_with(cx, |view, _| view.render_count),
+            before + 1
+        );
     }
 }

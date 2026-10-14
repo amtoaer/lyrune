@@ -14,7 +14,6 @@ use super::LyruneView;
 #[cfg(target_os = "linux")]
 use super::queue::RepeatMode;
 #[cfg(target_os = "linux")]
-use super::volume_slider_state;
 #[cfg(target_os = "linux")]
 use crate::inhibit::InhibitHandle;
 #[cfg(target_os = "linux")]
@@ -132,10 +131,8 @@ impl LyruneView {
             }
             MprisCommand::SetVolume(volume) => {
                 let volume = volume.clamp(0., 1.) as f32;
-                self.volume_slider.update(cx, |slider, cx| {
-                    *slider = volume_slider_state(volume);
-                    cx.notify();
-                });
+                self.player_controls
+                    .update(cx, |view, cx| view.reset_volume(volume, cx));
                 self.set_volume(volume, cx);
                 self.persist_settings();
             }

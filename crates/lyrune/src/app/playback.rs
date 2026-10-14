@@ -749,9 +749,8 @@ impl LyruneView {
         } else {
             self.settings.last_nonzero_volume
         };
-        self.volume_slider.update(cx, |slider, cx| {
-            slider.set_value(volume, window, cx);
-        });
+        self.player_controls
+            .update(cx, |view, cx| view.set_volume(volume, window, cx));
         self.set_volume(volume, cx);
         self.persist_settings();
     }

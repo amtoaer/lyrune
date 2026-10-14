@@ -255,7 +255,7 @@ impl Render for NavigationView {
                     .when(client_decorations, |this| {
                         this.flex_1().min_w_0().max_w(search_width)
                     })
-                    .on_mouse_down_out(|_, window, _| window.blur())
+                    .on_mouse_down_out(|_, window, cx| window.blur(cx))
                     .child(
                         Input::new(&self.search_input)
                             .large()

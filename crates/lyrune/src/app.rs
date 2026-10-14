@@ -30,10 +30,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gpui::{prelude::*, *};
 use gpui_base::motion::{Transition, transition};
 use gpui_component::{
-    ActiveTheme as _, Root, Theme, WindowExt as _,
+    ActiveTheme as _, Theme,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_flex,
-    notification::Notification,
+    notification::{Notification, NotificationList},
     v_flex,
 };
 use lyrune_api::ProtocolClient;
@@ -98,6 +98,7 @@ pub struct LyruneView {
     progress: Entity<PlaybackProgressView>,
     player_controls: Entity<PlayerControlsView>,
     image_cache: Entity<CachedImageCache>,
+    notifications: Entity<NotificationList>,
 
     pub(crate) playback: Entity<Playback>,
     protocol_client: Option<ProtocolClient>,
@@ -243,6 +244,7 @@ impl LyruneView {
             progress,
             player_controls,
             image_cache,
+            notifications: cx.new(|cx| NotificationList::new(window, cx)),
             playback,
             protocol_client,
             quality_menu_open: false,
@@ -284,6 +286,9 @@ impl LyruneView {
 
     pub(crate) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.set_window_title("Lyrune");
+        if self.window_handle != window.window_handle() {
+            self.notifications = cx.new(|cx| NotificationList::new(window, cx));
+        }
         self.window_handle = window.window_handle();
         self.browser
             .update(cx, |browser, cx| browser.attach_window(window, cx));
@@ -467,9 +472,10 @@ impl LyruneView {
             .rounded(px(9.))
             .py_3();
         let window_handle = self.window_handle;
+        let notifications = self.notifications.clone();
         cx.defer(move |cx| {
             let _ = window_handle.update(cx, |_, window, cx| {
-                window.push_notification(notification, cx);
+                notifications.update(cx, |list, cx| list.push(notification, window, cx));
             });
         });
     }
@@ -852,15 +858,13 @@ impl Render for LyruneView {
 
         let expansion_progress = self.lyrics_expansion_progress(window, cx);
         self.sync_lyrics_view(expansion_progress, cx);
-        let notification_list = Root::read(window, cx).notification.clone();
+        // 自己持有通知列表，使其继续位于歌词之上、延后绘制的菜单之下。
         let notification_layer = div()
             .absolute()
-            .left_0()
-            .right_0()
-            .bottom(px(PLAYER_BAR_HEIGHT + 16.))
-            .flex()
-            .justify_center()
-            .child(div().relative().left(px(-42.)).child(notification_list));
+            .top_0()
+            .left(px(-42.))
+            .size_full()
+            .child(self.notifications.clone());
         if self.account.read(cx).state == AccountState::SignedIn {
             div()
                 .relative()

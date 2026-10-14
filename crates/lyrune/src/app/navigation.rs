@@ -823,7 +823,7 @@ impl BrowserView {
         if query.is_empty() {
             return;
         }
-        window.blur();
+        window.blur(cx);
         let resource = self
             .page_resource_cache
             .search(self.account.read(cx).id().unwrap_or(0), &query);

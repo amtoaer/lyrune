@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use directories::ProjectDirs;
-use futures_util::{AsyncReadExt as _, FutureExt as _, future::BoxFuture};
+use futures_util::{AsyncReadExt as _, future::BoxFuture};
 use gpui::http_client::{self, AsyncBody, HttpClient, Request, Response, Url};
 use gpui::{
     App, AppContext as _, Asset, Entity, Image, ImageCache, ImageCacheError, ImageCacheItem,
-    ImageFormat, ImageSource, ImgResourceLoader, Pixels, RenderImage, Resource, Window, hash,
+    ImageFormat, ImageSource, Pixels, RenderImage, Resource, Window, hash,
 };
 use image::imageops::FilterType;
 use lru::LruCache;
@@ -160,7 +160,7 @@ impl CachedImageCache {
             items: LruCache::new(capacity),
         });
         cx.observe_release(&cache, |cache, cx| {
-            while let Some((_, mut item)) = cache.items.pop_lru() {
+            while let Some((_, item)) = cache.items.pop_lru() {
                 if let Some(Ok(image)) = item.get() {
                     cx.drop_image(image, None);
                 }
@@ -180,7 +180,7 @@ impl CachedImageCache {
     }
 
     fn evict_oldest(&mut self, window: &mut Window, cx: &mut App) {
-        let (_, mut item) = self.items.pop_lru().expect("非空图片缓存应包含最旧条目");
+        let (_, item) = self.items.pop_lru().expect("非空图片缓存应包含最旧条目");
         if let Some(Ok(image)) = item.get() {
             cx.drop_image(image, Some(window));
         }
@@ -196,7 +196,7 @@ impl ImageCache for CachedImageCache {
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         let key = hash(resource);
         if let Some(item) = self.items.get_mut(&key) {
-            return item.get();
+            return item.use_image(window);
         }
 
         let source = match resource {
@@ -223,23 +223,14 @@ impl ImageCache for CachedImageCache {
             }
             _ => resource.clone(),
         };
-        let future = ImgResourceLoader::load(source, cx);
-        let task = cx.background_executor().spawn(future).shared();
-
         // 插入前释放旧图片，避免 put 自动淘汰时跳过 GPU 资源清理。
         if self.items.len() >= self.items.cap().get() {
             self.evict_oldest(window, cx);
         }
-        self.items.put(key, ImageCacheItem::Loading(task.clone()));
-
-        let entity = window.current_view();
-        window
-            .spawn(cx, async move |cx| {
-                _ = task.await;
-                cx.on_next_frame(move |_, cx| cx.notify(entity));
-            })
-            .detach();
-        None
+        let item = ImageCacheItem::new(&source, cx);
+        let image = item.use_image(window);
+        self.items.put(key, item);
+        image
     }
 }
 

@@ -1321,6 +1321,19 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(page.read_with(cx, |page, _| page.render_count) > before);
 
+        page.update(cx, |page, cx| {
+            page.settings_scroll_handle
+                .set_offset(gpui::point(px(0.), px(-650.)));
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let scrolled = page.read_with(cx, |page, _| page.render_count);
+        for _ in 0..3 {
+            host.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(page.read_with(cx, |page, _| page.render_count), scrolled);
+
         let events = Rc::new(Cell::new(0));
         let received = events.clone();
         let _subscription = cx.update(|_, cx| {

@@ -14,7 +14,9 @@ use super::animation::frame_is_due;
 #[cfg(test)]
 use super::lyrics;
 use super::lyrics::{LyricLine, ParsedLyrics};
-use crate::http::{BlurredCover, blurred_cover, blurred_image_source, cached_image_source};
+use crate::http::{
+    BLURRED_COVER_SIZE, BlurredCover, blurred_cover, blurred_image_source, cached_image_source,
+};
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::player::AudioPlayer;
 use crate::settings::FrameRate;
@@ -1663,6 +1665,10 @@ impl LyricsView {
                 };
                 let collapse_top = if client_decorations { px(18.) } else { px(24.) };
                 let collapse_left = if client_decorations { px(16.) } else { px(24.) };
+                // 放大后裁掉至少一个源像素，避免线性采样混入纹理外的透明像素。
+                // 外扩会同时增大图片宽度，分母扣除两侧各一个源像素。
+                let backdrop_padding =
+                    px((viewport_width / (BLURRED_COVER_SIZE - 2) as f32).ceil());
                 let backdrop_images = div()
                     .absolute()
                     .inset_0()
@@ -1671,10 +1677,10 @@ impl LyricsView {
                         images.child(
                             div()
                                 .absolute()
-                                .top(-px(3.))
-                                .right(-px(3.))
-                                .bottom(-px(3.))
-                                .left(-px(3.))
+                                .top(-backdrop_padding)
+                                .right(-backdrop_padding)
+                                .bottom(-backdrop_padding)
+                                .left(-backdrop_padding)
                                 .opacity(previous_backdrop_opacity)
                                 .child(
                                     img(blurred_image_source(previous_url))
@@ -1686,10 +1692,10 @@ impl LyricsView {
                     .child(
                         div()
                             .absolute()
-                            .top(-px(3.))
-                            .right(-px(3.))
-                            .bottom(-px(3.))
-                            .left(-px(3.))
+                            .top(-backdrop_padding)
+                            .right(-backdrop_padding)
+                            .bottom(-backdrop_padding)
+                            .left(-backdrop_padding)
                             .opacity(current_backdrop_opacity)
                             .child(
                                 img(blurred_image_source(current_backdrop_url))

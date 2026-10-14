@@ -21,6 +21,7 @@ use crate::runtime::RUNTIME;
 const IMAGE_CACHE_DIR: &str = "images-v1";
 const THUMBNAIL_CACHE_DIR: &str = "thumbnails-v1";
 const MAX_SATURATION_COMPRESSION: f32 = 0.35;
+pub(crate) const BLURRED_COVER_SIZE: u32 = 128;
 
 #[derive(Clone)]
 enum CachedImageFile {}
@@ -301,7 +302,7 @@ fn generate_blurred_cover(path: &Path) -> anyhow::Result<Arc<BlurredCover>> {
         .context("无法解码待模糊的封面")?;
     let blurred = compress_high_saturation(
         image
-            .resize_to_fill(128, 128, FilterType::Triangle)
+            .resize_to_fill(BLURRED_COVER_SIZE, BLURRED_COVER_SIZE, FilterType::Triangle)
             .blur(10.),
     );
     let wide_lyrics_rgb = sample_lyrics_region(&blurred, false);

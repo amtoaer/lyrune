@@ -889,17 +889,20 @@ fn queue_append_preserves_order_and_existing_tracks() {
     };
     let mut duplicate = track("B");
     duplicate.title = "different metadata".to_owned();
+    let mut repeated_new = track("C");
+    repeated_new.title = "later duplicate".to_owned();
 
     let first_added = queue.append_tracks([
         Arc::new(duplicate),
         Arc::new(track("C")),
-        Arc::new(track("C")),
+        Arc::new(repeated_new),
         Arc::new(track("D")),
     ]);
 
     assert_eq!(first_added, Some(2));
     assert_eq!(mids(&queue.tracks), ["A", "B", "C", "D"]);
     assert_eq!(queue.tracks[1].title, "B");
+    assert_eq!(queue.tracks[2].title, "C");
     assert_eq!(
         canonical_queue_track_index(&queue, &UserPlaylistId::Liked, "D"),
         Some(3)
@@ -907,6 +910,7 @@ fn queue_append_preserves_order_and_existing_tracks() {
 
     // 重复批次没有续播起点，也不能改变已有歌曲的顺序。
     assert_eq!(queue.append_tracks([Arc::new(track("C"))]), None);
+    assert_eq!(queue.append_tracks([]), None);
     assert_eq!(mids(&queue.tracks), ["A", "B", "C", "D"]);
 }
 

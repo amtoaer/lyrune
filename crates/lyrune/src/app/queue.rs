@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use gpui::Context;
+use hashbrown::HashSet;
 use lyrune_api::{RecommendationKind, Track, UserPlaylist, UserPlaylistId};
 
 use super::LyruneView;
@@ -93,12 +94,24 @@ impl PlaybackQueue {
         &mut self,
         tracks: impl IntoIterator<Item = Arc<Track>>,
     ) -> Option<usize> {
-        let first_added = self.tracks.len();
-        for track in tracks {
-            if !self.tracks.iter().any(|item| item.mid == track.mid) {
-                self.tracks.push(track);
-            }
+        let tracks = tracks.into_iter().collect::<Vec<_>>();
+        if tracks.is_empty() {
+            return None;
         }
+        let first_added = self.tracks.len();
+        // 集合借用两批歌曲的 mid；先完成筛选、结束借用，再扩展队列。
+        let pending = {
+            let mut seen = HashSet::with_capacity(first_added + tracks.len());
+            seen.extend(self.tracks.iter().map(|track| track.mid.as_str()));
+            let mut pending = Vec::with_capacity(tracks.len());
+            for track in &tracks {
+                if seen.insert(track.mid.as_str()) {
+                    pending.push(Arc::clone(track));
+                }
+            }
+            pending
+        };
+        self.tracks.extend(pending);
         (self.tracks.len() > first_added).then_some(first_added)
     }
 }

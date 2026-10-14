@@ -1,5 +1,5 @@
-//! 播放状态与窗口进度、持久化、MPRIS 和休眠抑制的同步。
-//! 两个 tick 的寿命不同：窗口关闭后，后台 tick 仍需处理曲终续播和进度保存。
+//! 播放状态与持久化、MPRIS 和休眠抑制的同步。
+//! 后台 tick 属于应用；窗口关闭后仍处理曲终续播和进度保存。
 
 use std::time::{Duration, Instant};
 
@@ -7,14 +7,14 @@ use futures_util::{
     future::{Either, select},
     pin_mut,
 };
-use gpui::{Context, Window};
+use gpui::Context;
 use tokio::sync::mpsc;
 
+use super::LyruneView;
 #[cfg(target_os = "linux")]
 use super::queue::RepeatMode;
 #[cfg(target_os = "linux")]
 use super::volume_slider_state;
-use super::{LyruneView, progress_fraction};
 #[cfg(target_os = "linux")]
 use crate::inhibit::InhibitHandle;
 #[cfg(target_os = "linux")]
@@ -44,48 +44,6 @@ pub(super) fn mpris_track_id(track_mid: &str) -> String {
 }
 
 impl LyruneView {
-    // spawn_in 绑定窗口；attach_window 在重新打开窗口时重新建立这条同步链。
-    pub(super) fn start_window_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (wake_sender, mut wake_receiver) = mpsc::channel(1);
-        self.window_tick_wake = Some(wake_sender);
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let playback_advancing =
-                    match this.read_with(cx, |this, _| this.playback.is_advancing()) {
-                        Ok(playback_advancing) => playback_advancing,
-                        Err(_) => break,
-                    };
-                if !playback_advancing {
-                    if this
-                        .update_in(cx, |this, window, cx| this.sync_progress_slider(window, cx))
-                        .is_err()
-                        || wake_receiver.recv().await.is_none()
-                    {
-                        break;
-                    }
-                    continue;
-                }
-
-                let timer = cx.background_executor().timer(PROGRESS_TICK);
-                let wake = wake_receiver.recv();
-                pin_mut!(timer, wake);
-                match select(timer, wake).await {
-                    Either::Left(_) => {
-                        if this
-                            .update_in(cx, |this, window, cx| this.sync_progress_slider(window, cx))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Either::Right((Some(()), _)) => {}
-                    Either::Right((None, _)) => break,
-                }
-            }
-        })
-        .detach();
-    }
-
     // 绑定应用实体而非窗口。暂停时等待唤醒，不靠不断轮询维持后台播放。
     pub(crate) fn start_background_tick(&mut self, cx: &mut Context<Self>) {
         let (wake_sender, mut wake_receiver) = mpsc::channel(1);
@@ -126,10 +84,7 @@ impl LyruneView {
         .detach();
     }
 
-    pub(super) fn wake_playback_ticks(&self) {
-        if let Some(wake) = &self.window_tick_wake {
-            let _ = wake.try_send(());
-        }
+    pub(super) fn wake_playback_tick(&self) {
         if let Some(wake) = &self.background_tick_wake {
             let _ = wake.try_send(());
         }
@@ -199,7 +154,7 @@ impl LyruneView {
         } else if self
             .playback
             .audio
-            .as_ref()
+            .as_deref()
             .is_some_and(AudioPlayer::is_playing)
         {
             MprisPlaybackStatus::Playing
@@ -289,16 +244,7 @@ impl LyruneView {
         }
     }
 
-    pub(super) fn sync_progress_slider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let progress = self.playback.duration().map_or(0., |duration| {
-            progress_fraction(self.playback.position, duration)
-        });
-        self.progress
-            .update(cx, |view, cx| view.sync_slider(progress, window, cx));
-    }
-
     fn tick(&mut self, cx: &mut Context<Self>) {
-        let previous_position = self.playback.position;
         if self.progress.read(cx).seek_preview.is_none()
             && self.playback.load.track.is_none()
             && self.playback.started
@@ -306,7 +252,7 @@ impl LyruneView {
             self.playback.position = self
                 .playback
                 .audio
-                .as_ref()
+                .as_deref()
                 .map(AudioPlayer::position)
                 .unwrap_or_default();
         }
@@ -316,7 +262,7 @@ impl LyruneView {
             && self
                 .playback
                 .audio
-                .as_ref()
+                .as_deref()
                 .is_some_and(AudioPlayer::is_empty);
         if ended {
             self.playback.started = false;
@@ -334,10 +280,6 @@ impl LyruneView {
         {
             self.sync_mpris_position();
             self.last_mpris_position_sync = Instant::now();
-        }
-
-        if self.playback.position != previous_position && self.progress.read(cx).hovered {
-            cx.notify();
         }
     }
 }

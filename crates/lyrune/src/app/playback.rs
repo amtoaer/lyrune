@@ -13,14 +13,14 @@ use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::runtime::RUNTIME;
 use crate::settings::{PersistedPlayback, PersistedQueueContinuation};
 
+use super::LyruneView;
 #[cfg(target_os = "linux")]
 use super::playback_sync::{duration_micros, mpris_track_id};
 use super::queue::{PlaybackQueue, RepeatMode};
-use super::{LyruneView, progress_fraction};
 
 // 播放会话独立于当前浏览页和窗口控件；关闭窗口后仍由应用实体持有。
 pub(super) struct Playback {
-    pub(super) audio: Option<AudioPlayer>,
+    pub(super) audio: Option<Arc<AudioPlayer>>,
     pub(super) queue: Option<PlaybackQueue>,
     pub(super) queue_generation: u64,
     // loading 可在当前歌曲播放时预取；waiting 表示已到队尾，结果到达后需要续播。
@@ -44,7 +44,7 @@ pub(super) struct Playback {
 
 impl Playback {
     pub(super) fn new(
-        audio: Option<AudioPlayer>,
+        audio: Option<Arc<AudioPlayer>>,
         quality: Quality,
         pending_restore: Option<PersistedPlayback>,
     ) -> Self {
@@ -93,7 +93,7 @@ impl Playback {
     pub(super) fn is_advancing(&self) -> bool {
         self.started
             && self.load.track.is_none()
-            && self.audio.as_ref().is_some_and(AudioPlayer::is_playing)
+            && self.audio.as_deref().is_some_and(AudioPlayer::is_playing)
     }
 
     pub(super) fn snapshot(&mut self, account_id: u64) -> Option<PersistedPlayback> {
@@ -104,7 +104,7 @@ impl Playback {
             self.position
         } else {
             self.audio
-                .as_ref()
+                .as_deref()
                 .map(AudioPlayer::position)
                 .unwrap_or(self.position)
         };
@@ -337,11 +337,11 @@ impl LyruneView {
         self.ensure_track_like_state(track.mid.clone(), cx);
         self.playback.load.autoplay = autoplay;
         self.playback.started = false;
-        self.wake_playback_ticks();
+        self.wake_playback_tick();
         self.playback.position = resume_at;
-        let progress = progress_fraction(resume_at, Duration::from_secs(track.duration_seconds));
-        self.progress
-            .update(cx, |view, cx| view.start_track(progress, cx));
+        self.progress.update(cx, |view, cx| {
+            view.start_track(resume_at, Duration::from_secs(track.duration_seconds), cx);
+        });
         self.playback.waiting_for_recommendation = false;
         self.persist_current_playback();
         self.sync_table_playback_state(cx);
@@ -420,7 +420,7 @@ impl LyruneView {
                                         audio.set_volume(this.settings.volume);
                                     }
                                     this.playback.started = true;
-                                    this.wake_playback_ticks();
+                                    this.wake_playback_tick();
                                 }
                                 Err(error) => {
                                     this.notify_error(error, cx);
@@ -463,7 +463,7 @@ impl LyruneView {
             return;
         }
         audio.toggle();
-        self.wake_playback_ticks();
+        self.wake_playback_tick();
         self.persist_current_playback();
         self.sync_table_playback_state(cx);
         #[cfg(target_os = "linux")]
@@ -500,7 +500,7 @@ impl LyruneView {
             && self
                 .playback
                 .audio
-                .as_ref()
+                .as_deref()
                 .is_some_and(AudioPlayer::is_playing)
         {
             self.toggle_playback(cx);
@@ -518,7 +518,7 @@ impl LyruneView {
         }
         self.playback.load.clear();
         self.playback.started = false;
-        self.wake_playback_ticks();
+        self.wake_playback_tick();
         self.playback.position = Duration::ZERO;
         self.progress.update(cx, |view, cx| view.stop(cx));
         self.persist_current_playback();
@@ -539,7 +539,7 @@ impl LyruneView {
         let autoplay = self
             .playback
             .audio
-            .as_ref()
+            .as_deref()
             .is_some_and(AudioPlayer::is_playing);
         self.start_playback(
             index,
@@ -565,7 +565,7 @@ impl LyruneView {
         let position = self
             .playback
             .audio
-            .as_ref()
+            .as_deref()
             .map(AudioPlayer::position)
             .unwrap_or(self.playback.position);
         let target_micros = duration_micros(position) as i128 + offset_micros as i128;
@@ -663,7 +663,7 @@ impl LyruneView {
         }
 
         self.playback.started = false;
-        self.wake_playback_ticks();
+        self.wake_playback_tick();
         if can_extend {
             self.playback.waiting_for_recommendation = true;
             self.maybe_load_queue_recommendations(true, cx);
@@ -727,7 +727,7 @@ impl LyruneView {
         } else {
             self.playback
                 .audio
-                .as_ref()
+                .as_deref()
                 .is_some_and(AudioPlayer::is_playing)
         };
         let resume_at = if loading {
@@ -735,7 +735,7 @@ impl LyruneView {
         } else {
             self.playback
                 .audio
-                .as_ref()
+                .as_deref()
                 .map(AudioPlayer::position)
                 .unwrap_or(self.playback.position)
         };

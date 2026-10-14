@@ -3,6 +3,7 @@
 //! 阅读顺序和跨模块约束见 docs/architecture.md。
 
 mod account;
+mod animation;
 mod artist;
 mod home;
 mod lyrics;
@@ -22,6 +23,7 @@ mod settings;
 mod tests;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{prelude::*, *};
@@ -179,7 +181,6 @@ pub struct LyruneView {
     _subscriptions: Vec<Subscription>,
     _window_subscription: Option<Subscription>,
     _appearance_subscription: Option<Subscription>,
-    window_tick_wake: Option<mpsc::Sender<()>>,
     background_tick_wake: Option<mpsc::Sender<()>>,
     lyric_animation_frame_pending: bool,
     next_lyric_highlight_frame: Option<Instant>,
@@ -203,7 +204,7 @@ impl LyruneView {
         let audio = match AudioPlayer::new() {
             Ok(player) => {
                 player.set_volume(settings.volume);
-                Some(player)
+                Some(Arc::new(player))
             }
             Err(error) => {
                 initial_errors.push(format!(
@@ -284,7 +285,8 @@ impl LyruneView {
             .searchable(false)
             .selectable(false)
         });
-        let progress = cx.new(|cx| PlaybackProgressView::new(fonts.monospace.clone(), cx));
+        let progress =
+            cx.new(|cx| PlaybackProgressView::new(audio.clone(), fonts.monospace.clone(), cx));
         let volume_slider = cx.new(|_| volume_slider_state(settings.volume));
         let image_cache = CachedImageCache::new(settings.image_cache_capacity, cx);
         let subscriptions = vec![
@@ -459,7 +461,6 @@ impl LyruneView {
             _subscriptions: subscriptions,
             _window_subscription: None,
             _appearance_subscription: None,
-            window_tick_wake: None,
             background_tick_wake: None,
             lyric_animation_frame_pending: false,
             next_lyric_highlight_frame: None,
@@ -529,8 +530,8 @@ impl LyruneView {
             }
             cx.notify();
         }));
-        self.sync_progress_slider(window, cx);
-        self.start_window_tick(window, cx);
+        self.progress
+            .update(cx, |view, cx| view.attach_window(window, cx));
     }
 
     fn notify_error(&self, message: impl Into<String>, cx: &mut Context<Self>) {
@@ -915,7 +916,7 @@ impl LyruneView {
                 self.playback.position = self
                     .playback
                     .audio
-                    .as_ref()
+                    .as_deref()
                     .map(AudioPlayer::position)
                     .unwrap_or_default();
             }

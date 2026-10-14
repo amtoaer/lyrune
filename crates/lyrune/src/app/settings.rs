@@ -16,7 +16,7 @@ use super::{LyricLayoutCache, LyruneView, page_horizontal_padding};
 use crate::cache::audio_cache_limit_bytes;
 use crate::design::{self, ColorTheme};
 use crate::settings::{
-    AppSettings, ColorThemeMode, LyricFrameRate, MAX_IMAGE_CACHE_CAPACITY, MAX_LYRIC_SCALE_PERCENT,
+    AppSettings, ColorThemeMode, FrameRate, MAX_IMAGE_CACHE_CAPACITY, MAX_LYRIC_SCALE_PERCENT,
     MAX_NAVIGATION_HISTORY_LIMIT, MIN_SCALE_PERCENT, TrayIconStyle, WindowDecoration,
     default_lyric_font_families, default_monospace_font_families, default_ui_font_families,
     parse_font_families,
@@ -436,9 +436,24 @@ impl LyruneView {
         cx.notify();
     }
 
+    fn set_progress_frame_rate(
+        &mut self,
+        frame_rate: FrameRate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.progress_frame_rate == frame_rate {
+            return;
+        }
+        self.settings.progress_frame_rate = frame_rate;
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
+        self.persist_settings();
+        cx.notify();
+    }
+
     fn set_lyric_highlight_frame_rate(
         &mut self,
-        frame_rate: LyricFrameRate,
+        frame_rate: FrameRate,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -454,7 +469,7 @@ impl LyruneView {
 
     fn set_lyric_scroll_frame_rate(
         &mut self,
-        frame_rate: LyricFrameRate,
+        frame_rate: FrameRate,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -621,8 +636,27 @@ impl LyruneView {
                     }))
             })
             .collect::<Vec<_>>();
+        let selected_progress_frame_rate = self.settings.progress_frame_rate;
+        let progress_frame_rate_buttons = FrameRate::ALL
+            .into_iter()
+            .map(|frame_rate| {
+                Button::new(format!("progress-{}", frame_rate.id()))
+                    .label(if frame_rate == FrameRate::Display {
+                        "跟随显示器"
+                    } else {
+                        frame_rate.label()
+                    })
+                    .ghost()
+                    .flex_1()
+                    .h(px(36.))
+                    .selected(selected_progress_frame_rate == frame_rate)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_progress_frame_rate(frame_rate, window, cx)
+                    }))
+            })
+            .collect::<Vec<_>>();
         let selected_highlight_frame_rate = self.settings.lyric_highlight_frame_rate;
-        let highlight_frame_rate_buttons = LyricFrameRate::ALL
+        let highlight_frame_rate_buttons = FrameRate::ALL
             .into_iter()
             .map(|frame_rate| {
                 Button::new(format!("lyrics-highlight-{}", frame_rate.id()))
@@ -637,7 +671,7 @@ impl LyruneView {
             })
             .collect::<Vec<_>>();
         let selected_scroll_frame_rate = self.settings.lyric_scroll_frame_rate;
-        let scroll_frame_rate_buttons = LyricFrameRate::ALL
+        let scroll_frame_rate_buttons = FrameRate::ALL
             .into_iter()
             .map(|frame_rate| {
                 Button::new(format!("lyrics-scroll-{}", frame_rate.id()))
@@ -925,6 +959,26 @@ impl LyruneView {
                                             "%",
                                             true,
                                         )),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_2()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(div().font_medium().child("播放进度条帧率"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("在所有页面使用相同的刷新频率，独立于歌词动画设置"),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .gap_1()
+                                                .children(progress_frame_rate_buttons),
+                                        ),
                                 )
                                 .child(
                                     v_flex()

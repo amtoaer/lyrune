@@ -345,7 +345,7 @@ impl LyruneView {
         self.playback.current_track = None;
         self.playback.load.clear();
         self.playback.started = false;
-        self.wake_playback_ticks();
+        self.wake_playback_tick();
         self.playback.location = None;
         self.playback.active_quality = self.settings.playback_quality;
         self.playback.available_qualities.clear();

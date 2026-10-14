@@ -35,6 +35,9 @@ tokio-util.workspace = true
 wana_kana.workspace = true
 xxhash-rust.workspace = true
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd.workspace = true
 ksni.workspace = true

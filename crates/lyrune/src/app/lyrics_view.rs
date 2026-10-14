@@ -9,13 +9,14 @@ use gpui_component::{
     h_flex, v_flex,
 };
 
+use super::animation::frame_is_due;
 #[cfg(test)]
 use super::lyrics;
 use super::lyrics::{LyricLine, ParsedLyrics};
 use super::{LyruneView, PLAYER_BAR_HEIGHT};
 use crate::http::{BlurredCover, blurred_cover, blurred_image_source, cached_image_source};
 use crate::icons::{MediaIcon, media_icon_hsla};
-use crate::settings::LyricFrameRate;
+use crate::settings::FrameRate;
 
 const LYRIC_ROW_HEIGHT: f32 = 104.;
 const LYRIC_ANCHOR_OFFSET: f32 = 38.;
@@ -289,8 +290,8 @@ pub(super) fn lyric_horizontal_scroll_offset(
 }
 
 pub(super) fn combined_lyric_frame_interval(
-    highlight: LyricFrameRate,
-    scroll: LyricFrameRate,
+    highlight: FrameRate,
+    scroll: FrameRate,
 ) -> Option<Duration> {
     match (highlight.frame_interval(), scroll.frame_interval()) {
         (Some(highlight), Some(scroll)) => Some(highlight.min(scroll)),
@@ -298,43 +299,13 @@ pub(super) fn combined_lyric_frame_interval(
     }
 }
 
-pub(super) fn lyric_position_for_frame_rate(
-    position: Duration,
-    frame_rate: LyricFrameRate,
-) -> Duration {
+pub(super) fn lyric_position_for_frame_rate(position: Duration, frame_rate: FrameRate) -> Duration {
     let Some(interval) = frame_rate.frame_interval() else {
         return position;
     };
     let interval_nanos = interval.as_nanos();
     let quantized_nanos = position.as_nanos() / interval_nanos * interval_nanos;
     Duration::from_nanos(quantized_nanos.min(u64::MAX as u128) as u64)
-}
-
-pub(super) fn lyric_frame_is_due(
-    now: Instant,
-    frame_rate: LyricFrameRate,
-    next_frame: &mut Option<Instant>,
-) -> bool {
-    let Some(interval) = frame_rate.frame_interval() else {
-        *next_frame = None;
-        return true;
-    };
-    let Some(deadline) = *next_frame else {
-        *next_frame = Some(now + interval);
-        return false;
-    };
-    if now < deadline {
-        return false;
-    }
-
-    // 正常帧沿用原来的截止时间，避免每次从 now 计时导致累计漂移；落后整帧才重置。
-    let delay = now.saturating_duration_since(deadline);
-    *next_frame = Some(if delay < interval {
-        deadline + interval
-    } else {
-        now + interval
-    });
-    true
 }
 
 fn translation_line_height(narrow: bool, scale: f32) -> Pixels {
@@ -982,13 +953,17 @@ impl Element for PreparedLyricsElement {
 
 impl LyruneView {
     pub(super) fn inactive_window_frame_interval(&self) -> Option<Duration> {
-        if self.cover_backdrop_visible {
+        let lyrics = if self.cover_backdrop_visible {
             combined_lyric_frame_interval(
                 self.settings.lyric_highlight_frame_rate,
                 self.settings.lyric_scroll_frame_rate,
             )
         } else {
             Some(crate::INACTIVE_WINDOW_FRAME_INTERVAL)
+        };
+        match (lyrics, self.settings.progress_frame_rate.frame_interval()) {
+            (Some(lyrics), Some(progress)) => Some(lyrics.min(progress)),
+            _ => None,
         }
     }
 
@@ -1028,13 +1003,13 @@ impl LyruneView {
             }
 
             let now = cx.background_executor().now();
-            let highlight_frame_due = lyric_frame_is_due(
+            let highlight_frame_due = frame_is_due(
                 now,
                 this.settings.lyric_highlight_frame_rate,
                 &mut this.next_lyric_highlight_frame,
             );
             let scroll_frame_due = if this.lyric_motion_is_active(now, cx.reduce_motion()) {
-                lyric_frame_is_due(
+                frame_is_due(
                     now,
                     this.settings.lyric_scroll_frame_rate,
                     &mut this.next_lyric_scroll_frame,
@@ -1130,7 +1105,7 @@ impl LyruneView {
             self.reset_lyric_animation_frames();
         }
         window.set_inactive_frame_interval(self.inactive_window_frame_interval());
-        self.wake_playback_ticks();
+        self.wake_playback_tick();
         cx.notify();
     }
 

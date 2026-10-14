@@ -134,20 +134,21 @@ impl LyruneView {
         };
         let input = ProgressInput {
             duration: self.playback.duration(),
-            position: self.playback.position,
             interactive: has_track && self.playback.started && self.playback.load.track.is_none(),
-            use_position: self.cover_backdrop_visible,
+            advancing: self.playback.is_advancing(),
+            frame_rate: self.settings.progress_frame_rate,
             font: self.fonts.monospace.clone(),
             foreground,
         };
-        self.progress
-            .update(cx, |progress, cx| progress.set_input(input, cx));
+        self.progress.update(cx, |progress, cx| {
+            progress.set_input(input, self.playback.position, window, cx);
+        });
         let progress = self.progress.clone();
         let theme = cx.theme();
         let is_playing = self
             .playback
             .audio
-            .as_ref()
+            .as_deref()
             .is_some_and(AudioPlayer::is_playing);
         let loading = self.playback.load.track.is_some();
         let show_pause = if loading {

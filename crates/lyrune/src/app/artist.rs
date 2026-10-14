@@ -642,7 +642,7 @@ impl LyruneView {
         let is_playing = self
             .playback
             .audio
-            .as_ref()
+            .as_deref()
             .is_some_and(AudioPlayer::is_playing);
         let rows = songs
             .into_iter()

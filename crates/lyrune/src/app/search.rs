@@ -400,7 +400,7 @@ impl LyruneView {
                     let playback_active = self
                         .playback
                         .audio
-                        .as_ref()
+                        .as_deref()
                         .is_some_and(AudioPlayer::is_playing);
                     self.search_track_table.update(cx, |table, cx| {
                         let delegate = table.delegate_mut();

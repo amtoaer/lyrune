@@ -58,7 +58,7 @@ pub struct PersistedWindowSize {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum LyricFrameRate {
+pub enum FrameRate {
     Fps30,
     Fps60,
     Fps90,
@@ -178,7 +178,7 @@ impl ColorThemeMode {
     }
 }
 
-impl LyricFrameRate {
+impl FrameRate {
     pub const ALL: [Self; 5] = [
         Self::Fps30,
         Self::Fps60,
@@ -252,8 +252,9 @@ pub struct AppSettings {
     pub navigation_history_limit: usize,
     pub playback_quality: Quality,
     #[serde(alias = "lyric_frame_rate")]
-    pub lyric_highlight_frame_rate: LyricFrameRate,
-    pub lyric_scroll_frame_rate: LyricFrameRate,
+    pub lyric_highlight_frame_rate: FrameRate,
+    pub lyric_scroll_frame_rate: FrameRate,
+    pub progress_frame_rate: FrameRate,
     pub last_library_view: Option<PersistedLibraryView>,
     pub current_playback: Option<PersistedPlayback>,
     pub window_size: Option<PersistedWindowSize>,
@@ -281,8 +282,9 @@ impl Default for AppSettings {
             image_cache_capacity: DEFAULT_IMAGE_CACHE_CAPACITY,
             navigation_history_limit: DEFAULT_NAVIGATION_HISTORY_LIMIT,
             playback_quality: Quality::default(),
-            lyric_highlight_frame_rate: LyricFrameRate::Fps30,
-            lyric_scroll_frame_rate: LyricFrameRate::Display,
+            lyric_highlight_frame_rate: FrameRate::Fps30,
+            lyric_scroll_frame_rate: FrameRate::Display,
+            progress_frame_rate: FrameRate::Fps60,
             last_library_view: None,
             current_playback: None,
             window_size: None,
@@ -641,8 +643,9 @@ mod tests {
             DEFAULT_NAVIGATION_HISTORY_LIMIT
         );
         assert_eq!(settings.playback_quality, Quality::Standard);
-        assert_eq!(settings.lyric_highlight_frame_rate, LyricFrameRate::Fps30);
-        assert_eq!(settings.lyric_scroll_frame_rate, LyricFrameRate::Display);
+        assert_eq!(settings.lyric_highlight_frame_rate, FrameRate::Fps30);
+        assert_eq!(settings.lyric_scroll_frame_rate, FrameRate::Display);
+        assert_eq!(settings.progress_frame_rate, FrameRate::Fps60);
         assert_eq!(settings.last_library_view, None);
         assert_eq!(settings.current_playback, None);
         assert_eq!(settings.window_size, None);
@@ -729,8 +732,9 @@ mod tests {
             image_cache_capacity: 0,
             navigation_history_limit: usize::MAX,
             playback_quality: Quality::High,
-            lyric_highlight_frame_rate: LyricFrameRate::Fps30,
-            lyric_scroll_frame_rate: LyricFrameRate::Display,
+            lyric_highlight_frame_rate: FrameRate::Fps30,
+            lyric_scroll_frame_rate: FrameRate::Display,
+            progress_frame_rate: FrameRate::Fps60,
             last_library_view: None,
             current_playback: None,
             window_size: None,
@@ -776,8 +780,9 @@ mod tests {
             image_cache_capacity: 72,
             navigation_history_limit: 16,
             playback_quality: Quality::HiRes,
-            lyric_highlight_frame_rate: LyricFrameRate::Fps120,
-            lyric_scroll_frame_rate: LyricFrameRate::Display,
+            lyric_highlight_frame_rate: FrameRate::Fps120,
+            lyric_scroll_frame_rate: FrameRate::Display,
+            progress_frame_rate: FrameRate::Fps90,
             last_library_view: Some(PersistedLibraryView {
                 account_id: 10001,
                 playlist_id: UserPlaylistId::Created { tid: 84, dir_id: 0 },
@@ -841,6 +846,7 @@ mod tests {
             restored.lyric_scroll_frame_rate,
             expected.lyric_scroll_frame_rate
         );
+        assert_eq!(restored.progress_frame_rate, expected.progress_frame_rate);
         assert_eq!(restored.last_library_view, expected.last_library_view);
         assert_eq!(restored.current_playback, expected.current_playback);
         assert_eq!(restored.window_size, expected.window_size);
@@ -946,22 +952,22 @@ mod tests {
     #[test]
     fn lyric_frame_rates_map_to_expected_intervals() {
         assert_eq!(
-            LyricFrameRate::Fps30.frame_interval(),
+            FrameRate::Fps30.frame_interval(),
             Some(Duration::from_nanos(1_000_000_000 / 30))
         );
         assert_eq!(
-            LyricFrameRate::Fps60.frame_interval(),
+            FrameRate::Fps60.frame_interval(),
             Some(Duration::from_nanos(1_000_000_000 / 60))
         );
         assert_eq!(
-            LyricFrameRate::Fps90.frame_interval(),
+            FrameRate::Fps90.frame_interval(),
             Some(Duration::from_nanos(1_000_000_000 / 90))
         );
         assert_eq!(
-            LyricFrameRate::Fps120.frame_interval(),
+            FrameRate::Fps120.frame_interval(),
             Some(Duration::from_nanos(1_000_000_000 / 120))
         );
-        assert_eq!(LyricFrameRate::Display.frame_interval(), None);
+        assert_eq!(FrameRate::Display.frame_interval(), None);
     }
 
     #[test]
@@ -971,8 +977,9 @@ mod tests {
         }))
         .expect("deserialize legacy lyric frame rate");
 
-        assert_eq!(settings.lyric_highlight_frame_rate, LyricFrameRate::Fps120);
-        assert_eq!(settings.lyric_scroll_frame_rate, LyricFrameRate::Display);
+        assert_eq!(settings.lyric_highlight_frame_rate, FrameRate::Fps120);
+        assert_eq!(settings.lyric_scroll_frame_rate, FrameRate::Display);
+        assert_eq!(settings.progress_frame_rate, FrameRate::Fps60);
     }
 
     #[test]

@@ -240,7 +240,6 @@ pub(super) struct ArtistResource {
     pub(super) songs: Option<SharedSearchPage<Track>>,
     pub(super) track_count: u64,
     pub(super) songs_loading: bool,
-    pub(super) songs_loading_more: bool,
     pub(super) song_error: Option<String>,
     pub(super) albums: Option<SharedSearchPage<SearchAlbum>>,
     pub(super) albums_loading: bool,
@@ -249,9 +248,8 @@ pub(super) struct ArtistResource {
 }
 
 impl ArtistResource {
-    pub(super) fn apply_songs(&mut self, offset: u64, result: anyhow::Result<PlaylistPage>) {
+    pub(super) fn apply_songs(&mut self, result: anyhow::Result<PlaylistPage>) {
         self.songs_loading = false;
-        self.songs_loading_more = false;
         match result {
             Ok(page) => {
                 self.track_count = page.total;
@@ -260,11 +258,7 @@ impl ArtistResource {
                     has_more: page.has_more,
                     next_offset: page.next_offset,
                 };
-                if offset == 0 {
-                    self.songs = Some(page.into());
-                } else if let Some(songs) = &mut self.songs {
-                    append_shared_search_page(songs, page);
-                }
+                self.songs = Some(page.into());
             }
             Err(error) => {
                 self.song_error = Some(format!("加载歌手歌曲失败：{error:#}"));
@@ -472,7 +466,6 @@ pub(super) enum NavigationPage {
     },
     Artist {
         artist: SearchArtist,
-        visible_song_count: usize,
         resource: Option<SharedArtistResource>,
     },
     ArtistAlbums {
@@ -655,7 +648,6 @@ impl BrowserView {
                     .clone()
                     .map(|artist| NavigationPage::Artist {
                         artist,
-                        visible_song_count: self.artist.visible_song_count,
                         resource: self.artist.resource.clone(),
                     })
             }
@@ -761,17 +753,12 @@ impl BrowserView {
                 self.search.pending_results_sync = true;
                 self.start_search(resource, query, cx);
             }
-            NavigationPage::Artist {
-                artist,
-                visible_song_count,
-                resource,
-            } => {
+            NavigationPage::Artist { artist, resource } => {
                 self.playlist_list.update(cx, |list, cx| {
                     list.set_selected_index(None, window, cx);
                 });
                 self.search.resource = None;
                 self.playlist.resource = None;
-                self.artist.visible_song_count = visible_song_count;
                 let resource = resource.unwrap_or_else(|| {
                     self.page_resource_cache
                         .artist(self.account.read(cx).id().unwrap_or(0), artist.mid.as_str())

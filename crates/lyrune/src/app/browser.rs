@@ -644,7 +644,7 @@ mod tests {
         use gpui_component::list::ListDelegate;
         use lyrune_api::{PlaylistPage, SearchAlbum, SearchArtist, SearchPage};
 
-        use crate::app::navigation::{NavigationPage, lock_resource};
+        use crate::app::navigation::{NavigationPage, PlaylistCachePolicy, lock_resource};
 
         cx.update(gpui_component::init);
         let (host, cx) = cx.add_window_view(|window, cx| TestBrowser {
@@ -677,28 +677,25 @@ mod tests {
             browser.update(cx, |browser, cx| {
                 let resource = browser.page_resource_cache.artist(0, &artist.mid);
                 let mut state = lock_resource(&resource);
-                state.apply_songs(
-                    0,
-                    Ok(PlaylistPage {
-                        playlist: artist.clone().into_playlist(),
-                        tracks: (0..20)
-                            .map(|i| {
-                                serde_json::from_value(serde_json::json!({
-                                    "mid": format!("song-{i}"),
-                                    "title": format!("Song {i}"),
-                                    "artists": "Artist",
-                                    "album": "Album",
-                                    "album_mid": "album",
-                                    "duration_seconds": 180,
-                                }))
-                                .unwrap()
-                            })
-                            .collect(),
-                        total: 20,
-                        has_more: false,
-                        next_offset: 20,
-                    }),
-                );
+                state.apply_songs(Ok(PlaylistPage {
+                    playlist: artist.clone().into_playlist(),
+                    tracks: (0..20)
+                        .map(|i| {
+                            serde_json::from_value(serde_json::json!({
+                                "mid": format!("song-{i}"),
+                                "title": format!("Song {i}"),
+                                "artists": "Artist",
+                                "album": "Album",
+                                "album_mid": "album",
+                                "duration_seconds": 180,
+                            }))
+                            .unwrap()
+                        })
+                        .collect(),
+                    total: 20,
+                    has_more: false,
+                    next_offset: 20,
+                }));
                 state.apply_albums(
                     0,
                     Ok(SearchPage {
@@ -743,13 +740,41 @@ mod tests {
         }
         cx.simulate_resize(size(px(1000.), px(1900.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        for expanded in [true, false, true] {
-            let toggle = cx.debug_bounds("artist-song-toggle").unwrap();
-            cx.simulate_click(toggle.center(), Modifiers::none());
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-            assert_eq!(cx.debug_bounds("artist-preview-song-9").is_some(), expanded);
-            assert!(cx.debug_bounds("artist-preview-song-10").is_none());
-        }
+        let song_resource = browser.update(cx, |browser, _| {
+            let playlist = browser.artist.selected.clone().unwrap().into_playlist();
+            let songs = lock_resource(&resource)
+                .songs
+                .as_ref()
+                .unwrap()
+                .items
+                .clone();
+            let result = browser.page_resource_cache.playlist(
+                0,
+                playlist.clone(),
+                false,
+                PlaylistCachePolicy::Fresh,
+            );
+            lock_resource(&result).apply_page(playlist, songs, false, 20, 0);
+            result
+        });
+        let view_songs = cx.debug_bounds("view-all-artist-songs").unwrap();
+        cx.simulate_click(view_songs.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let song_header = cx.debug_bounds("artist-collection-header").unwrap();
+        assert_eq!(song_header.top(), search_header.top());
+        assert_eq!(song_header.size.height, search_header.size.height);
+        browser.read_with(cx, |browser, cx| {
+            assert!(browser.main_content == MainContent::Playlist);
+            assert!(Arc::ptr_eq(
+                browser.playlist.resource.as_ref().unwrap(),
+                &song_resource
+            ));
+            assert_eq!(browser.track_table.read(cx).delegate().tracks().len(), 20);
+        });
+        cx.update(|window, cx| browser.update(cx, |browser, cx| browser.navigate_back(window, cx)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("artist-preview-song-4").is_some());
+        assert!(cx.debug_bounds("artist-preview-song-5").is_none());
         let view_all = cx.debug_bounds("view-all-artist-albums").unwrap();
         cx.simulate_click(view_all.center(), Modifiers::none());
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -757,7 +782,7 @@ mod tests {
             assert!(browser.main_content == MainContent::ArtistAlbums);
             browser.artist_album_grid.clone()
         });
-        let album_header = cx.debug_bounds("artist-album-header").unwrap();
+        let album_header = cx.debug_bounds("artist-collection-header").unwrap();
         assert_eq!(album_header.top(), search_header.top());
         assert_eq!(album_header.size.height, search_header.size.height);
         for (width, row_end) in [
@@ -826,7 +851,6 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         browser.read_with(cx, |browser, _| {
             assert!(browser.main_content == MainContent::Artist);
-            assert_eq!(browser.artist.visible_song_count, 10);
             assert!(Arc::ptr_eq(
                 browser.artist.resource.as_ref().unwrap(),
                 &resource

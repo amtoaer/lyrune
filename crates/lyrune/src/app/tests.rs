@@ -777,7 +777,7 @@ fn artist_results_keep_independent_pages() {
         albums_loading: true,
         ..Default::default()
     };
-    resource.apply_songs(0, Ok(first_page.clone()));
+    resource.apply_songs(Ok(first_page.clone()));
     assert!(!resource.songs_loading && resource.albums_loading);
     resource.apply_albums(
         0,
@@ -789,15 +789,15 @@ fn artist_results_keep_independent_pages() {
     );
     assert!(!resource.albums_loading);
 
-    resource.songs_loading_more = true;
+    resource.songs_loading = true;
     resource.albums_loading_more = true;
-    resource.apply_songs(4, Err(anyhow::anyhow!("offline").context("songs")));
+    resource.apply_songs(Err(anyhow::anyhow!("offline").context("songs")));
     let songs = resource.songs.as_ref().unwrap();
     assert_eq!(mids(&songs.items), ["A"]);
     assert_eq!(songs.next_offset, 4);
     assert!(songs.has_more);
     assert_eq!(resource.track_count, 3);
-    assert!(!resource.songs_loading_more && resource.albums_loading_more);
+    assert!(!resource.songs_loading && resource.albums_loading_more);
 
     resource.apply_albums(
         1,
@@ -816,25 +816,22 @@ fn artist_results_keep_independent_pages() {
         Some("加载歌手歌曲失败：songs: offline")
     );
 
-    resource.songs_loading_more = true;
+    resource.songs_loading = true;
     resource.song_error = None;
-    resource.apply_songs(
-        4,
-        Ok(PlaylistPage {
-            tracks: vec![track("B")],
-            total: 6,
-            has_more: false,
-            next_offset: 9,
-            ..first_page.clone()
-        }),
-    );
+    resource.apply_songs(Ok(PlaylistPage {
+        tracks: vec![track("B")],
+        total: 6,
+        has_more: false,
+        next_offset: 9,
+        ..first_page.clone()
+    }));
     let songs = resource.songs.as_ref().unwrap();
-    assert_eq!(mids(&songs.items), ["A", "B"]);
+    assert_eq!(mids(&songs.items), ["B"]);
     assert_eq!(songs.next_offset, 9);
-    assert!(!songs.has_more && !resource.songs_loading_more);
+    assert!(!songs.has_more && !resource.songs_loading);
     assert_eq!(resource.track_count, 6);
 
-    resource.apply_songs(0, Ok(first_page));
+    resource.apply_songs(Ok(first_page));
     assert_eq!(mids(&resource.songs.as_ref().unwrap().items), ["A"]);
     assert_eq!(resource.albums.as_ref().unwrap().items.len(), 2);
 }

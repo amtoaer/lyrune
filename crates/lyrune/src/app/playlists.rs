@@ -1011,12 +1011,28 @@ impl BrowserView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
+        let header = if let Some(playlist) = self.playlist.selected.as_ref()
+            && matches!(playlist.id, UserPlaylistId::Artist { .. })
+        {
+            div()
+                .px(page_horizontal_padding(narrow))
+                .child(self.render_artist_collection_header(
+                    Some(&playlist.title),
+                    playlist.cover_url.clone(),
+                    "歌曲",
+                    scale_factor,
+                    cx,
+                ))
+                .into_any_element()
+        } else {
+            self.render_playlist_header(compact, narrow, scale_factor, cx)
+        };
         v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
             .bg(theme.background)
-            .child(self.render_playlist_header(compact, narrow, scale_factor, cx))
+            .child(header)
             .child(
                 div()
                     .flex_1()

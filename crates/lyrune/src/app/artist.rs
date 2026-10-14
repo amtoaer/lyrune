@@ -23,12 +23,9 @@ use crate::library::{SearchCard, card_grid_dimensions, format_duration};
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 
-const ARTIST_SONG_PREVIEW_LIMIT: usize = 10;
-
 pub(super) struct ArtistPageState {
     pub(super) selected: Option<SearchArtist>,
     pub(super) resource: Option<SharedArtistResource>,
-    pub(super) visible_song_count: usize,
     pub(super) album_scroll_offset: Pixels,
     pub(super) pending_album_scroll: bool,
     pub(super) pending_albums_sync: bool,
@@ -39,7 +36,6 @@ impl Default for ArtistPageState {
         Self {
             selected: None,
             resource: None,
-            visible_song_count: ARTIST_PAGE_SIZE as usize,
             album_scroll_offset: px(0.),
             pending_album_scroll: false,
             pending_albums_sync: true,
@@ -59,7 +55,6 @@ impl BrowserView {
             .artist(self.account.read(cx).id().unwrap_or(0), &artist.mid);
         let target = NavigationPage::Artist {
             artist,
-            visible_song_count: ARTIST_PAGE_SIZE as usize,
             resource: Some(resource),
         };
         let current = self.current_navigation_page(cx);
@@ -107,33 +102,20 @@ impl BrowserView {
             cx.notify();
             return;
         };
-        let target_count = self.artist.visible_song_count;
-        let offset = {
+        {
             let mut state = lock_resource(&resource);
-            if state.songs_loading || state.songs_loading_more {
+            if state.songs_loading || state.songs.is_some() {
                 return;
             }
-            if let Some(page) = &state.songs
-                && (page.items.len() >= target_count || !page.has_more)
-            {
-                cx.notify();
-                return;
-            }
-            let offset = state.songs.as_ref().map_or(0, |page| page.next_offset);
             state.song_error = None;
-            if state.songs.is_some() {
-                state.songs_loading_more = true;
-            } else {
-                state.songs_loading = true;
-            }
-            offset
-        };
+            state.songs_loading = true;
+        }
         let playlist = artist.into_playlist();
         cx.notify();
 
         let task = RUNTIME.spawn(async move {
             client
-                .playlist_page(&credential, &playlist, offset, ARTIST_PAGE_SIZE)
+                .playlist_page(&credential, &playlist, 0, ARTIST_PAGE_SIZE)
                 .await
         });
 
@@ -142,7 +124,7 @@ impl BrowserView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                lock_resource(&resource).apply_songs(offset, result);
+                lock_resource(&resource).apply_songs(result);
                 if this
                     .artist
                     .resource
@@ -416,39 +398,27 @@ impl BrowserView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let (
-            songs,
-            songs_loading,
-            songs_loading_more,
-            song_error,
-            albums,
-            albums_loading,
-            album_error,
-        ) = self.artist.resource.as_ref().map_or_else(
-            || (None, false, false, None, None, false, None),
-            |resource| {
-                let state = lock_resource(resource);
-                (
-                    state.songs.clone(),
-                    state.songs_loading,
-                    state.songs_loading_more,
-                    state.song_error.clone(),
-                    state.albums.as_ref().map(|page| {
-                        page.items
-                            .iter()
-                            .take(ARTIST_ALBUM_PAGE_SIZE as usize)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                    }),
-                    state.albums_loading,
-                    state.album_error.clone(),
-                )
-            },
-        );
-        let song_has_more = songs
-            .as_ref()
-            .is_some_and(|page| page.items.len() > self.artist.visible_song_count || page.has_more);
-        let songs_expanded = self.artist.visible_song_count > ARTIST_PAGE_SIZE as usize;
+        let (songs, songs_loading, song_error, albums, albums_loading, album_error) =
+            self.artist.resource.as_ref().map_or_else(
+                || (None, false, None, None, false, None),
+                |resource| {
+                    let state = lock_resource(resource);
+                    (
+                        state.songs.clone(),
+                        state.songs_loading,
+                        state.song_error.clone(),
+                        state.albums.as_ref().map(|page| {
+                            page.items
+                                .iter()
+                                .take(ARTIST_ALBUM_PAGE_SIZE as usize)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        }),
+                        state.albums_loading,
+                        state.album_error.clone(),
+                    )
+                },
+            );
         let song_body = if songs_loading && songs.is_none() {
             h_flex()
                 .h(px(92.))
@@ -477,7 +447,7 @@ impl BrowserView {
                 )
                 .into_any_element()
         } else if let Some(songs) = songs.filter(|page| !page.items.is_empty()) {
-            let visible = self.artist.visible_song_count.min(songs.items.len());
+            let visible = (ARTIST_PAGE_SIZE as usize).min(songs.items.len());
             self.render_artist_song_rows(songs.items[..visible].to_vec(), narrow, scale_factor, cx)
         } else {
             h_flex()
@@ -548,44 +518,37 @@ impl BrowserView {
                                         .w_full()
                                         .gap_3()
                                         .child(
-                                            div().text_size(px(24.)).font_semibold().child("歌曲"),
-                                        )
-                                        .child(song_body)
-                                        .when(songs_expanded || song_has_more, |this| {
-                                            this.child(
-                                                h_flex().child(
-                                                    Button::new("load-more-artist-songs")
+                                            h_flex()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(24.))
+                                                        .font_semibold()
+                                                        .child("歌曲"),
+                                                )
+                                                .child(
+                                                    Button::new("view-all-artist-songs")
                                                         .debug_selector(|| {
-                                                            "artist-song-toggle".into()
+                                                            "view-all-artist-songs".into()
                                                         })
-                                                        .outline()
-                                                        .h(px(40.))
-                                                        .px_4()
-                                                        .loading(songs_loading_more)
-                                                        .disabled(songs_loading_more)
-                                                        .label(if songs_loading_more {
-                                                            "正在加载…"
-                                                        } else if songs_expanded {
-                                                            "收起"
-                                                        } else {
-                                                            "查看更多"
-                                                        })
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            if this.artist.visible_song_count
-                                                                > ARTIST_PAGE_SIZE as usize
-                                                            {
-                                                                this.artist.visible_song_count =
-                                                                    ARTIST_PAGE_SIZE as usize;
-                                                            } else {
-                                                                this.artist.visible_song_count =
-                                                                    ARTIST_SONG_PREVIEW_LIMIT;
-                                                                this.load_artist_songs(cx);
-                                                            }
-                                                            cx.notify();
-                                                        })),
+                                                        .ghost()
+                                                        .label("查看全部")
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                if let Some(artist) =
+                                                                    this.artist.selected.clone()
+                                                                {
+                                                                    this.open_home_playlist(
+                                                                        artist.into_playlist(),
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                }
+                                                            },
+                                                        )),
                                                 ),
-                                            )
-                                        }),
+                                        )
+                                        .child(song_body),
                                 )
                                 .child(
                                     v_flex()
@@ -670,32 +633,7 @@ impl BrowserView {
                 cx.notify();
             }
         });
-        let mut title = h_flex().h(px(36.)).min_w_0().gap_3().text_size(px(24.));
-        if let Some(artist) = &self.artist.selected {
-            title = title
-                .child(self.render_artist_cover(
-                    artist.cover_url.clone(),
-                    MediaIcon::Artist,
-                    px(32.),
-                    px(999.),
-                    window.scale_factor(),
-                    cx,
-                ))
-                .child(
-                    h_flex()
-                        .min_w_0()
-                        .gap_2()
-                        .child(div().truncate().font_semibold().child(artist.name.clone()))
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_color(theme.secondary_foreground)
-                                .child("的专辑"),
-                        ),
-                );
-        } else {
-            title = title.child("专辑");
-        }
+
         v_flex()
             .flex_1()
             .min_h_0()
@@ -704,12 +642,19 @@ impl BrowserView {
             .bg(theme.background)
             .px(page_horizontal_padding(narrow))
             .child(
-                div()
-                    .debug_selector(|| "artist-album-header".into())
-                    .pt_2()
-                    .pb_3()
-                    .flex_shrink_0()
-                    .child(title),
+                self.render_artist_collection_header(
+                    self.artist
+                        .selected
+                        .as_ref()
+                        .map(|artist| artist.name.as_str()),
+                    self.artist
+                        .selected
+                        .as_ref()
+                        .and_then(|artist| artist.cover_url.clone()),
+                    "专辑",
+                    window.scale_factor(),
+                    cx,
+                ),
             )
             .when(loading && !has_results, |this| {
                 this.child(
@@ -758,6 +703,50 @@ impl BrowserView {
                         ),
                 )
             })
+            .into_any_element()
+    }
+
+    pub(super) fn render_artist_collection_header(
+        &self,
+        name: Option<&str>,
+        cover_url: Option<String>,
+        kind: &'static str,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let mut title = h_flex().h(px(36.)).min_w_0().gap_3().text_size(px(24.));
+        if let Some(name) = name {
+            title = title
+                .child(self.render_artist_cover(
+                    cover_url,
+                    MediaIcon::Artist,
+                    px(32.),
+                    px(999.),
+                    scale_factor,
+                    cx,
+                ))
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .gap_2()
+                        .child(div().truncate().font_semibold().child(name.to_owned()))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(theme.secondary_foreground)
+                                .child(format!("的{kind}")),
+                        ),
+                );
+        } else {
+            title = title.child(kind);
+        }
+        div()
+            .debug_selector(|| "artist-collection-header".into())
+            .pt_2()
+            .pb_3()
+            .flex_shrink_0()
+            .child(title)
             .into_any_element()
     }
 

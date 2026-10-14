@@ -33,6 +33,22 @@
 
 `lyrune-api` 根入口选择性导出应用需要的能力；`account.rs` 持有凭据会话与扫码/刷新编排，`models.rs` 保留共享数据类型，`client.rs` 持有 HTTP 客户端并负责签名网关请求、错误检查；具体请求与解析放在 `client/library.rs`、`search.rs`、`playback.rs`、`cdn.rs` 和 `lyrics.rs`。这些模块直接实现 ProtocolClient 的领域方法，没有额外转发对象。共享的响应兼容规则位于 `client/response.rs`。扫码与刷新直接调用 `login.rs`，响应校验和 MQTT 状态机位于 `login/`，共用签名和哈希位于 `signing.rs`，登录 GUID 与搜索 ID 的生成保留在各自调用模块。网易云、跨平台 builder、平台 token 包装，以及应用未使用的旧查询接口已移除。`QqCredential` 和 `LyricResult` 的序列化字段保持原样；登录 Cookie 和 GUID 继续使用原来的规则。
 
+### API 响应与领域边界
+
+| 模块 | 当前职责与保持的约束 |
+| --- | --- |
+| `account.rs`、`login.rs` / `login/` | 前者拥有凭据快照、刷新锁、撤销和扫码编排；后者实现登录 HTTP 与 MQTT。扫码完成后调用客户端补全 encrypted_uin 是保留的跨边界编排，查询又依赖会话刷新；没有新增后台任务或持有者。 |
+| `client.rs`、`signing.rs` | 通用签名网关先检查全局码和业务码，再移出 data。登录和业务请求共享签名运算，各自保留 Cookie、GUID、代理、超时和响应错误策略。 |
+| `client/library.rs` | 资料、歌单、推荐、喜欢状态及共享歌曲转换；分页纯解析保留无 mid 条目过滤，并按服务端原始条目数推进游标。资料旧接口是否请求仍由原来的字段存在性判断决定。 |
+| `client/search.rs` | 首批四类别并发、各类补页和歌手专辑；移动端歌曲 type 转换与两种分页规则分别保留。 |
+| `client/playback.rs`、`client/cdn.rs` | 前者解析普通/加密音源，后者拥有 CDN 调度和节点/地址规则。两类音源采用私有 PlaybackEntry，保留 purl 键存在时禁止 wifiurl 回退、质量去重与 ekey 检查顺序。 |
+| `client/lyrics.rs`、`lyrics/qrc_des.rs` | 私有 LyricResponse、原有歌词回退与解码；QRC 实现完整保留。 |
+| `client/response.rs`、`models.rs` | 前者仅保留字段兼容与递归查找，后者持有应用共享数据与序列化格式。网络结构体只存在于使用它们的领域。 |
+
+未进行全量结构体替换。歌曲的多种包装/别名、搜索与推荐不同的无效条目规则、资料的未知嵌套和 CDN 的双列表合并仍使用局部 Value；普通 alias/default 无法完整表达现有优先级、非法类型及层级规则。没有充分证据时不删除这些兼容分支。进一步类型化须证明比现有直接流程更清楚，并保持接受范围。
+
+已移除无调用的 `ProtocolClient::playback_url`，以及只供测试使用的 `liked_tracks`、`Quality::best_available` 包装；测试改为覆盖实际生产入口。凭据错误、Cookie、过期检查和用户标识补全收窄到其内部使用范围。详见 [阶段与验证记录](refactor-progress.md#api-职责与响应解析重构)。
+
 ## 关键调用关系
 
 1. `LyruneView::new` 创建控件、接入事件，然后恢复账号。账号可用后加载首页和音乐库；音乐库加载还会触发已保存队列的恢复。

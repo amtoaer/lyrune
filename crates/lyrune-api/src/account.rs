@@ -16,7 +16,7 @@ use crate::client::ProtocolClient;
 const QR_DATA_PREFIX: &str = "data:image/png;base64,";
 
 #[derive(Debug, thiserror::Error)]
-pub enum CredentialError {
+pub(crate) enum CredentialError {
     #[error("QQ 音乐登录凭据已失效（错误码 {code}），请重新登录")]
     Rejected { code: u64 },
     #[error("QQ 音乐登录凭据已注销")]
@@ -206,14 +206,14 @@ impl QqCredential {
         }
     }
 
-    pub fn cookie(&self) -> String {
+    pub(crate) fn cookie(&self) -> String {
         format!(
             "uin={}; qqmusic_uin={}; qqmusic_key={}; qm_keyst={}; tmeLoginType={}",
             self.music_id, self.music_id, self.music_key, self.music_key, self.login_type,
         )
     }
 
-    pub fn is_expiring(&self) -> bool {
+    fn is_expiring(&self) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

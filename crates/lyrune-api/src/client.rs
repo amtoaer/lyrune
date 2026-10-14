@@ -15,8 +15,9 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock};
 
 use self::response::integer_field;
+use crate::account::CredentialError;
 use crate::signing::{hash33, sign};
-use crate::{CredentialError, CredentialSession, QqCredential};
+use crate::{CredentialSession, QqCredential};
 pub use cdn::CdnCache;
 
 const API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";

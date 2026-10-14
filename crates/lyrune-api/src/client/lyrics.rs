@@ -1,4 +1,5 @@
 mod qrc_des;
+
 use std::io::Read as _;
 
 use anyhow::{Context as _, Result, bail};

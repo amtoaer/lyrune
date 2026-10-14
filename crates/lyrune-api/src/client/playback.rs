@@ -49,6 +49,7 @@ impl ProtocolClient {
         let mut options = match normal {
             Ok(options) if !options.is_empty() => options,
             Ok(_) => self.encrypted_playback_options(credential, track).await?,
+            // 加密回退也失败时沿用普通请求的首个错误，保留原有诊断。
             Err(error) => match self.encrypted_playback_options(credential, track).await {
                 Ok(options) => options,
                 Err(_) => return Err(error),

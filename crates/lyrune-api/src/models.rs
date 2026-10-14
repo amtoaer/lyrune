@@ -225,12 +225,6 @@ impl Quality {
         }
     }
 
-    pub fn best_available(available: &[Self], preferred: Self) -> Option<Self> {
-        Self::fallback_order(available, preferred)
-            .into_iter()
-            .next()
-    }
-
     pub fn fallback_order(available: &[Self], preferred: Self) -> Vec<Self> {
         let lower_end = available.partition_point(|quality| *quality <= preferred);
         if lower_end > 0 {
@@ -320,25 +314,38 @@ mod tests {
         assert!(Quality::ALL.is_sorted());
         let available = [Quality::Standard, Quality::High, Quality::Lossless];
         assert_eq!(
-            Quality::best_available(&available, Quality::High),
+            Quality::fallback_order(&available, Quality::High)
+                .into_iter()
+                .next(),
             Some(Quality::High)
         );
         assert_eq!(
-            Quality::best_available(&available, Quality::Master),
+            Quality::fallback_order(&available, Quality::Master)
+                .into_iter()
+                .next(),
             Some(Quality::Lossless)
         );
         assert_eq!(
-            Quality::best_available(&[Quality::Standard, Quality::Lossless], Quality::High),
+            Quality::fallback_order(&[Quality::Standard, Quality::Lossless], Quality::High)
+                .into_iter()
+                .next(),
             Some(Quality::Standard)
         );
         assert_eq!(
-            Quality::best_available(
+            Quality::fallback_order(
                 &[Quality::High, Quality::Standard, Quality::Lossless],
                 Quality::HiRes
-            ),
+            )
+            .into_iter()
+            .next(),
             Some(Quality::Lossless)
         );
-        assert_eq!(Quality::best_available(&[], Quality::High), None);
+        assert_eq!(
+            Quality::fallback_order(&[], Quality::High)
+                .into_iter()
+                .next(),
+            None
+        );
     }
 
     #[test]

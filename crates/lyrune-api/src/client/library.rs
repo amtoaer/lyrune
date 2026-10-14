@@ -19,7 +19,10 @@ use crate::{
 const PROFILE_URL: &str = "https://c6.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg";
 
 impl ProtocolClient {
-    pub async fn ensure_encrypted_uin(&self, mut credential: QqCredential) -> Result<QqCredential> {
+    pub(crate) async fn ensure_encrypted_uin(
+        &self,
+        mut credential: QqCredential,
+    ) -> Result<QqCredential> {
         if credential.encrypted_uin.trim().is_empty() {
             credential.encrypted_uin = self
                 .fetch_encrypted_uin(&credential)
@@ -70,6 +73,7 @@ impl ProtocolClient {
             Err(error) if is_credential_rejected(&error) => return Err(error),
             Err(_) => None,
         };
+        // 是否请求旧资料接口沿用字段存在性判断；空白值在显示字段选择时处理。
         let primary_is_complete = primary.as_ref().is_some_and(|profile| {
             find_string_recursively(profile, &["nickname", "nick", "userName"]).is_some()
                 && find_string_recursively(
@@ -343,39 +347,7 @@ impl ProtocolClient {
             }
         }
         .with_context(|| format!("无法加载 QQ 音乐媒体集合“{}”", playlist.title))?;
-        let songs = find_array_recursively(&data, &["songlist", "song_list"])
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let tracks = songs
-            .iter()
-            .filter(|value| {
-                let value = value
-                    .get("songInfo")
-                    .or_else(|| value.get("track"))
-                    .or_else(|| value.get("Track"))
-                    .unwrap_or(value);
-                string_field(value, &["mid", "songmid"]).is_some_and(|mid| !mid.is_empty())
-            })
-            .map(parse_track)
-            .collect::<Result<Vec<_>>>()
-            .with_context(|| format!("QQ 音乐歌单“{}”的数据格式发生了变化", playlist.title))?;
-        let total = integer_field(&data, &["total_song_num", "total", "totalNum", "total_num"])
-            .unwrap_or_else(|| offset.saturating_add(songs.len() as u64));
-        let next_offset = offset.saturating_add(songs.len() as u64);
-        let has_more = bool_field(&data, &["hasmore", "has_more"]).unwrap_or(next_offset < total)
-            && !songs.is_empty();
-
-        let mut resolved_playlist = playlist_from_detail(&data, playlist.clone());
-        if resolved_playlist.track_count == 0 {
-            resolved_playlist.track_count = total;
-        }
-        Ok(PlaylistPage {
-            playlist: resolved_playlist,
-            tracks,
-            total,
-            has_more,
-            next_offset,
-        })
+        parse_playlist_page(&data, playlist, offset)
     }
 
     pub async fn track_liked(&self, credential: &CredentialSession, mid: &str) -> Result<bool> {
@@ -512,6 +484,44 @@ impl ProtocolClient {
     }
 }
 
+// 分页游标按服务端原始条目数前进；过滤无 mid 的歌曲不能改变分页位置。
+fn parse_playlist_page(data: &Value, playlist: &UserPlaylist, offset: u64) -> Result<PlaylistPage> {
+    let songs = find_array_recursively(data, &["songlist", "song_list"])
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let tracks = songs
+        .iter()
+        .filter(|value| {
+            let value = value
+                .get("songInfo")
+                .or_else(|| value.get("track"))
+                .or_else(|| value.get("Track"))
+                .unwrap_or(value);
+            string_field(value, &["mid", "songmid"]).is_some_and(|mid| !mid.is_empty())
+        })
+        .map(parse_track)
+        .collect::<Result<Vec<_>>>()
+        .with_context(|| format!("QQ 音乐歌单“{}”的数据格式发生了变化", playlist.title))?;
+    let total = integer_field(data, &["total_song_num", "total", "totalNum", "total_num"])
+        .unwrap_or_else(|| offset.saturating_add(songs.len() as u64));
+    let next_offset = offset.saturating_add(songs.len() as u64);
+    let has_more = bool_field(data, &["hasmore", "has_more"]).unwrap_or(next_offset < total)
+        && !songs.is_empty();
+
+    let mut resolved_playlist = playlist_from_detail(data, playlist.clone());
+    if resolved_playlist.track_count == 0 {
+        resolved_playlist.track_count = total;
+    }
+    Ok(PlaylistPage {
+        playlist: resolved_playlist,
+        tracks,
+        total,
+        has_more,
+        next_offset,
+    })
+}
+
+// 不同端点复用歌曲数据但包装和字段名不同；保留首个存在字段优先的规则。
 pub(super) fn parse_track(value: &Value) -> Result<Track> {
     let wrapper = value;
     let value = wrapper
@@ -640,6 +650,7 @@ fn parse_recommended_playlist_page(data: &Value, offset: u64) -> Result<SearchPa
         .filter_map(parse_recommended_playlist)
         .filter(|playlist| seen.insert(playlist.id.clone()))
         .collect::<Vec<_>>();
+    // 服务端游标可能跨过过滤/去重的条目，不能用最终 items 数量替代。
     let next_offset = integer_field(data, &["FromLimit", "fromLimit", "from_limit"])
         .unwrap_or_else(|| offset.saturating_add(entries.len() as u64));
     let has_more =
@@ -810,6 +821,35 @@ mod tests {
     use super::super::playback::playback_filename;
     use super::*;
     use crate::Quality;
+
+    #[test]
+    fn test_playlist_filtering_and_cursor() {
+        let playlist = UserPlaylist::liked();
+        let page = parse_playlist_page(&json!({
+            "songlist": [{"title": "missing mid"}, {"songInfo": {"mid": "song", "title": "Song"}}, null],
+            "total_song_num": 100
+        }), &playlist, 20).unwrap();
+        assert_eq!(
+            (
+                page.tracks.len(),
+                page.next_offset,
+                page.total,
+                page.has_more
+            ),
+            (1, 23, 100, true)
+        );
+
+        let error = parse_playlist_page(
+            &json!({
+                "songlist": [{"mid": "song"}]
+            }),
+            &playlist,
+            0,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").ends_with("歌曲缺少标题"));
+        assert!(parse_track(&json!({"mid": null, "songmid": "other", "title": "Song"})).is_err());
+    }
 
     #[test]
     fn parses_liked_track_and_preserves_media_mid() {

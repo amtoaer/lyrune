@@ -7,7 +7,7 @@ the internal `lyrune-api` crate at `crates/lyrune-api`. NetEase support and the
 cross-platform API have been removed; the retained QQ login implementation is
 under `src/login`. The imported upstream revision is recorded in
 `crates/lyrune-api/UPSTREAM_COMMIT`. Additional QQ Music protocol integration
-is implemented in `crates/lyrune-api/src/integration`.
+is implemented in `crates/lyrune-api/src/client.rs` and its domain modules.
 
 - Project: <https://github.com/AstronW/netease-qq-music-api>
 - Copyright (c) 2026 AstronW
@@ -40,7 +40,7 @@ SOFTWARE.
 ## qrc
 
 The QQ Music QRC DES implementation in
-`crates/lyrune-api/src/integration/qrc_des.rs` is derived from `qrc`.
+`crates/lyrune-api/src/client/lyrics/qrc_des.rs` is derived from `qrc`.
 
 - Project: <https://github.com/jixunmoe-go/qrc>
 - Copyright (c) 2023 Jixun Wu

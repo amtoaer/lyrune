@@ -7,7 +7,7 @@ mod login;
 mod models;
 mod signing;
 
-pub use account::{CredentialError, CredentialSession, LoginEvent, QqCredential, run_qr_login};
+pub use account::{CredentialSession, LoginEvent, QqCredential, run_qr_login};
 pub use client::{CdnCache, ProtocolClient};
 pub use models::{
     LyricResult, PlaybackOption, PlaylistPage, Quality, RadarTrackPage, RecommendationKind,

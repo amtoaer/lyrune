@@ -11,9 +11,10 @@ use super::library::{
 };
 use super::response::{find_array_recursively, integer_field, string_field};
 use super::{ProtocolClient, is_credential_rejection_code};
+use crate::account::CredentialError;
 use crate::{
-    CredentialError, CredentialSession, SearchAlbum, SearchArtist, SearchPage, SearchResults,
-    Track, UserPlaylist, UserPlaylistId,
+    CredentialSession, SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist,
+    UserPlaylistId,
 };
 
 const MOBILE_SEARCH_API_URL: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
@@ -287,6 +288,7 @@ fn parse_mobile_search_songs(data: &Value, offset: u64, limit: u64) -> Result<Se
 fn parse_mobile_search_track(value: &Value) -> Result<Track> {
     let mut track = parse_track(value)?;
     let song_type = integer_field(value, &["type"]).unwrap_or_default();
+    // 移动端搜索的普通歌曲 type=1 需按播放协议的 0 发送，其余类型保持原值。
     track.song_type = if song_type == 1 { 0 } else { song_type };
     Ok(track)
 }

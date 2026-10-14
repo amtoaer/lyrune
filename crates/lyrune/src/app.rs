@@ -62,7 +62,7 @@ use self::{
     preferences::Preferences,
     progress_view::{PlaybackProgressView, SeekTo},
     search::SearchPageState,
-    settings::SettingsInputs,
+    settings::{SettingsAction, SettingsPage},
 };
 use crate::cache::{AudioCache, audio_cache_limit_bytes};
 use crate::design::AppFonts;
@@ -131,8 +131,8 @@ pub struct LyruneView {
     search_track_table: Entity<TableState<TrackTableDelegate>>,
     search_card_grid: Entity<ListState<SearchCardGridDelegate>>,
     search_input: Entity<InputState>,
-    settings_inputs: SettingsInputs,
-    settings_scroll_handle: ScrollHandle,
+    settings_page: Entity<SettingsPage>,
+    _settings_subscription: Option<Subscription>,
     progress: Entity<PlaybackProgressView>,
     player_controls: Entity<PlayerControlsView>,
     _player_subscription: Option<Subscription>,
@@ -230,7 +230,6 @@ impl LyruneView {
                 .placeholder("想播放什么？")
                 .context_menu(false)
         });
-        let settings_inputs = SettingsInputs::new(&settings, window, cx);
         // Delegate 只发出交互/补页信号；这里把信号接回应用实体，避免控件直接管理网络状态。
         let (load_more_sender, load_more_receiver) = mpsc::channel(1);
         let (search_load_more_sender, search_load_more_receiver) = mpsc::channel(1);
@@ -282,6 +281,7 @@ impl LyruneView {
         let image_cache = CachedImageCache::new(settings.image_cache_capacity, cx);
         let history_limit = settings.navigation_history_limit;
         let preferences = cx.new(|cx| Preferences::new(settings, fonts, cx));
+        let settings_page = cx.new(|cx| SettingsPage::new(preferences.clone(), window, cx));
         let subscriptions = vec![
             cx.observe(&preferences, |_, _, cx| cx.notify()),
             cx.observe(&account, |_, _, cx| cx.notify()),
@@ -313,51 +313,6 @@ impl LyruneView {
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::PressEnter { .. }) {
                         this.submit_search(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &settings_inputs.audio_cache_limit,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.apply_audio_cache_limit(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &settings_inputs.image_cache_capacity,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.apply_image_cache_capacity(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &settings_inputs.navigation_history_limit,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.apply_navigation_history_limit(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &settings_inputs.lyric_font_scale,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.apply_scale_settings(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &settings_inputs.lyric_line_spacing,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.apply_scale_settings(window, cx);
                     }
                 },
             ),
@@ -410,8 +365,8 @@ impl LyruneView {
             search_track_table,
             search_card_grid,
             search_input,
-            settings_inputs,
-            settings_scroll_handle: ScrollHandle::new(),
+            settings_page,
+            _settings_subscription: None,
             progress,
             player_controls,
             _player_subscription: None,
@@ -525,6 +480,15 @@ impl LyruneView {
             window,
             |this, _, action: &PlayerAction, window, cx| {
                 this.handle_player_action(action, window, cx)
+            },
+        ));
+        self.settings_page
+            .update(cx, |page, cx| page.attach_window(window, cx));
+        self._settings_subscription = Some(cx.subscribe_in(
+            &self.settings_page,
+            window,
+            |this, _, action: &SettingsAction, window, cx| {
+                this.handle_settings_action(action, window, cx)
             },
         ));
         self.progress
@@ -1137,7 +1101,18 @@ impl LyruneView {
             MainContent::Playlist => {
                 self.render_playlist_content(compact, narrow, scale_factor, cx)
             }
-            MainContent::Settings => self.render_settings_page(narrow, cx),
+            MainContent::Settings => {
+                self.settings_page.update(cx, |page, cx| {
+                    if page.update_check_in_progress != self.update_check_in_progress {
+                        page.update_check_in_progress = self.update_check_in_progress;
+                        cx.notify();
+                    }
+                });
+                self.settings_page
+                    .clone()
+                    .cached(StyleRefinement::default().flex_1().w_full().min_h_0())
+                    .into_any_element()
+            }
         };
         let search_width = if narrow {
             px(268.)

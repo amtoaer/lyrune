@@ -5,13 +5,14 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, Selectable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputState, MaskPattern, NumberInput},
+    input::{Input, InputEvent, InputState, MaskPattern, NumberInput},
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     v_flex,
 };
 use lyrune_api::Quality;
 
+use super::preferences::Preferences;
 use super::{LyruneView, page_horizontal_padding};
 use crate::cache::audio_cache_limit_bytes;
 use crate::design::{self, ColorTheme};
@@ -22,23 +23,19 @@ use crate::settings::{
     parse_font_families,
 };
 
-pub(super) struct SettingsInputs {
-    pub(super) ui_font: Entity<InputState>,
-    pub(super) monospace_font: Entity<InputState>,
-    pub(super) lyric_font: Entity<InputState>,
-    pub(super) audio_cache_limit: Entity<InputState>,
-    pub(super) image_cache_capacity: Entity<InputState>,
-    pub(super) navigation_history_limit: Entity<InputState>,
-    pub(super) lyric_font_scale: Entity<InputState>,
-    pub(super) lyric_line_spacing: Entity<InputState>,
+struct SettingsInputs {
+    ui_font: Entity<InputState>,
+    monospace_font: Entity<InputState>,
+    lyric_font: Entity<InputState>,
+    audio_cache_limit: Entity<InputState>,
+    image_cache_capacity: Entity<InputState>,
+    navigation_history_limit: Entity<InputState>,
+    lyric_font_scale: Entity<InputState>,
+    lyric_line_spacing: Entity<InputState>,
 }
 
 impl SettingsInputs {
-    pub(super) fn new(
-        settings: &AppSettings,
-        window: &mut Window,
-        cx: &mut Context<LyruneView>,
-    ) -> Self {
+    fn new(settings: &AppSettings, window: &mut Window, cx: &mut App) -> Self {
         let ui_font_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(settings.ui_font_families.join(", "))
@@ -87,7 +84,7 @@ impl SettingsInputs {
                 .min(1.)
                 .step(1.)
         });
-        let scale_input = |value: u32, window: &mut Window, cx: &mut Context<LyruneView>| {
+        let scale_input = |value: u32, window: &mut Window, cx: &mut App| {
             cx.new(|cx| {
                 InputState::new(window, cx)
                     .default_value(value.to_string())
@@ -120,7 +117,7 @@ impl SettingsInputs {
         monospace: &[String],
         lyrics: &[String],
         window: &mut Window,
-        cx: &mut Context<LyruneView>,
+        cx: &mut App,
     ) {
         for (input, families) in [
             (&self.ui_font, ui),
@@ -134,117 +131,121 @@ impl SettingsInputs {
     }
 }
 
-impl LyruneView {
-    fn set_color_theme(
-        &mut self,
-        color_theme: ColorTheme,
+pub(super) enum SettingsAction {
+    ColorTheme {
+        theme: ColorTheme,
         light: bool,
+    },
+    ThemeMode(ColorThemeMode),
+    TrayIcon(TrayIconStyle),
+    CheckOnStartup(bool),
+    WindowDecoration(WindowDecoration),
+    Quality(Quality),
+    ProgressRate(FrameRate),
+    HighlightRate(FrameRate),
+    ScrollRate(FrameRate),
+    AudioCacheLimit(u64),
+    ImageCacheCapacity(usize),
+    HistoryLimit(usize),
+    Scale {
+        lyric: u32,
+        spacing: u32,
+    },
+    Fonts {
+        ui: Vec<String>,
+        monospace: Vec<String>,
+        lyrics: Vec<String>,
+    },
+    CheckUpdates,
+}
+
+pub(super) struct SettingsPage {
+    preferences: Entity<Preferences>,
+    settings_inputs: SettingsInputs,
+    settings_scroll_handle: ScrollHandle,
+    pub(super) update_check_in_progress: bool,
+    _preferences_subscription: Subscription,
+    _input_subscriptions: Vec<Subscription>,
+    #[cfg(test)]
+    render_count: usize,
+}
+
+impl EventEmitter<SettingsAction> for SettingsPage {}
+
+impl SettingsPage {
+    pub(super) fn new(
+        preferences: Entity<Preferences>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let changed = self.preferences.update(cx, |preferences, cx| {
-            let selected = if light {
-                &mut preferences.settings.light_color_theme
-            } else {
-                &mut preferences.settings.dark_color_theme
-            };
-            if *selected == color_theme {
-                return false;
-            }
-            *selected = color_theme;
-            cx.notify();
-            true
+    ) -> Self {
+        let settings_inputs = preferences.update(cx, |preferences, cx| {
+            SettingsInputs::new(&preferences.settings, window, cx)
         });
-        if !changed {
-            return;
+        let subscription = cx.observe(&preferences, |_, _, cx| cx.notify());
+        Self {
+            preferences,
+            settings_inputs,
+            settings_scroll_handle: ScrollHandle::new(),
+            update_check_in_progress: false,
+            _preferences_subscription: subscription,
+            _input_subscriptions: Vec::new(),
+            #[cfg(test)]
+            render_count: 0,
         }
-        self.preferences
-            .update(cx, |preferences, cx| preferences.apply_theme(window, cx));
-        self.preferences.read(cx).save();
     }
 
-    fn set_color_theme_mode(
-        &mut self,
-        mode: ColorThemeMode,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.preferences.read(cx).settings.color_theme_mode == mode {
-            return;
-        }
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.color_theme_mode = mode;
-            cx.notify();
-        });
-        self.preferences
-            .update(cx, |preferences, cx| preferences.apply_theme(window, cx));
-        self.preferences.read(cx).save();
+    pub(super) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 窗口重开后替换窗口绑定；输入内容和滚动位置仍由同一个页面实体持有。
+        self._input_subscriptions = vec![
+            cx.subscribe_in(
+                &self.settings_inputs.audio_cache_limit,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_audio_cache_limit(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &self.settings_inputs.image_cache_capacity,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_image_cache_capacity(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &self.settings_inputs.navigation_history_limit,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_navigation_history_limit(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &self.settings_inputs.lyric_font_scale,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_scale_settings(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &self.settings_inputs.lyric_line_spacing,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_scale_settings(window, cx);
+                    }
+                },
+            ),
+        ];
     }
 
-    fn set_tray_icon_style(&mut self, style: TrayIconStyle, cx: &mut Context<Self>) {
-        if self.preferences.read(cx).settings.tray_icon_style == style {
-            return;
-        }
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.tray_icon_style = style;
-            cx.notify();
-        });
-        crate::set_tray_icon_style(style.resolve(cx.window_appearance()), cx);
-        self.preferences.read(cx).save();
-        cx.notify();
-    }
-
-    fn set_check_updates_on_startup(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.preferences.read(cx).settings.check_updates_on_startup == enabled {
-            return;
-        }
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.check_updates_on_startup = enabled;
-            cx.notify();
-        });
-        self.preferences.read(cx).save();
-        cx.notify();
-    }
-
-    fn set_window_decoration(
-        &mut self,
-        decoration: WindowDecoration,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.preferences.read(cx).settings.window_decoration == decoration {
-            return;
-        }
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.window_decoration = decoration;
-            cx.notify();
-        });
-        window.request_decorations(match decoration {
-            WindowDecoration::Ssd => WindowDecorations::Server,
-            WindowDecoration::Csd => WindowDecorations::Client,
-        });
-        self.preferences.read(cx).save();
-        window.set_background_appearance(match window.window_decorations() {
-            Decorations::Client { .. } => WindowBackgroundAppearance::Transparent,
-            Decorations::Server => WindowBackgroundAppearance::Opaque,
-        });
-        window.refresh();
-        cx.notify();
-    }
-
-    fn set_preferred_playback_quality(&mut self, quality: Quality, cx: &mut Context<Self>) {
-        if self.preferences.read(cx).settings.playback_quality == quality {
-            return;
-        }
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.playback_quality = quality;
-            cx.notify();
-        });
-        self.preferences.read(cx).save();
-        cx.notify();
-    }
-
-    pub(super) fn apply_audio_cache_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_audio_cache_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.preferences.read(cx).settings.audio_cache_limit_gb;
         let value = self
             .settings_inputs
@@ -260,27 +261,10 @@ impl LyruneView {
             .update(cx, |input, cx| {
                 input.set_value(value.to_string(), window, cx)
             });
-        if value == current {
-            return;
-        }
-
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.audio_cache_limit_gb = value;
-            cx.notify();
-        });
-        if let Some(cache) = &self.audio_cache {
-            cache.set_max_size_bytes(audio_cache_limit_bytes(value));
-        }
-        self.preferences.read(cx).save();
-        self.start_audio_cache_maintenance();
-        cx.notify();
+        cx.emit(SettingsAction::AudioCacheLimit(value));
     }
 
-    pub(super) fn apply_image_cache_capacity(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_image_cache_capacity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.preferences.read(cx).settings.image_cache_capacity;
         let value = self
             .settings_inputs
@@ -297,25 +281,10 @@ impl LyruneView {
             .update(cx, |input, cx| {
                 input.set_value(value.to_string(), window, cx)
             });
-        if value == current {
-            return;
-        }
-
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.image_cache_capacity = value;
-            cx.notify();
-        });
-        self.image_cache
-            .update(cx, |cache, cx| cache.set_capacity(value, window, cx));
-        self.preferences.read(cx).save();
-        cx.notify();
+        cx.emit(SettingsAction::ImageCacheCapacity(value));
     }
 
-    pub(super) fn apply_navigation_history_limit(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_navigation_history_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.preferences.read(cx).settings.navigation_history_limit;
         let value = self
             .settings_inputs
@@ -332,21 +301,10 @@ impl LyruneView {
             .update(cx, |input, cx| {
                 input.set_value(value.to_string(), window, cx)
             });
-        if value == current {
-            return;
-        }
-
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.navigation_history_limit = value;
-            cx.notify();
-        });
-        self.navigation_history.set_limit(value);
-        self.page_resource_cache.prune();
-        self.preferences.read(cx).save();
-        cx.notify();
+        cx.emit(SettingsAction::HistoryLimit(value));
     }
 
-    pub(super) fn apply_scale_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_scale_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let read = |input: &Entity<InputState>, current: u32, max: u32, cx: &mut Context<Self>| {
             input
                 .read(cx)
@@ -374,22 +332,7 @@ impl LyruneView {
                 input.set_value(value.to_string(), window, cx)
             });
         }
-        if lyric == self.preferences.read(cx).settings.lyric_font_scale
-            && spacing == self.preferences.read(cx).settings.lyric_line_spacing
-        {
-            return;
-        }
-
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.lyric_font_scale = lyric;
-            cx.notify();
-        });
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.lyric_line_spacing = spacing;
-            cx.notify();
-        });
-        self.preferences.read(cx).save();
-        cx.notify();
+        cx.emit(SettingsAction::Scale { lyric, spacing });
     }
 
     fn apply_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -402,25 +345,28 @@ impl LyruneView {
                 .as_ref(),
         );
         let lyrics = parse_font_families(self.settings_inputs.lyric_font.read(cx).value().as_ref());
-        self.set_font_settings(
-            if ui.is_empty() {
-                default_ui_font_families()
-            } else {
-                ui
-            },
-            if monospace.is_empty() {
-                default_monospace_font_families()
-            } else {
-                monospace
-            },
-            if lyrics.is_empty() {
-                default_lyric_font_families()
-            } else {
-                lyrics
-            },
-            window,
-            cx,
-        );
+        let ui = if ui.is_empty() {
+            default_ui_font_families()
+        } else {
+            ui
+        };
+        let monospace = if monospace.is_empty() {
+            default_monospace_font_families()
+        } else {
+            monospace
+        };
+        let lyrics = if lyrics.is_empty() {
+            default_lyric_font_families()
+        } else {
+            lyrics
+        };
+        self.settings_inputs
+            .set_fonts(&ui, &monospace, &lyrics, window, cx);
+        cx.emit(SettingsAction::Fonts {
+            ui,
+            monospace,
+            lyrics,
+        });
     }
 
     fn reset_font_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -431,106 +377,15 @@ impl LyruneView {
         self.settings_inputs
             .set_fonts(&ui, &monospace, &lyrics, window, cx);
     }
+}
 
-    fn set_font_settings(
-        &mut self,
-        ui: Vec<String>,
-        monospace: Vec<String>,
-        lyrics: Vec<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.settings_inputs
-            .set_fonts(&ui, &monospace, &lyrics, window, cx);
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.ui_font_families = ui;
-            preferences.settings.monospace_font_families = monospace;
-            preferences.settings.lyric_font_families = lyrics;
-            preferences.fonts = design::resolve_fonts(
-                &preferences.settings.ui_font_families,
-                &preferences.settings.monospace_font_families,
-                &preferences.settings.lyric_font_families,
-                cx,
-            );
-            cx.notify();
-        });
-        self.preferences
-            .update(cx, |preferences, cx| preferences.apply_theme(window, cx));
-        self.lyrics_view
-            .update(cx, |view, cx| view.reset_layout(cx));
-        self.preferences.read(cx).save();
-        cx.notify();
-    }
-
-    fn set_progress_frame_rate(
-        &mut self,
-        frame_rate: FrameRate,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.preferences.read(cx).settings.progress_frame_rate == frame_rate {
-            return;
-        }
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.progress_frame_rate = frame_rate;
-            cx.notify();
-        });
-        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
-        self.preferences.read(cx).save();
-        cx.notify();
-    }
-
-    fn set_lyric_highlight_frame_rate(
-        &mut self,
-        frame_rate: FrameRate,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .preferences
-            .read(cx)
-            .settings
-            .lyric_highlight_frame_rate
-            == frame_rate
+impl Render for SettingsPage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
         {
-            return;
+            self.render_count += 1;
         }
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.lyric_highlight_frame_rate = frame_rate;
-            cx.notify();
-        });
-        self.lyrics_view
-            .update(cx, |view, _| view.reset_lyric_animation_frames());
-        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
-        self.preferences.read(cx).save();
-        cx.notify();
-    }
-
-    fn set_lyric_scroll_frame_rate(
-        &mut self,
-        frame_rate: FrameRate,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.preferences.read(cx).settings.lyric_scroll_frame_rate == frame_rate {
-            return;
-        }
-        self.preferences.update(cx, |preferences, cx| {
-            preferences.settings.lyric_scroll_frame_rate = frame_rate;
-            cx.notify();
-        });
-        self.lyrics_view
-            .update(cx, |view, _| view.reset_lyric_animation_frames());
-        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
-        self.preferences.read(cx).save();
-        cx.notify();
-    }
-
-    pub(super) fn render_settings_page(
-        &mut self,
-        narrow: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+        let narrow = window.viewport_size().width < px(900.);
         let theme = cx.theme().clone();
         let settings = &self.preferences.read(cx).settings;
         let font_field = |label: &'static str, detail: &'static str, input: &Entity<InputState>| {
@@ -602,12 +457,12 @@ impl LyruneView {
                         menu.item(
                             PopupMenuItem::new(color_theme.label())
                                 .checked(selected == color_theme)
-                                .on_click(window.listener_for(
-                                    &view,
-                                    move |this, _, window, cx| {
-                                        this.set_color_theme(color_theme, light, window, cx)
-                                    },
-                                )),
+                                .on_click(window.listener_for(&view, move |_, _, _, cx| {
+                                    cx.emit(SettingsAction::ColorTheme {
+                                        theme: color_theme,
+                                        light,
+                                    })
+                                })),
                         )
                     })
                 })
@@ -624,9 +479,9 @@ impl LyruneView {
                     .flex_1()
                     .h(px(38.))
                     .selected(selected_theme_mode == mode)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_color_theme_mode(mode, window, cx)
-                    }))
+                    .on_click(
+                        cx.listener(move |_, _, _, cx| cx.emit(SettingsAction::ThemeMode(mode))),
+                    )
             })
             .collect::<Vec<_>>();
         let selected_tray_icon_style = settings.tray_icon_style;
@@ -640,7 +495,7 @@ impl LyruneView {
                     .h(px(38.))
                     .selected(selected_tray_icon_style == style)
                     .on_click(
-                        cx.listener(move |this, _, _, cx| this.set_tray_icon_style(style, cx)),
+                        cx.listener(move |_, _, _, cx| cx.emit(SettingsAction::TrayIcon(style))),
                     )
             })
             .collect::<Vec<_>>();
@@ -655,8 +510,8 @@ impl LyruneView {
                     .flex_1()
                     .h(px(38.))
                     .selected(selected_window_decoration == decoration)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_window_decoration(decoration, window, cx)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SettingsAction::WindowDecoration(decoration))
                     }))
             })
             .collect::<Vec<_>>();
@@ -674,8 +529,8 @@ impl LyruneView {
                             .flex_1()
                             .h(px(38.))
                             .selected(preferred_quality == quality)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_preferred_playback_quality(quality, cx)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(SettingsAction::Quality(quality))
                             }))
                     }))
             })
@@ -694,8 +549,8 @@ impl LyruneView {
                     .flex_1()
                     .h(px(36.))
                     .selected(selected_progress_frame_rate == frame_rate)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_progress_frame_rate(frame_rate, window, cx)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SettingsAction::ProgressRate(frame_rate))
                     }))
             })
             .collect::<Vec<_>>();
@@ -713,8 +568,8 @@ impl LyruneView {
                     .flex_1()
                     .h(px(36.))
                     .selected(selected_highlight_frame_rate == frame_rate)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_lyric_highlight_frame_rate(frame_rate, window, cx)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SettingsAction::HighlightRate(frame_rate))
                     }))
             })
             .collect::<Vec<_>>();
@@ -728,14 +583,14 @@ impl LyruneView {
                     .flex_1()
                     .h(px(36.))
                     .selected(selected_scroll_frame_rate == frame_rate)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_lyric_scroll_frame_rate(frame_rate, window, cx)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SettingsAction::ScrollRate(frame_rate))
                     }))
             })
             .collect::<Vec<_>>();
         div()
             .relative()
-            .flex_1()
+            .size_full()
             .min_h_0()
             .child(
                 div()
@@ -844,11 +699,8 @@ impl LyruneView {
                                                 .selected(check_updates_on_startup)
                                                 .w_full()
                                                 .h(px(38.))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.set_check_updates_on_startup(
-                                                        !check_updates_on_startup,
-                                                        cx,
-                                                    )
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    cx.emit(SettingsAction::CheckOnStartup(!check_updates_on_startup))
                                                 })),
                                         )
                                         .child(
@@ -862,8 +714,8 @@ impl LyruneView {
                                             .w_full()
                                             .h(px(38.))
                                             .disabled(self.update_check_in_progress)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.check_updates(true, cx)
+                                            .on_click(cx.listener(|_, _, _, cx| {
+                                                cx.emit(SettingsAction::CheckUpdates)
                                             })),
                                         ),
                                 )
@@ -1072,5 +924,428 @@ impl LyruneView {
             )
             .vertical_scrollbar(&self.settings_scroll_handle)
             .into_any_element()
+    }
+}
+
+impl LyruneView {
+    pub(super) fn handle_settings_action(
+        &mut self,
+        action: &SettingsAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            SettingsAction::ColorTheme { theme, light } => {
+                self.set_color_theme(*theme, *light, window, cx)
+            }
+            SettingsAction::ThemeMode(mode) => self.set_color_theme_mode(*mode, window, cx),
+            SettingsAction::TrayIcon(style) => self.set_tray_icon_style(*style, cx),
+            SettingsAction::CheckOnStartup(enabled) => {
+                self.set_check_updates_on_startup(*enabled, cx)
+            }
+            SettingsAction::WindowDecoration(decoration) => {
+                self.set_window_decoration(*decoration, window, cx)
+            }
+            SettingsAction::Quality(quality) => self.set_preferred_playback_quality(*quality, cx),
+            SettingsAction::ProgressRate(rate) => self.set_progress_frame_rate(*rate, window, cx),
+            SettingsAction::HighlightRate(rate) => {
+                self.set_lyric_highlight_frame_rate(*rate, window, cx)
+            }
+            SettingsAction::ScrollRate(rate) => self.set_lyric_scroll_frame_rate(*rate, window, cx),
+            SettingsAction::AudioCacheLimit(value) => self.set_audio_cache_limit(*value, cx),
+            SettingsAction::ImageCacheCapacity(value) => {
+                self.set_image_cache_capacity(*value, window, cx)
+            }
+            SettingsAction::HistoryLimit(value) => self.set_navigation_history_limit(*value, cx),
+            SettingsAction::Scale { lyric, spacing } => {
+                self.set_scale_settings(*lyric, *spacing, cx)
+            }
+            SettingsAction::Fonts {
+                ui,
+                monospace,
+                lyrics,
+            } => self.set_font_settings(ui.clone(), monospace.clone(), lyrics.clone(), window, cx),
+            SettingsAction::CheckUpdates => self.check_updates(true, cx),
+        }
+    }
+
+    fn set_color_theme(
+        &mut self,
+        color_theme: ColorTheme,
+        light: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.preferences.update(cx, |preferences, cx| {
+            let selected = if light {
+                &mut preferences.settings.light_color_theme
+            } else {
+                &mut preferences.settings.dark_color_theme
+            };
+            if *selected == color_theme {
+                return false;
+            }
+            *selected = color_theme;
+            cx.notify();
+            true
+        });
+        if !changed {
+            return;
+        }
+        self.preferences
+            .update(cx, |preferences, cx| preferences.apply_theme(window, cx));
+        self.preferences.read(cx).save();
+    }
+
+    fn set_color_theme_mode(
+        &mut self,
+        mode: ColorThemeMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.preferences.read(cx).settings.color_theme_mode == mode {
+            return;
+        }
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.color_theme_mode = mode;
+            cx.notify();
+        });
+        self.preferences
+            .update(cx, |preferences, cx| preferences.apply_theme(window, cx));
+        self.preferences.read(cx).save();
+    }
+
+    fn set_tray_icon_style(&mut self, style: TrayIconStyle, cx: &mut Context<Self>) {
+        if self.preferences.read(cx).settings.tray_icon_style == style {
+            return;
+        }
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.tray_icon_style = style;
+            cx.notify();
+        });
+        crate::set_tray_icon_style(style.resolve(cx.window_appearance()), cx);
+        self.preferences.read(cx).save();
+        cx.notify();
+    }
+
+    fn set_check_updates_on_startup(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.preferences.read(cx).settings.check_updates_on_startup == enabled {
+            return;
+        }
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.check_updates_on_startup = enabled;
+            cx.notify();
+        });
+        self.preferences.read(cx).save();
+        cx.notify();
+    }
+
+    fn set_window_decoration(
+        &mut self,
+        decoration: WindowDecoration,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.preferences.read(cx).settings.window_decoration == decoration {
+            return;
+        }
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.window_decoration = decoration;
+            cx.notify();
+        });
+        window.request_decorations(match decoration {
+            WindowDecoration::Ssd => WindowDecorations::Server,
+            WindowDecoration::Csd => WindowDecorations::Client,
+        });
+        self.preferences.read(cx).save();
+        window.set_background_appearance(match window.window_decorations() {
+            Decorations::Client { .. } => WindowBackgroundAppearance::Transparent,
+            Decorations::Server => WindowBackgroundAppearance::Opaque,
+        });
+        window.refresh();
+        cx.notify();
+    }
+
+    fn set_preferred_playback_quality(&mut self, quality: Quality, cx: &mut Context<Self>) {
+        if self.preferences.read(cx).settings.playback_quality == quality {
+            return;
+        }
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.playback_quality = quality;
+            cx.notify();
+        });
+        self.preferences.read(cx).save();
+        cx.notify();
+    }
+
+    fn set_audio_cache_limit(&mut self, value: u64, cx: &mut Context<Self>) {
+        let current = self.preferences.read(cx).settings.audio_cache_limit_gb;
+        if value == current {
+            return;
+        }
+
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.audio_cache_limit_gb = value;
+            cx.notify();
+        });
+        if let Some(cache) = &self.audio_cache {
+            cache.set_max_size_bytes(audio_cache_limit_bytes(value));
+        }
+        self.preferences.read(cx).save();
+        self.start_audio_cache_maintenance();
+        cx.notify();
+    }
+
+    fn set_image_cache_capacity(
+        &mut self,
+        value: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.preferences.read(cx).settings.image_cache_capacity;
+        if value == current {
+            return;
+        }
+
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.image_cache_capacity = value;
+            cx.notify();
+        });
+        self.image_cache
+            .update(cx, |cache, cx| cache.set_capacity(value, window, cx));
+        self.preferences.read(cx).save();
+        cx.notify();
+    }
+
+    fn set_navigation_history_limit(&mut self, value: usize, cx: &mut Context<Self>) {
+        let current = self.preferences.read(cx).settings.navigation_history_limit;
+        if value == current {
+            return;
+        }
+
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.navigation_history_limit = value;
+            cx.notify();
+        });
+        self.navigation_history.set_limit(value);
+        self.page_resource_cache.prune();
+        self.preferences.read(cx).save();
+        cx.notify();
+    }
+
+    fn set_scale_settings(&mut self, lyric: u32, spacing: u32, cx: &mut Context<Self>) {
+        if lyric == self.preferences.read(cx).settings.lyric_font_scale
+            && spacing == self.preferences.read(cx).settings.lyric_line_spacing
+        {
+            return;
+        }
+
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.lyric_font_scale = lyric;
+            cx.notify();
+        });
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.lyric_line_spacing = spacing;
+            cx.notify();
+        });
+        self.preferences.read(cx).save();
+        cx.notify();
+    }
+
+    fn set_font_settings(
+        &mut self,
+        ui: Vec<String>,
+        monospace: Vec<String>,
+        lyrics: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.ui_font_families = ui;
+            preferences.settings.monospace_font_families = monospace;
+            preferences.settings.lyric_font_families = lyrics;
+            preferences.fonts = design::resolve_fonts(
+                &preferences.settings.ui_font_families,
+                &preferences.settings.monospace_font_families,
+                &preferences.settings.lyric_font_families,
+                cx,
+            );
+            cx.notify();
+        });
+        self.preferences
+            .update(cx, |preferences, cx| preferences.apply_theme(window, cx));
+        self.lyrics_view
+            .update(cx, |view, cx| view.reset_layout(cx));
+        self.preferences.read(cx).save();
+        cx.notify();
+    }
+
+    fn set_progress_frame_rate(
+        &mut self,
+        frame_rate: FrameRate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.preferences.read(cx).settings.progress_frame_rate == frame_rate {
+            return;
+        }
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.progress_frame_rate = frame_rate;
+            cx.notify();
+        });
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
+        self.preferences.read(cx).save();
+        cx.notify();
+    }
+
+    fn set_lyric_highlight_frame_rate(
+        &mut self,
+        frame_rate: FrameRate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .preferences
+            .read(cx)
+            .settings
+            .lyric_highlight_frame_rate
+            == frame_rate
+        {
+            return;
+        }
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.lyric_highlight_frame_rate = frame_rate;
+            cx.notify();
+        });
+        self.lyrics_view
+            .update(cx, |view, _| view.reset_lyric_animation_frames());
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
+        self.preferences.read(cx).save();
+        cx.notify();
+    }
+
+    fn set_lyric_scroll_frame_rate(
+        &mut self,
+        frame_rate: FrameRate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.preferences.read(cx).settings.lyric_scroll_frame_rate == frame_rate {
+            return;
+        }
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.lyric_scroll_frame_rate = frame_rate;
+            cx.notify();
+        });
+        self.lyrics_view
+            .update(cx, |view, _| view.reset_lyric_animation_frames());
+        window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
+        self.preferences.read(cx).save();
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, StyleRefinement,
+        Styled as _, TestAppContext, Window, div, font, px,
+    };
+    use gpui_component::{input::InputEvent, v_flex};
+
+    use super::{Preferences, SettingsAction, SettingsPage};
+    use crate::design::{AppFonts, ColorTheme};
+    use crate::settings::AppSettings;
+
+    struct TestSettingsPage {
+        page: Entity<SettingsPage>,
+    }
+
+    impl Render for TestSettingsPage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            v_flex()
+                .size_full()
+                .child(div().h(px(72.)).flex_shrink_0())
+                .child(
+                    self.page
+                        .clone()
+                        .cached(StyleRefinement::default().flex_1().w_full().min_h_0()),
+                )
+                .child(div().h(px(112.)).flex_shrink_0())
+        }
+    }
+
+    #[gpui::test]
+    fn test_settings_cache_and_window_binding(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let preferences = cx.new(|_| Preferences {
+            settings: AppSettings::default(),
+            fonts: AppFonts {
+                ui: font(".SystemUIFont"),
+                monospace: font(".SystemUIFont"),
+                lyrics: font(".SystemUIFont"),
+            },
+            color_theme: ColorTheme::default(),
+            writer: None,
+        });
+        let (host, cx) = cx.add_window_view(|window, cx| TestSettingsPage {
+            page: cx.new(|cx| SettingsPage::new(preferences.clone(), window, cx)),
+        });
+        let page = host.read_with(cx, |host, _| host.page.clone());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let before = page.read_with(cx, |page, _| page.render_count);
+        let expected_height = cx.update(|window, _| window.viewport_size().height - px(184.));
+        page.read_with(cx, |page, _| {
+            assert_eq!(
+                page.settings_scroll_handle.bounds().size.height,
+                expected_height
+            )
+        });
+        for _ in 0..3 {
+            host.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(page.read_with(cx, |page, _| page.render_count), before);
+        preferences.update(cx, |preferences, cx| {
+            preferences.settings.progress_frame_rate = crate::settings::FrameRate::Fps90;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(page.read_with(cx, |page, _| page.render_count) > before);
+
+        let events = Rc::new(Cell::new(0));
+        let received = events.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&page, move |_, event: &SettingsAction, _| {
+                if matches!(event, SettingsAction::AudioCacheLimit(12)) {
+                    received.set(received.get() + 1);
+                }
+            })
+        });
+        cx.update(|window, cx| {
+            page.update(cx, |page, cx| {
+                page.attach_window(window, cx);
+                page.attach_window(window, cx);
+                page.settings_inputs
+                    .audio_cache_limit
+                    .update(cx, |input, cx| {
+                        input.set_value("12", window, cx);
+                        cx.emit(InputEvent::Blur);
+                    });
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(events.get(), 1);
+        // 页面只发出提交意图，草稿输入不会自行覆盖共享配置。
+        assert_ne!(
+            preferences.read_with(cx, |preferences, _| preferences
+                .settings
+                .audio_cache_limit_gb),
+            12
+        );
     }
 }

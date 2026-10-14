@@ -670,6 +670,32 @@ impl BrowserView {
                 cx.notify();
             }
         });
+        let mut title = h_flex().h(px(36.)).min_w_0().gap_3().text_size(px(24.));
+        if let Some(artist) = &self.artist.selected {
+            title = title
+                .child(self.render_artist_cover(
+                    artist.cover_url.clone(),
+                    MediaIcon::Artist,
+                    px(32.),
+                    px(999.),
+                    window.scale_factor(),
+                    cx,
+                ))
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .gap_2()
+                        .child(div().truncate().font_semibold().child(artist.name.clone()))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(theme.secondary_foreground)
+                                .child("的专辑"),
+                        ),
+                );
+        } else {
+            title = title.child("专辑");
+        }
         v_flex()
             .flex_1()
             .min_h_0()
@@ -679,14 +705,11 @@ impl BrowserView {
             .px(page_horizontal_padding(narrow))
             .child(
                 div()
+                    .debug_selector(|| "artist-album-header".into())
                     .pt_2()
                     .pb_3()
-                    .text_size(px(24.))
-                    .font_semibold()
-                    .child(self.artist.selected.as_ref().map_or_else(
-                        || "专辑".to_owned(),
-                        |artist| format!("{}的专辑", artist.name),
-                    )),
+                    .flex_shrink_0()
+                    .child(title),
             )
             .when(loading && !has_results, |this| {
                 this.child(

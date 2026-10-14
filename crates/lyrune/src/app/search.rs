@@ -594,6 +594,7 @@ impl BrowserView {
             .bg(theme.background)
             .child(
                 v_flex()
+                    .debug_selector(|| "search-category-header".into())
                     .w_full()
                     .mx_auto()
                     .px(page_horizontal_padding(narrow))

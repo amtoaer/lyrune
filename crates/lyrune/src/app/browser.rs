@@ -654,6 +654,12 @@ mod tests {
         });
         cx.simulate_resize(size(px(1000.), px(1900.)));
         let browser = host.read_with(cx, |host, _| host.browser.clone());
+        browser.update(cx, |browser, cx| {
+            browser.main_content = MainContent::Search;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let search_header = cx.debug_bounds("search-category-header").unwrap();
         let artist = SearchArtist {
             mid: "artist".into(),
             name: "Artist".into(),
@@ -751,6 +757,9 @@ mod tests {
             assert!(browser.main_content == MainContent::ArtistAlbums);
             browser.artist_album_grid.clone()
         });
+        let album_header = cx.debug_bounds("artist-album-header").unwrap();
+        assert_eq!(album_header.top(), search_header.top());
+        assert_eq!(album_header.size.height, search_header.size.height);
         for (width, row_end) in [
             (850., "search-album-2"),
             (1000., "search-album-3"),

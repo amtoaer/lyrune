@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{Pixels, Rgba, black, px, rgb};
+use gpui::{Hsla, Pixels, black, px, rgb};
 use lyrune_api::{
     PlaylistPage, Quality, RecommendationKind, SearchAlbum, SearchPage, SearchResults, Track,
     UserPlaylist, UserPlaylistId,
@@ -13,7 +13,7 @@ use super::animation::frame_is_due;
 use super::home::HomePageState;
 use super::lyrics::parse_lyrics;
 use super::lyrics_view::{
-    LYRIC_MINIMUM_CONTRAST, adjacent_lyric_timing, combined_lyric_frame_interval, contrast_ratio,
+    LYRIC_TARGET_CONTRAST, adjacent_lyric_timing, combined_lyric_frame_interval, contrast_ratio,
     lyric_edge_opacity, lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
     readable_lyric_color,
 };
@@ -193,33 +193,42 @@ fn playback_load_rejects_requests_across_restarts() {
 
 #[test]
 fn lyric_foreground_preserves_a_readable_theme_color() {
-    let preferred = rgb(0x182030).into();
-    let result =
-        readable_lyric_color([0.95, 0.95, 0.95], black().opacity(0.28), preferred).to_rgb();
-    let preferred = preferred.to_rgb();
-
-    assert!((result.r - preferred.r).abs() < 1e-6);
-    assert!((result.g - preferred.g).abs() < 1e-6);
-    assert!((result.b - preferred.b).abs() < 1e-6);
+    for (background, preferred) in [(0.95, 0x182030), (0.1, 0xdcd7ba)] {
+        let preferred = rgb(preferred).into();
+        let result = readable_lyric_color([background; 3], black().opacity(0.28), preferred);
+        assert_eq!(result, preferred);
+    }
 }
 
 #[test]
-fn lyric_foreground_minimally_corrects_insufficient_theme_contrast() {
-    let background = Rgba {
-        r: 0.5,
-        g: 0.5,
-        b: 0.5,
-        a: 1.,
-    };
+fn lyric_foreground_keeps_theme_tint_on_midtones() {
+    let preferred: Hsla = rgb(0xdcd7ba).into();
+    for background in [rgb(0x8a8a8d), rgb(0x73808d)] {
+        let result = readable_lyric_color(
+            [background.r, background.g, background.b],
+            black().opacity(0.),
+            preferred,
+        );
+
+        assert_eq!((result.h, result.s), (preferred.h, preferred.s));
+        assert!(result.l >= 0.12 && result.l < 0.2);
+        assert!(contrast_ratio(result.to_rgb(), background) >= 3.5);
+    }
+}
+
+#[test]
+fn lyric_foreground_limits_brightening() {
+    let background = rgb(0x60636d);
+    let preferred: Hsla = rgb(0xdcd7ba).into();
     let result = readable_lyric_color(
         [background.r, background.g, background.b],
         black().opacity(0.),
-        rgb(0x777777).into(),
-    )
-    .to_rgb();
+        preferred,
+    );
 
-    assert!(contrast_ratio(result, background) >= LYRIC_MINIMUM_CONTRAST);
-    assert!(result.r > 0. && result.g > 0. && result.b > 0.);
+    assert_eq!((result.h, result.s), (preferred.h, preferred.s));
+    assert!(result.l > preferred.l && result.l <= 0.85);
+    assert!(contrast_ratio(result.to_rgb(), background) >= LYRIC_TARGET_CONTRAST);
 }
 
 #[test]

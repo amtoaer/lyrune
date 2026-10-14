@@ -29,8 +29,9 @@ const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
 pub(super) const LYRIC_EXPANSION_DURATION: Duration = Duration::from_millis(480);
 const LYRIC_TRACK_SWITCH_DURATION: Duration = Duration::from_millis(420);
 pub(super) const LYRIC_BACKGROUND_OVERLAY_OPACITY: f32 = 0.4;
-pub(super) const LYRIC_MINIMUM_CONTRAST: f32 = 3.5;
-const LYRIC_DARK_TEXT_LUMINANCE: f32 = 0.25;
+pub(super) const LYRIC_TARGET_CONTRAST: f32 = 4.5;
+const LYRIC_DARK_TEXT_LIGHTNESS: f32 = 0.12;
+const LYRIC_LIGHT_TEXT_LIGHTNESS: f32 = 0.85;
 const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
 const LYRIC_HORIZONTAL_STEP: f32 = 0.5;
 
@@ -72,43 +73,46 @@ pub(super) fn readable_lyric_color(sampled_rgb: [f32; 3], overlay: Hsla, preferr
         b: sampled_rgb[2] * (1. - overlay.a) + overlay.b * overlay.a,
         a: 1.,
     };
-    let mut preferred = preferred.to_rgb();
+    let mut preferred = preferred;
     preferred.a = 1.;
-    if contrast_ratio(preferred, background) >= LYRIC_MINIMUM_CONTRAST {
-        return preferred.into();
+    if contrast_ratio(preferred.to_rgb(), background) >= LYRIC_TARGET_CONTRAST {
+        return preferred;
     }
 
-    let black = black().to_rgb();
-    let white = white().to_rgb();
-    let neutral = if relative_luminance(background) >= LYRIC_DARK_TEXT_LUMINANCE {
-        black
-    } else {
-        white
+    // 保留主题色相和饱和度；明度到达边界后不再追逐对比度，避免变成纯黑或纯白。
+    let dark = Hsla {
+        l: preferred.l.min(LYRIC_DARK_TEXT_LIGHTNESS),
+        ..preferred
     };
+    let light = Hsla {
+        l: preferred.l.max(LYRIC_LIGHT_TEXT_LIGHTNESS),
+        ..preferred
+    };
+    let target =
+        if contrast_ratio(dark.to_rgb(), background) > contrast_ratio(light.to_rgb(), background) {
+            dark
+        } else {
+            light
+        };
     let mut lower = 0.;
     let mut upper = 1.;
     for _ in 0..12 {
         let amount = (lower + upper) / 2.;
-        let candidate = Rgba {
-            r: preferred.r + (neutral.r - preferred.r) * amount,
-            g: preferred.g + (neutral.g - preferred.g) * amount,
-            b: preferred.b + (neutral.b - preferred.b) * amount,
-            a: 1.,
+        let candidate = Hsla {
+            l: preferred.l + (target.l - preferred.l) * amount,
+            ..preferred
         };
-        if contrast_ratio(candidate, background) >= LYRIC_MINIMUM_CONTRAST {
+        if contrast_ratio(candidate.to_rgb(), background) >= LYRIC_TARGET_CONTRAST {
             upper = amount;
         } else {
             lower = amount;
         }
     }
 
-    Rgba {
-        r: preferred.r + (neutral.r - preferred.r) * upper,
-        g: preferred.g + (neutral.g - preferred.g) * upper,
-        b: preferred.b + (neutral.b - preferred.b) * upper,
-        a: 1.,
+    Hsla {
+        l: preferred.l + (target.l - preferred.l) * upper,
+        ..preferred
     }
-    .into()
 }
 
 fn foreground_for_cover(

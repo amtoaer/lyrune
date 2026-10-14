@@ -6,23 +6,27 @@
 
 程序入口是 [main.rs](../crates/lyrune/src/main.rs)：创建 GPUI 应用和窗口，连接托盘、单实例和 Linux 媒体控制。[app.rs](../crates/lyrune/src/app.rs) 定义 `LyruneView`，创建控件和订阅，组合主界面。
 
-`app/` 中的 `impl LyruneView` 都作用于同一个 GPUI 实体。实体持有领域状态和控件，方法按职责放置；关闭窗口后，主程序仍可持有这个实体，继续播放。拆分状态所有者时，需要同时考虑窗口重开、订阅和后台任务的寿命。
+`LyruneView` 负责窗口层级、菜单状态和跨领域操作顺序，持有账号、播放、浏览和显示实体。它们在同一个 GPUI 应用线程上通过实体句柄、观察和具体事件协作。关闭窗口留在托盘时，主程序继续持有这些实体；播放、数据请求和设置保存不依赖窗口存活。
 
 | 模块 | 负责什么 |
 | --- | --- |
 | [account](../crates/lyrune/src/app/account.rs) | `Account` 持有账号、凭据、二维码及登录版本；扫码登录、凭据恢复和刷新、退出及会话失效 |
+| [browser](../crates/lyrune/src/app/browser.rs) | `BrowserView` 拥有普通页面、历史、页面资源索引、喜欢状态和浏览控件；接收页面请求结果与播放事件 |
+| [navigation_view](../crates/lyrune/src/app/navigation_view.rs) | `NavigationView` 拥有搜索输入和导航按钮，`SidebarView` 拥有歌单列表与窗口拖动手势；通过事件交给浏览实体导航 |
 | [navigation](../crates/lyrune/src/app/navigation.rs) | 页面快照、前进后退；`PageResourceCache` 管账号隔离的弱引用索引、获取和淘汰；资源类型管理结果应用 |
-| [home](../crates/lyrune/src/app/home.rs)、[search](../crates/lyrune/src/app/search.rs)、[artist](../crates/lyrune/src/app/artist.rs) | 各页面的 `*PageState` 持有当前页状态，视图方法负责加载、分页和显示 |
+| [home](../crates/lyrune/src/app/home.rs)、[search](../crates/lyrune/src/app/search.rs)、[artist](../crates/lyrune/src/app/artist.rs) | 各页面的 `*PageState` 属于 `BrowserView`，各模块中的浏览视图方法负责加载、分页和显示 |
 | [playlists](../crates/lyrune/src/app/playlists.rs) | `PlaylistPageState` 持有当前歌单与滚动恢复；用户歌单、分页浏览、喜欢状态及页面同步 |
-| [queue](../crates/lyrune/src/app/queue.rs) | 播放队列的建立、插入、补全、恢复和推荐续播 |
-| [playback](../crates/lyrune/src/app/playback.rs) | `Playback` 持有音频设备、队列、当前曲、位置、音质和恢复信息；音源加载、音源选择、音质回退、解码准备、播放/暂停/跳歌/seek |
-| [playback_sync](../crates/lyrune/src/app/playback_sync.rs) | 窗口进度、曲终处理、定期保存、MPRIS 和休眠抑制 |
-| [player_view](../crates/lyrune/src/app/player_view.rs) | 播放栏组合和音质菜单 |
+| [queue](../crates/lyrune/src/app/queue.rs) | `PlaybackQueue` 的数据规则；`BrowserView` 将页面选择转换为队列，`Playback` 负责队列补全、恢复和续播 |
+| [playback](../crates/lyrune/src/app/playback.rs) | `Playback` 实体拥有 `PlaybackState`、音源任务及缓存/CDN 维护；状态包含设备、队列、位置和加载版本，实体处理音源选择、音质回退和播放操作 |
+| [playback_sync](../crates/lyrune/src/app/playback_sync.rs) | `Playback` 的后台 tick、曲终处理、定期保存、MPRIS 和休眠抑制 |
+| [player_view](../crates/lyrune/src/app/player_view.rs) | `PlayerControlsView` 拥有歌曲信息、按钮和音量滑块；根视图组合播放栏并维持音质菜单顺序 |
 | [progress_view](../crates/lyrune/src/app/progress_view.rs) | 独立进度实体拥有滑块、拖动预览和悬停状态，松手后发出 seek 事件 |
-| [lyrics_loading](../crates/lyrune/src/app/lyrics_loading.rs) | `LyricsCache` 持有歌词数据缓存并应用结果；视图编排磁盘读取、网络刷新与通知 |
+| [lyrics_loading](../crates/lyrune/src/app/lyrics_loading.rs) | `LyricsCache` 实体拥有共享歌词数据和加载接收任务；编排磁盘读取、网络刷新与结果应用 |
 | [lyrics](../crates/lyrune/src/app/lyrics.rs) | LRC/QRC 解析、翻译和注音对齐 |
-| [lyrics_view](../crates/lyrune/src/app/lyrics_view.rs) | 歌词排版、逐字高亮、滚动、封面背景和动画帧调度 |
-| [app/settings](../crates/lyrune/src/app/settings.rs) | `SettingsInputs` 创建和持有设置输入控件；设置页面及偏好的即时生效 |
+| [lyrics_view](../crates/lyrune/src/app/lyrics_view.rs) | `LyricsView` 拥有排版缓存、逐字高亮、滚动、封面过渡、窗口手势和显示帧调度 |
+| [app/settings](../crates/lyrune/src/app/settings.rs) | `SettingsPage` 拥有输入草稿、滚动位置和输入订阅；发出 `SettingsAction`，由根视图协调缓存、字体和窗口等即时效果 |
+
+[preferences](../crates/lyrune/src/app/preferences.rs) 的 `Preferences` 实体持有已提交的 `AppSettings`、字体、主题和唯一的设置写入队列。窗口大小、播放快照等仅供保存的数据变化不会通知所有偏好读取者。
 
 底层模块中，`player.rs` 管音频设备与解码，`cache.rs` 管音频缓存与流，`http.rs` 管图片缓存，`settings.rs` 管设置和持久化数据格式，`credentials.rs` 管系统钥匙串，`library.rs` 管列表/表格 Delegate。
 
@@ -51,11 +55,11 @@
 3. 歌单页和歌手页选曲共用 `select_playlist_track`，统一判断复用队列、切换暂停或建立新队列；搜索结果仍按独立规则插入当前歌曲之后。随后调用 `start_playback`，Tokio 任务通过 `prepare_playback_stream` 复用或重新解析音源，再到阻塞线程准备解码器；GPUI 回调检查播放版本后才调用 `AudioPlayer::replace`。
 4. 后台 tick 读取音频进度、判断曲终、保存播放状态并同步系统媒体控制。歌词显示与进度条分别按各自设置运行窗口帧回调，共享实际音频时钟。
 
-`LyruneView::playback` 持有播放会话，音频设备以 `Arc` 供进度视图读取同一时钟；滑块和悬停预览由 `PlaybackProgressView` 持有，音质菜单仍是播放栏状态。会话内的 `PlaybackLoad` 统一维护请求版本、版本检查和加载标记清理。`invalidate` 只使旧结果失效，`clear` 只清除加载索引与播放意图，保留版本；退出账号时不能用默认值替换整个会话或加载对象。调用处保留以下顺序：
+`LyruneView::playback` 是播放实体句柄，音频设备以 `Arc` 供歌词和进度视图读取同一时钟；滑块和悬停预览由 `PlaybackProgressView` 持有，音质菜单的开闭由根视图协调。会话内的 `PlaybackLoad` 统一维护请求版本、版本检查和加载标记清理。`invalidate` 只使旧结果失效，`clear` 只清除加载索引与播放意图，保留版本；退出账号时不能用默认值替换整个会话或加载对象。调用处保留以下顺序：
 
 | 触发 | 加载状态与外部操作的顺序 |
 | --- | --- |
-| 开始播放、切歌或切音质 | 停止设备、请求歌词 → 递增版本 → 设置当前和加载索引 → 检查喜欢状态 → 写入自动播放意图 |
+| 开始播放、切歌或切音质 | 停止设备、请求歌词 → 递增版本 → 设置索引、播放意图和位置 → 发出 TrackStarted、保存快照并启动音源任务；浏览实体收到事件后检查喜欢状态 |
 | 加载完成 | 检查版本 → 清除加载标记 → 装入音源，或按原错误路径提示并跳歌 |
 | 停止播放 | 递增版本 → 停止设备 → 清除加载标记 |
 | 退出账号 | 递增版本 → 停止设备 → 撤销凭据、清理页面和队列 → 清除加载标记 |
@@ -64,7 +68,7 @@
 
 ### 账户任务的边界
 
-`Account` 拥有账户状态、凭据句柄、资料、二维码、登录版本和文案。它管理发起登录、失效、会话身份和撤销规则；`account.rs` 中的视图方法负责串接协议、钥匙串、其他领域和 GPUI 通知。登录状态与凭据安装在同一次视图更新中完成。
+`Account` 拥有账户状态、凭据句柄、资料、二维码、登录版本和文案。它拥有凭据恢复、扫码、会话监听、验证和保存任务，登录状态与凭据安装在同一次账号实体更新中完成。`AccountEvent` 将登录成功、会话失效和错误交给根视图；根视图协调浏览加载、退出清理和窗口通知，收到失效事件时再次核对版本及会话身份。
 
 | 任务 | 启动与结果处理 | 失效/结束规则 |
 | --- | --- | --- |
@@ -76,31 +80,31 @@
 
 ### 控件、设置与长任务
 
-`SettingsInputs` 拥有设置输入框及默认值、掩码和校验，`set_fonts` 仅回填三个字体输入框。“恢复默认”先改输入框，“应用字体”才更新字体、主题、排版缓存并提交保存。其他设置的读值、即时生效、保存和通知顺序由各自的事件处理方法负责。
+`SettingsPage` 内的 `SettingsInputs` 拥有设置输入框及默认值、掩码和校验，`set_fonts` 仅回填三个字体输入框。“恢复默认”先改输入框，“应用字体”才更新字体、主题、排版缓存并提交保存。其他设置的读值、即时生效、保存和通知顺序由各自的事件处理方法负责。
 
-`LyruneView` 持有唯一的 `SettingsWriter`，UI 将 `AppSettings` 快照发送到 FIFO 队列，不防抖或合并；文件更新会晚于 UI 提交请求。保存任务逐条等待 `spawn_blocking` 完成；`SettingsStore` 消费快照，规范化、序列化后写入同目录临时文件，再用 rename 原子替换正式文件。保存途中进程终止不会截断已提交的配置；残留临时文件不参与启动读取，下次保存时覆盖。磁盘回写交给操作系统，不使用 fsync，不承诺断电后的持久性。保存错误当前被忽略。
+`Preferences` 持有唯一的 `SettingsWriter`，UI 将 `AppSettings` 快照发送到 FIFO 队列，不防抖或合并；文件更新会晚于 UI 提交请求。保存任务逐条等待 `spawn_blocking` 完成；`SettingsStore` 消费快照，规范化、序列化后写入同目录临时文件，再用 rename 原子替换正式文件。保存途中进程终止不会截断已提交的配置；残留临时文件不参与启动读取，下次保存时覆盖。磁盘回写交给操作系统，不使用 fsync，不承诺断电后的持久性。保存错误当前被忽略。
 
-`LyruneView::new` 创建领域状态、控件和订阅，随后 attach window、报告初始化错误、启动音频缓存/CDN 维护、恢复凭据、按设置安排更新检查。保留订阅句柄使回调持续有效，窗口观察句柄只在 `attach_window` 替换；进度视图同时递增窗口版本并重新开始帧调度，旧窗口的回调不能接管新窗口。补页事件接收器跟随实体；表格导航事件接收器使用 `spawn_in`，跟随创建它的窗口。
+`LyruneView::new` 创建领域状态、控件和订阅，随后 attach window、报告初始化错误、启动音频缓存/CDN 维护、恢复凭据、按设置安排更新检查。保留订阅句柄使回调持续有效；根视图、浏览视图和设置页在 `attach_window` 替换窗口绑定的订阅，歌词和进度视图递增窗口版本并恢复帧调度，旧回调不能接管新窗口。浏览补页及表格事件接收器通过 `cx.spawn` 跟随浏览实体；需要窗口的操作每次取最新句柄，窗口关闭时忽略残留 UI 事件，但不结束接收循环。
 
-CDN 维护和音频缓存维护由视图保存 JoinHandle，重启维护或 Drop 时 abort。CDN 成功刷新后通过阻塞线程保存，刷新失败后等待 60 秒再进入下一轮。更新检查延时启动并重新读取开关/进行中状态；完成后按“手动/自动”区别通知。通知经当前记录的窗口句柄 defer。
+CDN 维护和音频缓存维护由 `Playback` 保存 JoinHandle，重启维护或关闭应用时显式 abort。CDN 成功刷新后通过阻塞线程保存，刷新失败后等待 60 秒再进入下一轮。更新检查延时启动并重新读取开关/进行中状态；完成后按“手动/自动”区别通知。通知经当前记录的窗口句柄 defer。
 
-退出回调调用 `shutdown`：先提交播放快照、停止音频，再提交其余偏好，关闭发送端并等待保存队列排空，最后 abort 两项维护。第一步可能因无账号/当前曲或快照没变化而不保存，所以不能删除第二次保存。等待放在退出回调返回之前：GPUI 对退出 future 的等待仅有 200ms，macOS 终止也不保证返回 main。工作线程不访问 GPUI，不依赖 UI 继续轮询。Drop 复用同一清理入口；已取走的写入者和设备不会再次保存或停止。关闭窗口留在托盘时不会结束写入者。
+退出回调调用 `shutdown`：先提交播放快照、停止音频，再提交其余偏好，关闭发送端并等待保存队列排空，最后 abort 两项维护。第一步可能因无账号/当前曲或快照没变化而不保存，所以不能删除第二次保存。等待放在退出回调返回之前：GPUI 对退出 future 的等待仅有 200ms，macOS 终止也不保证返回 main。工作线程不访问 GPUI，不依赖 UI 继续轮询。GPUI 的实体释放回调复用同一清理入口；已取走的写入者和设备不会再次保存或停止。关闭窗口留在托盘时不会结束写入者。
 
 ### 浏览状态和请求边界
 
-搜索、歌手、首页和歌单各自的 `*PageState` 保存当前页选择、可见数量或加载状态。它们没有自己的任务句柄；GPUI 实体在各页面模块编排任务。`NavigationPage` 是历史快照，保存资源强引用而不复制请求结果；控件由视图持有。页面切换按字段清理，不用整个页面 Default 代替，以免丢失历史选择或重用版本。
+搜索、歌手、首页和歌单各自的 `*PageState` 保存当前页选择、可见数量或加载状态。它们没有自己的任务句柄；`BrowserView` 在各页面模块编排任务。`NavigationPage` 是历史快照，保存资源强引用而不复制请求结果；控件由浏览实体持有。页面切换按字段清理，不用整个页面 Default 代替，以免丢失历史选择或重用版本。
 
 搜索/歌手请求先更新共享资源，再比较当前页资源的 Arc 身份；离开页面不取消请求。歌单页面与播放补全通过既有 SingleFlight 共享请求，资源的 offset 规则拒绝重复回填。库目录和首页请求分别比较自己的版本；喜欢操作继续比较账号 ID。缓存保存策略、错误状态和这些过滤条件均不统一成通用框架。
 
 ### 歌词任务的边界
 
-`LyricsCache` 管磁盘句柄、已采用内容、待采用内容、正在加载和错误状态。`ensure_track_lyrics` 按 TTL 与加载集合去重；后台任务经容量 2 的通道依次发送磁盘和网络事件，GPUI 调用 `LyricsCache::apply` 后通知。缓存按歌曲 mid 共享，不随退出账号或离开页面清空，没有会话版本过滤。
+`LyricsCache` 管磁盘句柄、已采用内容、待采用内容、正在加载和错误状态。`ensure_track_lyrics` 按 TTL 与加载集合去重；后台任务经容量 2 的通道依次发送磁盘和网络事件，接收任务更新 `LyricsCache` 并通知。是否仍为当前曲通过 `WeakEntity<Playback>` 读取真实播放状态，不另外维护一份当前歌曲标记。缓存按歌曲 mid 共享，不随退出账号或离开页面清空，没有会话版本过滤。
 
 旧磁盘内容可先显示，失败不覆盖已有内容；正在播放且已有内容时，不同的网络内容暂存，相同内容只更新时间并保留原 Arc。`adopt_pending` 在开始请求前、该曲尚不是当前曲时调用；切同一歌曲或切音质不强制替换时间轴。原始磁盘保存仍先于 Network 事件，排版和帧面板仍由 `lyrics_view` 管理。
 
 ### 播放任务的边界
 
-`Playback::replace_queue` 使旧队列补页和推荐周期失效，不改变音源版本；随后播放入口停止设备并开始音源请求。搜索插队沿用原队列版本，允许正在进行的补页追加。`Playback::snapshot` 负责恢复数据的内容，视图负责保存触发点并提交快照到后台写入队列。加载中或尚未开始时使用显式恢复位置，设备时钟可能还对应上一音源。
+`PlaybackState::replace_queue` 使旧队列补页和推荐周期失效，不改变音源版本；随后播放入口停止设备并开始音源请求。搜索插队沿用原队列版本，允许正在进行的补页追加。`PlaybackState::snapshot` 负责恢复数据的内容，`Playback` 负责保存触发点并提交快照到 `Preferences` 的写入队列。加载中或尚未开始时使用显式恢复位置，设备时钟可能还对应上一音源。
 
 | 任务 | 结果与结束规则 |
 | --- | --- |
@@ -110,7 +114,17 @@ CDN 维护和音频缓存维护由视图保存 JoinHandle，重启维护或 Drop
 | 进度帧回调 | `PlaybackProgressView` 使用窗口帧回调和自己的帧率截止时间；暂停、拖动或设备不再推进时停止周期采样。窗口重开递增版本，排除旧回调。 |
 | 后台 tick | `spawn` 跟随应用实体；窗口关闭后仍判断曲终和保存，暂停时通过通道唤醒。 |
 
-MPRIS 在音源加载期间沿用 `Playing` 状态；它与 `Playback::is_advancing` 描述的设备实际推进不同，不能合并成一个播放布尔值。
+MPRIS 在音源加载期间沿用 `Playing` 状态；它与 `PlaybackState::is_advancing` 描述的设备实际推进不同，不能合并成一个播放布尔值。
+
+### 窗口组合与刷新边界
+
+普通页面、歌词覆盖层、底部 112px 播放栏在窗口中分别组合。根视图只计算一条歌词展开进度，同时驱动覆盖层裁剪和 CSD 按钮颜色。只有已展开的区域遮挡鼠标；完全展开后不挂载普通页面，浏览实体、历史和进行中的请求仍然保留。播放栏的专辑/歌手导航先收起歌词，再调用浏览实体。
+
+浏览实体拥有导航、侧栏及页面，但它们在渲染树中是兄弟：页体使用 GPUI `cached`，搜索输入和可调整面板位于该缓存外；侧栏和设置页分别缓存。根视图的动画帧不会主动通知浏览实体。主题、页面资源、导航和尺寸等实际变化仍使相关视图失效。当前依赖的输入框在绘制时无条件通知，因此设置页滚动到输入区域时仍有缓存失效问题，依赖升级正在单独评估。
+
+播放信息/按钮与进度条同样使用兄弟缓存边界，不能把周期更新的进度条包进播放控制区的缓存。进度帧只更新进度实体；歌词实体自行维护高亮和滚动帧截止时间、排版缓存与本帧面板。后台 250ms tick 和约 5 秒保存检查不依赖这些显示帧。
+
+通知保持在根组合中的原位置；菜单关闭遮罩使用 deferred 优先级 5，账号菜单为 10，音质菜单和 CSD 控件为 20，继续保留原来的绘制与点击次序。不要用一个统一的“最高覆盖层”改变它们。
 
 ### 跨领域不变量
 
@@ -133,7 +147,7 @@ MPRIS 在音源加载期间沿用 `Playing` 状态；它与 `Playback::is_advanc
 
 | 位置 | 当前证据与下一步需要的证据 |
 | --- | --- |
-| `LyruneView` 的渲染边界 | 歌词展开、收起动画仍会使底层普通页面重新布局，已观察到帧耗时波动。普通页面与歌词的独立视图拆分尚未实施；调整时须保留后台数据回填、控件交互、主题与尺寸变化时的刷新。 |
+| 依赖中的输入框通知 | 当前 gpui-component 固定提交会在输入框绘制/滚动位置未改变时通知，使包含它的缓存页失效。上游 PR #2988 已修复；升级需同时保留当前 GPUI fork 的局部重绘、动态非活动帧率、字形变换和可变字体补丁，尚未切换依赖。 |
 | `lyrics_loading::ensure_track_lyrics` 的异常收尾 | 磁盘旧内容已采用后，若后台任务异常结束而未发送 Network，收尾可能留下该歌曲的 loading 标记。该标记仅在内存中，重启后清除；需要受控异常复现，再决定恢复行为。 |
 | `SearchCardGridDelegate::set_cards` 的参数列表 | Clippy 报告参数过多。参数分别描述数据、布局和分页状态，目前只有一个调用点；后续若布局需要独立复用，再评估其边界。 |
 | `AudioCache::prepare_for_seek` | 仅在测试中使用，覆盖跳转 Range 请求且不发送 HEAD 的路径；删除前需要替代这项覆盖，并重新判断 `validate_remote` 的用途。 |
@@ -151,7 +165,9 @@ cargo fmt --all -- --check
 git diff --check
 ```
 
-应用回归测试在 [app/tests.rs](../crates/lyrune/src/app/tests.rs)，纯解析测试在 `app/lyrics.rs`，协议测试与实现同模块。现有测试覆盖页面资源寿命、分页结果、历史滚动位置、队列去重、请求版本、歌词计时和缓存等关键约束。部分缓存测试启动本机 HTTP 服务，需要允许绑定回环端口；真实账号测试默认忽略，需要系统钥匙串中的凭据和 QQ 音乐网络访问。
+应用回归测试在 [app/tests.rs](../crates/lyrune/src/app/tests.rs)，显示边界测试与各视图同模块，纯解析测试在 `app/lyrics.rs`，协议测试与实现同模块。现有测试覆盖页面资源寿命、分页结果、历史滚动位置、队列去重、请求版本、歌词计时和缓存等关键约束。部分缓存测试启动本机 HTTP 服务，需要允许绑定回环端口；真实账号测试默认忽略，需要系统钥匙串中的凭据和 QQ 音乐网络访问。
+
+实际 GPUI 测试另覆盖：30 次覆盖层更新不重建稳定浏览页；进度更新不重建播放控制区；隐藏页面保留历史；关窗重开后搜索仍响应；设置草稿不提前提交，重绑窗口不重复处理输入；进度滑块松手才发出 seek。它们证明状态与缓存边界，不代表真实显示器上的帧率测量。
 
 以下是人工回归检查项，不代表已经完成验收；自动测试不能替代真实账号、网络、钥匙串、音频设备和桌面交互验证：
 

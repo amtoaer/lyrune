@@ -17,11 +17,12 @@ use gpui_component::{
 };
 use lyrune_api::{Track, UserPlaylistId};
 
+use super::browser::BrowserView;
 use super::navigation::{
     SearchCategory, SearchMoreResults, SearchVisibleCounts, SharedSearchResource, lock_resource,
 };
 use super::queue::{PlaybackQueue, insert_external_track_after_current};
-use super::{LyruneView, SEARCH_PAGE_SIZE, page_horizontal_padding};
+use super::{SEARCH_PAGE_SIZE, page_horizontal_padding};
 use crate::icons::media_icon_hsla;
 use crate::library::SearchCard;
 use crate::player::AudioPlayer;
@@ -134,14 +135,14 @@ impl SearchPageState {
     }
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn start_search(
         &mut self,
         resource: SharedSearchResource,
         query: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             lock_resource(&resource).error = Some("请先登录 QQ 音乐".to_owned());
             cx.notify();
             return;
@@ -199,7 +200,7 @@ impl LyruneView {
         };
         let category = self.search.category;
         let target_count = self.search.visible_counts.get(category) + SEARCH_PAGE_SIZE;
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -309,33 +310,37 @@ impl LyruneView {
         };
         if self
             .playback
+            .read(cx)
+            .state
             .track()
             .is_some_and(|current| current.mid == track.mid)
         {
-            if self.playback.load.track.is_none() {
-                self.toggle_playback(cx);
+            if self.playback.read(cx).state.load.track.is_none() {
+                self.playback
+                    .update(cx, |playback, cx| playback.toggle_playback(cx));
             }
             return;
         }
 
-        self.playback.pending_restore = None;
         self.home.recommendation_loading = None;
-        let current_index = self.playback.current_track;
-        // 搜索插队保留队列版本；已启动的同队列补页仍可追加，不等同于换歌单。
-        let queue_index = if let Some(queue) = &mut self.playback.queue {
-            insert_external_track_after_current(queue, current_index, track)
-        } else {
-            self.playback.queue = Some(PlaybackQueue {
-                playlist_id: UserPlaylistId::Search {
-                    query: self.search.query.clone(),
-                },
-                tracks: vec![track],
-                modified: false,
-                continuation: None,
-            });
-            0
-        };
-        self.start_playback(queue_index, Duration::ZERO, None, true, cx);
+        let query = self.search.query.clone();
+        self.playback.update(cx, |playback, cx| {
+            playback.state.pending_restore = None;
+            let current_index = playback.state.current_track;
+            // 搜索插队保留队列版本；已启动的同队列补页仍可追加，不等同于换歌单。
+            let queue_index = if let Some(queue) = &mut playback.state.queue {
+                insert_external_track_after_current(queue, current_index, track)
+            } else {
+                playback.state.queue = Some(PlaybackQueue {
+                    playlist_id: UserPlaylistId::Search { query },
+                    tracks: vec![track],
+                    modified: false,
+                    continuation: None,
+                });
+                0
+            };
+            playback.start_playback(queue_index, Duration::ZERO, None, true, cx)
+        });
     }
 
     pub(super) fn render_search(
@@ -399,8 +404,10 @@ impl LyruneView {
                     is_empty = empty;
                     let playback_active = self
                         .playback
+                        .read(cx)
+                        .state
                         .audio
-                        .as_ref()
+                        .as_deref()
                         .is_some_and(AudioPlayer::is_playing);
                     self.search_track_table.update(cx, |table, cx| {
                         let delegate = table.delegate_mut();
@@ -411,13 +418,16 @@ impl LyruneView {
                             delegate.set_loading(search_loading_more)
                         };
                         let (playing_index, loading_index) =
-                            self.playback.queue.as_ref().map_or((None, None), |queue| {
-                                queue.playback_indices_in(
-                                    delegate.tracks(),
-                                    self.playback.current_track,
-                                    self.playback.load.track,
-                                )
-                            });
+                            self.playback.read(cx).state.queue.as_ref().map_or(
+                                (None, None),
+                                |queue| {
+                                    queue.playback_indices_in(
+                                        delegate.tracks(),
+                                        self.playback.read(cx).state.current_track,
+                                        self.playback.read(cx).state.load.track,
+                                    )
+                                },
+                            );
                         changed |= delegate.set_playback_state(
                             playing_index,
                             loading_index,

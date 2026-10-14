@@ -17,14 +17,13 @@ use lyrune_api::{
     UserProfile,
 };
 
+use super::browser::BrowserView;
 use super::navigation::{
     MainContent, NavigationPage, PlaylistCachePolicy, PlaylistScrollPosition,
     SharedPlaylistResource, lock_resource, resolved_playlist_scroll_row, share_items,
     update_liked_playlist_resource,
 };
-use super::{
-    LIBRARY_CACHE_TTL, LyruneView, PAGE_SIZE, page_horizontal_padding, unix_timestamp_secs,
-};
+use super::{LIBRARY_CACHE_TTL, PAGE_SIZE, page_horizontal_padding, unix_timestamp_secs};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon};
 use crate::library::playlist_cover;
@@ -87,9 +86,9 @@ pub(super) struct PlaylistPageState {
     pub(super) force_refresh: bool,
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn load_library(&mut self, force_refresh: bool, cx: &mut Context<Self>) {
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(account_id) = credential.snapshot().map(|credential| credential.music_id) else {
@@ -104,7 +103,8 @@ impl LyruneView {
         {
             self.library_loading = false;
             self.apply_library(account_id, profile, playlists, false, cx);
-            self.validate_cached_credential(cx);
+            self.account
+                .update(cx, |account, cx| account.validate_cached_credential(cx));
             return;
         }
         let Some(client) = self.protocol_client.clone() else {
@@ -164,9 +164,14 @@ impl LyruneView {
         force_refresh: bool,
         cx: &mut Context<Self>,
     ) {
-        self.account.profile = Some(profile);
+        self.account.update(cx, |account, cx| {
+            account.profile = Some(profile);
+            cx.notify();
+        });
         let count = playlists.len();
         let viewed_index = self
+            .preferences
+            .read(cx)
             .settings
             .last_library_view
             .as_ref()
@@ -178,11 +183,14 @@ impl LyruneView {
             });
         let playback_restore = self
             .playback
+            .read(cx)
+            .state
             .pending_restore
             .clone()
             .filter(|restore| restore.account_id == account_id);
-        if self.playback.pending_restore.is_some() && playback_restore.is_none() {
-            self.clear_persisted_playback();
+        if self.playback.read(cx).state.pending_restore.is_some() && playback_restore.is_none() {
+            self.playback
+                .update(cx, |playback, cx| playback.clear_persisted_playback(cx));
         }
         self.playlist_list.update(cx, |list, cx| {
             list.delegate_mut().set_playlists(playlists);
@@ -200,7 +208,9 @@ impl LyruneView {
             cx.notify();
         }
         if let Some(restore) = playback_restore {
-            self.restore_playback_queue(restore, cx);
+            self.playback.update(cx, |playback, cx| {
+                playback.restore_playback_queue(restore, cx)
+            });
         }
     }
 
@@ -231,19 +241,28 @@ impl LyruneView {
             return;
         };
 
-        if let Some(account_id) = self.account.id() {
+        if let Some(account_id) = self.account.read(cx).id() {
             let view = PersistedLibraryView {
                 account_id,
                 playlist_id: playlist.id.clone(),
             };
-            if self.settings.last_library_view.as_ref() != Some(&view) {
-                self.settings.last_library_view = Some(view);
-                self.persist_settings();
+            if self
+                .preferences
+                .read(cx)
+                .settings
+                .last_library_view
+                .as_ref()
+                != Some(&view)
+            {
+                self.preferences.update(cx, |preferences, _| {
+                    preferences.settings.last_library_view = Some(view);
+                });
+                self.preferences.read(cx).save();
             }
         }
 
         let resource = self.page_resource_cache.playlist(
-            self.account.id().unwrap_or(0),
+            self.account.read(cx).id().unwrap_or(0),
             playlist.clone(),
             force_refresh,
             PlaylistCachePolicy::Fresh,
@@ -280,7 +299,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) {
         let resource = self.page_resource_cache.playlist(
-            self.account.id().unwrap_or(0),
+            self.account.read(cx).id().unwrap_or(0),
             playlist.clone(),
             false,
             PlaylistCachePolicy::Fresh,
@@ -373,7 +392,7 @@ impl LyruneView {
         });
         let resource = resource.unwrap_or_else(|| {
             self.page_resource_cache.playlist(
-                self.account.id().unwrap_or(0),
+                self.account.read(cx).id().unwrap_or(0),
                 playlist.clone(),
                 force_refresh,
                 cache_policy,
@@ -413,7 +432,7 @@ impl LyruneView {
     }
 
     pub(super) fn load_playlist_page(&mut self, cx: &mut Context<Self>) {
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(resource) = self.playlist.resource.clone() else {
@@ -524,18 +543,25 @@ impl LyruneView {
     pub(super) fn sync_table_playback_state(&mut self, cx: &mut Context<Self>) {
         let (playing, loading) = {
             let table = self.track_table.read(cx);
-            self.playback.queue.as_ref().map_or((None, None), |queue| {
-                queue.playback_indices_in(
-                    table.delegate().tracks(),
-                    self.playback.current_track,
-                    self.playback.load.track,
-                )
-            })
+            self.playback
+                .read(cx)
+                .state
+                .queue
+                .as_ref()
+                .map_or((None, None), |queue| {
+                    queue.playback_indices_in(
+                        table.delegate().tracks(),
+                        self.playback.read(cx).state.current_track,
+                        self.playback.read(cx).state.load.track,
+                    )
+                })
         };
         let playback_active = self
             .playback
+            .read(cx)
+            .state
             .audio
-            .as_ref()
+            .as_deref()
             .is_some_and(AudioPlayer::is_playing);
         self.track_table.update(cx, |table, cx| {
             table
@@ -549,7 +575,7 @@ impl LyruneView {
         if self.liked_tracks.contains_key(&mid) || self.liked_state_loading.contains(&mid) {
             return;
         }
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(account_id) = credential.snapshot().map(|credential| credential.music_id) else {
@@ -589,7 +615,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 this.liked_state_loading.remove(&mid);
-                if this.account.id().is_none_or(|id| id != account_id) {
+                if this.account.read(cx).id().is_none_or(|id| id != account_id) {
                     return;
                 }
                 match result {
@@ -597,7 +623,13 @@ impl LyruneView {
                         this.liked_tracks.insert(mid.clone(), liked);
                     }
                     Err(error) => {
-                        if this.playback.track().is_some_and(|track| track.mid == mid) {
+                        if this
+                            .playback
+                            .read(cx)
+                            .state
+                            .track()
+                            .is_some_and(|track| track.mid == mid)
+                        {
                             this.notify_error(format!("读取当前歌曲的喜欢状态失败：{error:#}"), cx);
                         }
                     }
@@ -609,7 +641,7 @@ impl LyruneView {
     }
 
     pub(super) fn toggle_current_track_liked(&mut self, cx: &mut Context<Self>) {
-        let Some(track) = self.playback.track().cloned() else {
+        let Some(track) = self.playback.read(cx).state.track().cloned() else {
             return;
         };
         let Some(liked) = self.liked_tracks.get(&track.mid).copied() else {
@@ -632,7 +664,7 @@ impl LyruneView {
         if self.liked_toggle_loading.contains(&mid) {
             return;
         }
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(account_id) = credential.snapshot().map(|credential| credential.music_id) else {
@@ -668,7 +700,7 @@ impl LyruneView {
             };
             let _ = this.update(cx, |this, cx| {
                 this.liked_toggle_loading.remove(&mid);
-                if this.account.id().is_none_or(|id| id != account_id) {
+                if this.account.read(cx).id().is_none_or(|id| id != account_id) {
                     return;
                 }
                 match result {
@@ -796,6 +828,7 @@ impl LyruneView {
             .or_else(|| {
                 if owned_by_profile {
                     self.account
+                        .read(cx)
                         .profile
                         .as_ref()
                         .map(|profile| profile.nickname.clone())
@@ -805,7 +838,7 @@ impl LyruneView {
             });
         let owner_avatar_url = playlist.owner_avatar_url.clone().or_else(|| {
             owned_by_profile
-                .then(|| self.account.profile.as_ref()?.avatar_url.clone())
+                .then(|| self.account.read(cx).profile.as_ref()?.avatar_url.clone())
                 .flatten()
         });
         let owner_identity = owner.zip(owner_avatar_url);
@@ -951,7 +984,11 @@ impl LyruneView {
                                                 .text_color(theme.primary_foreground)
                                                 .child(media_icon(
                                                     MediaIcon::Play,
-                                                    self.color_theme.palette().primary_foreground,
+                                                    self.preferences
+                                                        .read(cx)
+                                                        .color_theme
+                                                        .palette()
+                                                        .primary_foreground,
                                                     px(17.),
                                                 ))
                                                 .child("播放全部"),

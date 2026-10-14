@@ -20,12 +20,10 @@ bytes = "1"
 directories = "6.0"
 flate2 = "1"
 futures-util = "0.3"
-# Keep the Zed source URL unqualified so Cargo unifies it with gpui-component's
-# transitive dependencies. The patch below redirects both to our GPUI fork.
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "56f3d903eaef3b2504cf31518ed1ad69d80166ff" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "56f3d903eaef3b2504cf31518ed1ad69d80166ff" }
-gpui-platform = { package = "gpui_platform", git = "https://github.com/zed-industries/zed", features = [
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+gpui-base = "=0.7.3"
+gpui-component = "=0.7.3"
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", features = [
     "font-kit",
     "runtime_shaders",
     "wayland",
@@ -74,10 +72,27 @@ wana_kana = { version = "5.0", default-features = false }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zbus_systemd = { version = "0.26100.0", default-features = false, features = ["login1", "zbus-async-tokio"] }
 
-[patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/amtoaer/zed", rev = "f029275d696b0a87198e0c6c337712398682fb8a", version = "=0.2.2" }
-gpui_macros = { git = "https://github.com/amtoaer/zed", rev = "f029275d696b0a87198e0c6c337712398682fb8a" }
-gpui_platform = { git = "https://github.com/amtoaer/zed", rev = "f029275d696b0a87198e0c6c337712398682fb8a" }
+# Keep component and application GPUI types on the same patched snapshot.
+[patch.crates-io]
+gpui-pre-collections = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-apple = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-linux = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-macos = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-macros = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-platform = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-shared-string = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-util = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-web = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-wgpu = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-windows = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-http-client = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-refineable = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-derive-refineable = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-scheduler = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-sum-tree = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-ztracing = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
+gpui-pre-ztracing-macro = { git = "https://github.com/amtoaer/zed", rev = "b53d2343e5b238ca090fa321187180d3e37f7d7c" }
 
 [workspace.metadata.release]
 release = false
@@ -89,7 +104,7 @@ publish = false
 [profile.dev]
 opt-level = 1
 
-[profile.dev.package."gpui"]
+[profile.dev.package."gpui-pre"]
 opt-level = 2
 
 [profile.dev.package."gpui-component"]

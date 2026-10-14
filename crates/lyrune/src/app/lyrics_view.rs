@@ -9,13 +9,15 @@ use gpui_component::{
     h_flex, v_flex,
 };
 
+use super::PLAYER_BAR_HEIGHT;
+use super::animation::frame_is_due;
 #[cfg(test)]
 use super::lyrics;
 use super::lyrics::{LyricLine, ParsedLyrics};
-use super::{LyruneView, PLAYER_BAR_HEIGHT};
 use crate::http::{BlurredCover, blurred_cover, blurred_image_source, cached_image_source};
 use crate::icons::{MediaIcon, media_icon_hsla};
-use crate::settings::LyricFrameRate;
+use crate::player::AudioPlayer;
+use crate::settings::FrameRate;
 
 const LYRIC_ROW_HEIGHT: f32 = 104.;
 const LYRIC_ANCHOR_OFFSET: f32 = 38.;
@@ -194,6 +196,7 @@ pub(super) struct CachedLyricsPanel {
     render_radius: usize,
     render_start: usize,
     scroll_offset: Pixels,
+    style_anchor: f32,
     highlight_position: Duration,
     translation_line_height: Pixels,
     rows: Vec<PreparedLyricRow>,
@@ -289,8 +292,8 @@ pub(super) fn lyric_horizontal_scroll_offset(
 }
 
 pub(super) fn combined_lyric_frame_interval(
-    highlight: LyricFrameRate,
-    scroll: LyricFrameRate,
+    highlight: FrameRate,
+    scroll: FrameRate,
 ) -> Option<Duration> {
     match (highlight.frame_interval(), scroll.frame_interval()) {
         (Some(highlight), Some(scroll)) => Some(highlight.min(scroll)),
@@ -298,43 +301,13 @@ pub(super) fn combined_lyric_frame_interval(
     }
 }
 
-pub(super) fn lyric_position_for_frame_rate(
-    position: Duration,
-    frame_rate: LyricFrameRate,
-) -> Duration {
+pub(super) fn lyric_position_for_frame_rate(position: Duration, frame_rate: FrameRate) -> Duration {
     let Some(interval) = frame_rate.frame_interval() else {
         return position;
     };
     let interval_nanos = interval.as_nanos();
     let quantized_nanos = position.as_nanos() / interval_nanos * interval_nanos;
     Duration::from_nanos(quantized_nanos.min(u64::MAX as u128) as u64)
-}
-
-pub(super) fn lyric_frame_is_due(
-    now: Instant,
-    frame_rate: LyricFrameRate,
-    next_frame: &mut Option<Instant>,
-) -> bool {
-    let Some(interval) = frame_rate.frame_interval() else {
-        *next_frame = None;
-        return true;
-    };
-    let Some(deadline) = *next_frame else {
-        *next_frame = Some(now + interval);
-        return false;
-    };
-    if now < deadline {
-        return false;
-    }
-
-    // 正常帧沿用原来的截止时间，避免每次从 now 计时导致累计漂移；落后整帧才重置。
-    let delay = now.saturating_duration_since(deadline);
-    *next_frame = Some(if delay < interval {
-        deadline + interval
-    } else {
-        now + interval
-    });
-    true
 }
 
 fn translation_line_height(narrow: bool, scale: f32) -> Pixels {
@@ -980,34 +953,171 @@ impl Element for PreparedLyricsElement {
     }
 }
 
-impl LyruneView {
-    pub(super) fn inactive_window_frame_interval(&self) -> Option<Duration> {
-        if self.cover_backdrop_visible {
-            combined_lyric_frame_interval(
-                self.settings.lyric_highlight_frame_rate,
-                self.settings.lyric_scroll_frame_rate,
-            )
-        } else {
-            Some(crate::INACTIVE_WINDOW_FRAME_INTERVAL)
+#[derive(Clone)]
+pub(super) enum LyricsContent {
+    Ready(Arc<ParsedLyrics>),
+    Loading,
+    Error(String),
+    Unloaded,
+}
+
+impl PartialEq for LyricsContent {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ready(left), Self::Ready(right)) => Arc::ptr_eq(left, right),
+            (Self::Error(left), Self::Error(right)) => left == right,
+            (Self::Loading, Self::Loading) | (Self::Unloaded, Self::Unloaded) => true,
+            _ => false,
         }
+    }
+}
+
+#[derive(PartialEq)]
+pub(super) struct LyricsInput {
+    pub(super) mid: String,
+    pub(super) cover_url: Option<String>,
+    pub(super) duration: Option<Duration>,
+    pub(super) content: LyricsContent,
+    pub(super) font: Font,
+    pub(super) font_scale: u32,
+    pub(super) line_spacing: u32,
+    pub(super) highlight_frame_rate: FrameRate,
+    pub(super) scroll_frame_rate: FrameRate,
+    pub(super) advancing: bool,
+    pub(super) expanded: bool,
+    pub(super) visible: bool,
+    pub(super) expansion_progress: f32,
+}
+
+pub(super) struct CollapseLyrics;
+
+pub(super) struct LyricsView {
+    input: LyricsInput,
+    audio: Option<Arc<AudioPlayer>>,
+    position: Duration,
+    backdrop_current_url: Option<String>,
+    backdrop_previous_url: Option<String>,
+    backdrop_crossfade_phase: bool,
+    lyric_layout_cache: LyricLayoutCache,
+    lyric_motion_state: Option<LyricMotionState>,
+    cached_lyrics_panel: Option<CachedLyricsPanel>,
+    lyric_highlight_frame_pending: bool,
+    lyric_scroll_frame_pending: bool,
+    pending_lyric_reveal_mid: Option<String>,
+    lyric_reveal_frame_pending: bool,
+    lyric_animation_frame_pending: bool,
+    next_lyric_highlight_frame: Option<Instant>,
+    next_lyric_scroll_frame: Option<Instant>,
+    window_generation: u64,
+    window_drag_pressed: bool,
+}
+
+impl EventEmitter<CollapseLyrics> for LyricsView {}
+
+impl LyricsView {
+    pub(super) fn new(audio: Option<Arc<AudioPlayer>>, font: Font) -> Self {
+        Self {
+            input: LyricsInput {
+                mid: String::new(),
+                cover_url: None,
+                duration: None,
+                content: LyricsContent::Unloaded,
+                font,
+                font_scale: 100,
+                line_spacing: 100,
+                highlight_frame_rate: FrameRate::Fps60,
+                scroll_frame_rate: FrameRate::Fps60,
+                advancing: false,
+                expanded: false,
+                visible: false,
+                expansion_progress: 0.,
+            },
+            audio,
+            position: Duration::ZERO,
+            backdrop_current_url: None,
+            backdrop_previous_url: None,
+            backdrop_crossfade_phase: false,
+            lyric_layout_cache: LyricLayoutCache::default(),
+            lyric_motion_state: None,
+            cached_lyrics_panel: None,
+            lyric_highlight_frame_pending: true,
+            lyric_scroll_frame_pending: true,
+            pending_lyric_reveal_mid: None,
+            lyric_reveal_frame_pending: false,
+            lyric_animation_frame_pending: false,
+            next_lyric_highlight_frame: None,
+            next_lyric_scroll_frame: None,
+            window_generation: 0,
+            window_drag_pressed: false,
+        }
+    }
+
+    pub(super) fn set_input(
+        &mut self,
+        input: LyricsInput,
+        position: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(url) = &input.cover_url
+            && self.backdrop_current_url.as_ref() != Some(url)
+        {
+            self.backdrop_previous_url = self.backdrop_current_url.replace(url.clone());
+            self.backdrop_crossfade_phase = !self.backdrop_crossfade_phase;
+        }
+        let position_changed = self.position != position && !input.advancing;
+        if position_changed
+            || self.input.visible != input.visible
+            || self.input.highlight_frame_rate != input.highlight_frame_rate
+            || self.input.scroll_frame_rate != input.scroll_frame_rate
+        {
+            self.reset_lyric_animation_frames();
+        }
+        let changed = self.input != input;
+        self.input = input;
+        self.position = position;
+        if changed || position_changed {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn attach_window(&mut self, cx: &mut Context<Self>) {
+        self.window_generation = self.window_generation.wrapping_add(1);
+        self.lyric_animation_frame_pending = false;
+        self.lyric_reveal_frame_pending = false;
+        self.reset_lyric_animation_frames();
+        cx.notify();
+    }
+
+    pub(super) fn start_track(&mut self, mid: &str, expanded: bool, cx: &mut Context<Self>) {
+        self.lyric_motion_state = None;
+        self.pending_lyric_reveal_mid = expanded.then(|| mid.to_owned());
+        cx.notify();
+    }
+
+    pub(super) fn reset_layout(&mut self, cx: &mut Context<Self>) {
+        self.lyric_layout_cache = LyricLayoutCache::default();
+        cx.notify();
     }
 
     pub(super) fn reset_lyric_animation_frames(&mut self) {
         self.next_lyric_highlight_frame = None;
         self.next_lyric_scroll_frame = None;
-        self.lyric_panel_frame_pending = true;
+        self.lyric_highlight_frame_pending = true;
+        self.lyric_scroll_frame_pending = true;
     }
 
-    fn lyric_motion_is_active(&self, now: Instant, reduce_motion: bool) -> bool {
+    fn lyric_motion_is_active(&self, reduce_motion: bool) -> bool {
         if reduce_motion {
             return false;
         }
         let Some(state) = &self.lyric_motion_state else {
             return false;
         };
-        let elapsed = now.saturating_duration_since(state.started_at);
-        (state.scroll_from != state.target && elapsed < LYRIC_SCROLL_DURATION)
-            || (state.style_from != state.target && elapsed < LYRIC_STYLE_DURATION)
+        // 动画时间结束后仍需采样最终位置，不能丢掉下一个限帧截止点的末帧。
+        self.cached_lyrics_panel.as_ref().is_none_or(|cache| {
+            cache.scroll_offset != cache.row_height * state.target
+                || cache.style_anchor != state.target
+        })
     }
 
     pub(super) fn request_lyric_animation_frame(
@@ -1020,35 +1130,43 @@ impl LyruneView {
         }
 
         self.lyric_animation_frame_pending = true;
-        cx.on_next_frame(window, |this, window, cx| {
+        let generation = self.window_generation;
+        cx.on_next_frame(window, move |this, window, cx| {
+            if this.window_generation != generation {
+                return;
+            }
             this.lyric_animation_frame_pending = false;
-            if !this.cover_backdrop_visible || !this.playback.is_advancing() {
+            if !this.input.visible || !this.input.advancing {
                 this.reset_lyric_animation_frames();
                 return;
             }
 
-            let now = cx.background_executor().now();
-            let highlight_frame_due = lyric_frame_is_due(
-                now,
-                this.settings.lyric_highlight_frame_rate,
-                &mut this.next_lyric_highlight_frame,
-            );
-            let scroll_frame_due = if this.lyric_motion_is_active(now, cx.reduce_motion()) {
-                lyric_frame_is_due(
-                    now,
-                    this.settings.lyric_scroll_frame_rate,
-                    &mut this.next_lyric_scroll_frame,
-                )
-            } else {
-                this.next_lyric_scroll_frame = None;
-                false
-            };
-            if highlight_frame_due || scroll_frame_due {
-                this.lyric_panel_frame_pending = true;
+            if this.advance_lyric_frames(cx.background_executor().now(), cx.reduce_motion()) {
                 cx.notify();
             }
             this.request_lyric_animation_frame(window, cx);
         });
+    }
+
+    fn advance_lyric_frames(&mut self, now: Instant, reduce_motion: bool) -> bool {
+        let highlight_due = frame_is_due(
+            now,
+            self.input.highlight_frame_rate,
+            &mut self.next_lyric_highlight_frame,
+        );
+        let scroll_due = if self.lyric_motion_is_active(reduce_motion) {
+            frame_is_due(
+                now,
+                self.input.scroll_frame_rate,
+                &mut self.next_lyric_scroll_frame,
+            )
+        } else {
+            self.next_lyric_scroll_frame = None;
+            false
+        };
+        self.lyric_highlight_frame_pending |= highlight_due;
+        self.lyric_scroll_frame_pending |= scroll_due;
+        highlight_due || scroll_due
     }
 
     fn lyric_motion_anchors(
@@ -1104,7 +1222,11 @@ impl LyruneView {
             // 切歌后延迟一帧显示歌词；回调比对 mid，避免连续切歌解除后一首歌的等待。
             self.lyric_reveal_frame_pending = true;
             let mid = mid.to_owned();
+            let generation = self.window_generation;
             cx.on_next_frame(window, move |this, _, cx| {
+                if this.window_generation != generation {
+                    return;
+                }
                 this.lyric_reveal_frame_pending = false;
                 if this.pending_lyric_reveal_mid.as_deref() == Some(mid.as_str()) {
                     this.pending_lyric_reveal_mid = None;
@@ -1113,25 +1235,6 @@ impl LyruneView {
             });
         }
         true
-    }
-
-    pub(super) fn set_cover_backdrop_expanded(
-        &mut self,
-        expanded: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.cover_backdrop_expanded = expanded;
-        if !expanded {
-            self.cover_backdrop_fully_expanded = false;
-        }
-        if expanded && !self.cover_backdrop_visible {
-            self.cover_backdrop_visible = true;
-            self.reset_lyric_animation_frames();
-        }
-        window.set_inactive_frame_interval(self.inactive_window_frame_interval());
-        self.wake_playback_ticks();
-        cx.notify();
     }
 
     fn lyric_foreground_for_url(
@@ -1211,29 +1314,20 @@ impl LyruneView {
                 .into_any_element()
         };
 
-        let Some(lyrics) = self
-            .lyrics
-            .adopted
-            .get(mid)
-            .map(|lyrics| lyrics.parsed.clone())
-        else {
-            if self.lyrics.loading.contains(mid) {
-                return message("正在加载歌词…", None);
-            }
-            if let Some(error) = self.lyrics.errors.get(mid) {
-                return message("歌词加载失败", Some(error.clone()));
-            }
-            return message("歌词暂未加载", None);
+        let lyrics = match &self.input.content {
+            LyricsContent::Ready(lyrics) => lyrics.clone(),
+            LyricsContent::Loading => return message("正在加载歌词…", None),
+            LyricsContent::Error(error) => return message("歌词加载失败", Some(error.clone())),
+            LyricsContent::Unloaded => return message("歌词暂未加载", None),
         };
         if lyrics.lines.is_empty() {
             return message("暂无歌词", None);
         }
 
-        let lyric_font = self.fonts.lyrics.clone();
-        let scale_percent = self.settings.lyric_font_scale;
+        let lyric_font = self.input.font.clone();
+        let scale_percent = self.input.font_scale;
         let scale = scale_percent as f32 / 100.;
-        let row_height =
-            px(LYRIC_ROW_HEIGHT * scale * self.settings.lyric_line_spacing as f32 / 100.);
+        let row_height = px(LYRIC_ROW_HEIGHT * scale * self.input.line_spacing as f32 / 100.);
         self.lyric_layout_cache.reset_if_needed(
             &lyrics,
             mid,
@@ -1245,35 +1339,46 @@ impl LyruneView {
 
         let render_radius =
             ((window.viewport_size().height * 0.65 / row_height).ceil() as usize) + 2;
-        let anchor = lyrics.active_index(self.playback.position).unwrap_or(0);
+        let anchor = lyrics.active_index(self.position).unwrap_or(0);
         // 排版缓存复用字形；面板缓存则固定本帧的行、滚动位置和高亮时间，
         // 避免其他控件触发重绘时绕过用户设置的歌词帧率。
-        let cache_needs_update = self.lyric_panel_frame_pending
-            || self.cached_lyrics_panel.as_ref().is_none_or(|cache| {
-                cache.lyrics != Arc::as_ptr(&lyrics) as usize
-                    || cache.mid != mid
-                    || cache.compact != compact
-                    || cache.narrow != narrow
-                    || cache.scale != scale_percent
-                    || cache.row_height != row_height
-                    || cache.font != lyric_font
-                    || cache.render_radius != render_radius
-            });
-        if cache_needs_update {
+        let cache_invalid = self.cached_lyrics_panel.as_ref().is_none_or(|cache| {
+            cache.lyrics != Arc::as_ptr(&lyrics) as usize
+                || cache.mid != mid
+                || cache.compact != compact
+                || cache.narrow != narrow
+                || cache.scale != scale_percent
+                || cache.row_height != row_height
+                || cache.font != lyric_font
+                || cache.render_radius != render_radius
+        });
+        if cache_invalid || self.lyric_highlight_frame_pending || self.lyric_scroll_frame_pending {
             let active = Some(anchor);
             let now = cx.background_executor().now();
-            let motion_enabled =
-                self.cover_backdrop_visible && self.playback.is_advancing() && !cx.reduce_motion();
+            let motion_enabled = self.input.visible && self.input.advancing && !cx.reduce_motion();
             let (scroll_anchor, style_anchor) =
                 self.lyric_motion_anchors(mid, anchor, motion_enabled, now);
-            let scroll_offset = row_height * scroll_anchor;
+            // 一个通道到期只更新自己的采样；不能因另一通道更快而越过其帧率上限。
+            let (scroll_offset, style_anchor) =
+                if let Some(cache) = self.cached_lyrics_panel.as_ref().filter(|_| {
+                    !cache_invalid && !self.lyric_scroll_frame_pending && motion_enabled
+                }) {
+                    (cache.scroll_offset, cache.style_anchor)
+                } else {
+                    (row_height * scroll_anchor, style_anchor)
+                };
             let render_start = anchor.saturating_sub(render_radius);
             let render_end = (anchor + render_radius + 1).min(lyrics.lines.len());
-            let highlight_position = lyric_position_for_frame_rate(
-                self.playback.position,
-                self.settings.lyric_highlight_frame_rate,
-            );
-            let track_duration = self.playback.duration();
+            let highlight_position = if let Some(cache) = self
+                .cached_lyrics_panel
+                .as_ref()
+                .filter(|_| !cache_invalid && !self.lyric_highlight_frame_pending)
+            {
+                cache.highlight_position
+            } else {
+                lyric_position_for_frame_rate(self.position, self.input.highlight_frame_rate)
+            };
+            let track_duration = self.input.duration;
             let rows = lyrics
                 .lines
                 .iter()
@@ -1348,11 +1453,13 @@ impl LyruneView {
                 render_radius,
                 render_start,
                 scroll_offset,
+                style_anchor,
                 highlight_position,
                 translation_line_height: translation_line_height(narrow, scale),
                 rows,
             });
-            self.lyric_panel_frame_pending = false;
+            self.lyric_highlight_frame_pending = false;
+            self.lyric_scroll_frame_pending = false;
         }
         let cached = self
             .cached_lyrics_panel
@@ -1383,11 +1490,7 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
-        let track_mid = self
-            .playback
-            .track()
-            .map(|track| track.mid.clone())
-            .unwrap_or_default();
+        let track_mid = self.input.mid.clone();
         let defer_new_lyrics = self.defer_new_lyrics_until_next_frame(&track_mid, window, cx);
         let viewport_width = f32::from(window.viewport_size().width);
         let compact = viewport_width < 1120.;
@@ -1395,42 +1498,18 @@ impl LyruneView {
         let cover_size = px((viewport_width * if compact { 0.3 } else { 0.28 })
             .min(f32::from(available_height) * 0.58)
             .clamp(280., 520.));
-        let expansion_progress = transition(
-            ("cover-backdrop", "expansion-progress"),
-            if self.cover_backdrop_expanded { 1. } else { 0. },
-            Transition::new(LYRIC_EXPANSION_DURATION).ease(|progress| 1. - (1. - progress).powi(4)),
-            window,
-            cx,
-        );
-        if self.cover_backdrop_expanded && expansion_progress >= 1. {
-            self.cover_backdrop_fully_expanded = true;
-        }
-        let visible = self.cover_backdrop_expanded || expansion_progress > 0.;
-        if self.cover_backdrop_visible != visible {
-            self.cover_backdrop_visible = visible;
-            self.reset_lyric_animation_frames();
-            window.set_inactive_frame_interval(self.inactive_window_frame_interval());
-        }
-        let height = available_height * expansion_progress;
+        let expansion_progress = self.input.expansion_progress;
         let theme = cx.theme().clone();
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
 
-        match self
-            .playback
-            .track()
-            .and_then(|track| track.cover_url.clone())
-        {
+        match self.input.cover_url.clone() {
             Some(url) => {
-                if self.backdrop_current_url.as_deref() != Some(url.as_str()) {
-                    self.backdrop_previous_url = self.backdrop_current_url.replace(url.clone());
-                    self.backdrop_crossfade_phase = !self.backdrop_crossfade_phase;
-                }
                 let current_backdrop_url = self
                     .backdrop_current_url
                     .clone()
                     .unwrap_or_else(|| url.clone());
                 let previous_backdrop_url = self.backdrop_previous_url.clone();
-                let track_transition_duration = if self.cover_backdrop_expanded {
+                let track_transition_duration = if self.input.expanded {
                     LYRIC_TRACK_SWITCH_DURATION
                 } else {
                     Duration::ZERO
@@ -1555,8 +1634,8 @@ impl LyruneView {
                                                 )),
                                         ),
                                 )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.set_cover_backdrop_expanded(false, window, cx);
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(CollapseLyrics);
                                 })),
                         )
                         .into_any_element()
@@ -1577,8 +1656,8 @@ impl LyruneView {
                             theme.foreground,
                             px(29.),
                         ))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_cover_backdrop_expanded(false, window, cx);
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(CollapseLyrics);
                         }))
                         .into_any_element()
                 };
@@ -1671,51 +1750,181 @@ impl LyruneView {
                     );
 
                 div()
-                    .id("cover-backdrop")
+                    .id("lyrics-drag-region")
                     .absolute()
                     .left_0()
                     .right_0()
-                    .bottom(px(PLAYER_BAR_HEIGHT))
+                    .bottom_0()
                     .h(available_height)
-                    .overflow_hidden()
+                    .bg(theme.background)
+                    .child(backdrop_images)
                     .child(
                         div()
                             .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .h(height)
-                            .overflow_hidden()
-                            .occlude()
-                            .child(
-                                div()
-                                    .id("lyrics-drag-region")
-                                    .absolute()
-                                    .left_0()
-                                    .right_0()
-                                    .bottom_0()
-                                    .h(available_height)
-                                    .bg(theme.background)
-                                    .child(backdrop_images)
-                                    .child(div().absolute().inset_0().bg(
-                                        theme.background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY),
-                                    ))
-                                    .child(content)
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .top(collapse_top)
-                                            .left(collapse_left)
-                                            .child(collapse_button),
-                                    )
-                                    .when(client_decorations, |region| {
-                                        self.window_drag_region(region, cx)
-                                    }),
-                            ),
+                            .inset_0()
+                            .bg(theme.background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY)),
                     )
+                    .child(content)
+                    .child(
+                        div()
+                            .absolute()
+                            .top(collapse_top)
+                            .left(collapse_left)
+                            .child(collapse_button),
+                    )
+                    .when(client_decorations, |region| {
+                        self.window_drag_region(region, cx)
+                    })
                     .into_any_element()
             }
             None => div().into_any_element(),
         }
+    }
+
+    fn window_drag_region(&self, region: Stateful<Div>, cx: &Context<Self>) -> Stateful<Div> {
+        region
+            .on_mouse_down_out(cx.listener(|this, _, _, _| this.window_drag_pressed = false))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.window_drag_pressed = true),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.window_drag_pressed = false),
+            )
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                if this.window_drag_pressed {
+                    this.window_drag_pressed = false;
+                    window.start_window_move();
+                }
+            }))
+    }
+}
+
+impl Render for LyricsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.input.visible && self.input.advancing {
+            self.position = self
+                .audio
+                .as_deref()
+                .map(AudioPlayer::position)
+                .unwrap_or(self.position);
+            self.request_lyric_animation_frame(window, cx);
+        }
+        self.render_cover_backdrop(window, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LYRIC_ROW_HEIGHT, LyricsContent, LyricsInput, LyricsView, lyrics};
+    use crate::settings::FrameRate;
+    use gpui::{TestAppContext, VisualTestContext, font, px, white};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[gpui::test]
+    fn test_lyric_frame_rates_are_independent(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        for (highlight, scroll) in [
+            (FrameRate::Display, FrameRate::Fps30),
+            (FrameRate::Fps30, FrameRate::Display),
+        ] {
+            let (view, cx) =
+                cx.add_window_view(|_, _| LyricsView::new(None, font(".SystemUIFont")));
+            view.update(cx, |view, _| {
+                view.input.mid = "test".into();
+                view.input.content = LyricsContent::Ready(Arc::new(lyrics::parse_lyrics(
+                    "[00:00.00]first\n[00:01.00]second",
+                    None,
+                    None,
+                )));
+                view.input.duration = Some(Duration::from_secs(10));
+                view.input.visible = true;
+                view.input.advancing = true;
+                view.input.highlight_frame_rate = highlight;
+                view.input.scroll_frame_rate = scroll;
+            });
+            let sample = |position, cx: &mut VisualTestContext| {
+                cx.update(|window, cx| {
+                    view.update(cx, |view, cx| {
+                        view.position = position;
+                        view.advance_lyric_frames(cx.background_executor().now(), false);
+                        let _ = view.render_lyrics_panel("test", white(), true, false, window, cx);
+                        let cache = view.cached_lyrics_panel.as_ref().unwrap();
+                        (
+                            cache.scroll_offset,
+                            cache.style_anchor,
+                            cache.highlight_position,
+                        )
+                    })
+                })
+            };
+            sample(Duration::ZERO, cx);
+            cx.cx.executor().advance_clock(Duration::from_millis(40));
+            sample(Duration::from_millis(1100), cx);
+            cx.cx.executor().advance_clock(Duration::from_millis(8));
+            let before = sample(Duration::from_millis(1108), cx);
+            cx.cx.executor().advance_clock(Duration::from_millis(8));
+            let after = sample(Duration::from_millis(1116), cx);
+            if scroll == FrameRate::Fps30 {
+                assert_eq!((before.0, before.1), (after.0, after.1));
+                assert!(after.2 > before.2);
+            } else {
+                assert_eq!(before.2, after.2);
+                assert!(after.0 > before.0);
+            }
+            cx.cx.executor().advance_clock(Duration::from_millis(34));
+            let next = sample(Duration::from_millis(1150), cx);
+            assert!(next.0 > after.0);
+            assert!(next.2 > after.2);
+            cx.cx.executor().advance_clock(Duration::from_millis(400));
+            let settled = sample(Duration::from_millis(1550), cx);
+            assert_eq!(settled.0, px(LYRIC_ROW_HEIGHT));
+            assert_eq!(settled.1, 1.);
+        }
+    }
+
+    #[gpui::test]
+    fn test_paused_lyrics_invalidate_on_seek_and_settings(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, _| LyricsView::new(None, font(".SystemUIFont")));
+        let lyrics = Arc::new(lyrics::parse_lyrics(
+            "[00:00.00]first\n[00:01.00]second",
+            None,
+            None,
+        ));
+        let input = || LyricsInput {
+            mid: "test".into(),
+            cover_url: None,
+            duration: Some(Duration::from_secs(10)),
+            content: LyricsContent::Ready(lyrics.clone()),
+            font: font(".SystemUIFont"),
+            font_scale: 100,
+            line_spacing: 100,
+            highlight_frame_rate: FrameRate::Display,
+            scroll_frame_rate: FrameRate::Display,
+            advancing: false,
+            expanded: true,
+            visible: true,
+            expansion_progress: 1.,
+        };
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_input(input(), Duration::ZERO, cx);
+                let _ = view.render_lyrics_panel("test", white(), true, false, window, cx);
+                view.set_input(input(), Duration::from_millis(1500), cx);
+                let _ = view.render_lyrics_panel("test", white(), true, false, window, cx);
+                let cache = view.cached_lyrics_panel.as_ref().unwrap();
+                assert_eq!(cache.highlight_position, Duration::from_millis(1500));
+                assert_eq!(cache.scroll_offset, cache.row_height);
+                let old_height = cache.row_height;
+                let mut next = input();
+                next.line_spacing = 120;
+                view.set_input(next, Duration::from_millis(1500), cx);
+                let _ = view.render_lyrics_panel("test", white(), true, false, window, cx);
+                assert!(view.cached_lyrics_panel.as_ref().unwrap().row_height > old_height);
+            })
+        });
     }
 }

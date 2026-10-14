@@ -14,7 +14,8 @@ use gpui_component::{
 };
 use lyrune_api::{RecommendationKind, UserPlaylist};
 
-use super::{LyruneView, page_horizontal_padding};
+use super::browser::BrowserView;
+use super::page_horizontal_padding;
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::library::playlist_cover;
 use crate::runtime::RUNTIME;
@@ -52,12 +53,12 @@ impl HomePageState {
     }
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn load_home(&mut self, cx: &mut Context<Self>) {
         if self.home.loading {
             return;
         }
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             self.home.error = Some("请先登录 QQ 音乐".to_owned());
             cx.notify();
             return;

@@ -13,8 +13,9 @@ use gpui_component::{
 };
 use lyrune_api::{SearchAlbum, SearchArtist, Track};
 
+use super::browser::BrowserView;
 use super::navigation::{MainContent, NavigationPage, SharedArtistResource, lock_resource};
-use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, LyruneView, page_horizontal_padding};
+use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, page_horizontal_padding};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
 use crate::library::format_duration;
@@ -39,7 +40,7 @@ impl Default for ArtistPageState {
     }
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn open_search_artist(
         &mut self,
         artist: SearchArtist,
@@ -48,7 +49,7 @@ impl LyruneView {
     ) {
         let resource = self
             .page_resource_cache
-            .artist(self.account.id().unwrap_or(0), &artist.mid);
+            .artist(self.account.read(cx).id().unwrap_or(0), &artist.mid);
         let target = NavigationPage::Artist {
             artist,
             visible_song_count: ARTIST_PAGE_SIZE as usize,
@@ -92,7 +93,7 @@ impl LyruneView {
         let Some(artist) = self.artist.selected.clone() else {
             return;
         };
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -164,7 +165,7 @@ impl LyruneView {
         let Some(artist) = self.artist.selected.clone() else {
             return;
         };
-        let Some(credential) = self.account.credential.clone() else {
+        let Some(credential) = self.account.read(cx).credential.clone() else {
             return;
         };
         let Some(client) = self.protocol_client.clone() else {
@@ -380,7 +381,11 @@ impl LyruneView {
                                                 .text_color(theme.primary_foreground)
                                                 .child(media_icon(
                                                     MediaIcon::Play,
-                                                    self.color_theme.palette().primary_foreground,
+                                                    self.preferences
+                                                        .read(cx)
+                                                        .color_theme
+                                                        .palette()
+                                                        .primary_foreground,
                                                     px(17.),
                                                 ))
                                                 .child("播放全部"),
@@ -631,18 +636,35 @@ impl LyruneView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let monospace_font = self.fonts.monospace.clone();
-        let current_mid = self.playback.track().map(|track| track.mid.clone());
+        let monospace_font = self.preferences.read(cx).fonts.monospace.clone();
+        let current_mid = self
+            .playback
+            .read(cx)
+            .state
+            .track()
+            .map(|track| track.mid.clone());
         let loading_mid = self
             .playback
+            .read(cx)
+            .state
             .load
             .track
-            .and_then(|index| self.playback.queue.as_ref()?.tracks.get(index))
+            .and_then(|index| {
+                self.playback
+                    .read(cx)
+                    .state
+                    .queue
+                    .as_ref()?
+                    .tracks
+                    .get(index)
+            })
             .map(|track| track.mid.clone());
         let is_playing = self
             .playback
+            .read(cx)
+            .state
             .audio
-            .as_ref()
+            .as_deref()
             .is_some_and(AudioPlayer::is_playing);
         let rows = songs
             .into_iter()

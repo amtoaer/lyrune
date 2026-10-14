@@ -14,7 +14,8 @@ use lyrune_api::{
 use crate::icons::MediaIcon;
 use crate::settings::DEFAULT_NAVIGATION_HISTORY_LIMIT;
 
-use super::{LIBRARY_CACHE_TTL, LyruneView, SEARCH_PAGE_SIZE, unix_timestamp_secs};
+use super::browser::BrowserView;
+use super::{LIBRARY_CACHE_TTL, SEARCH_PAGE_SIZE, unix_timestamp_secs};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum MainContent {
@@ -610,7 +611,7 @@ impl NavigationHistory {
     }
 }
 
-impl LyruneView {
+impl BrowserView {
     pub(super) fn current_search_scroll_offsets(&self, cx: &App) -> [Pixels; 4] {
         let mut offsets = self.search.scroll_offsets;
         if !self.search.pending_scroll {
@@ -735,7 +736,7 @@ impl LyruneView {
                 self.search.query = query.clone();
                 let resource = resource.unwrap_or_else(|| {
                     self.page_resource_cache
-                        .search(self.account.id().unwrap_or(0), &query)
+                        .search(self.account.read(cx).id().unwrap_or(0), &query)
                 });
                 self.search.resource = Some(resource.clone());
                 self.search.pending_results_sync = true;
@@ -756,7 +757,7 @@ impl LyruneView {
                 self.artist.visible_album_count = visible_album_count;
                 let resource = resource.unwrap_or_else(|| {
                     self.page_resource_cache
-                        .artist(self.account.id().unwrap_or(0), artist.mid.as_str())
+                        .artist(self.account.read(cx).id().unwrap_or(0), artist.mid.as_str())
                 });
                 self.open_artist(artist, resource, cx);
             }
@@ -813,7 +814,7 @@ impl LyruneView {
         let target = NavigationPage::Settings;
         let current = self.current_navigation_page(cx);
         self.record_navigation(current, &target, window, cx);
-        self.account.menu_open = false;
+        cx.emit(super::browser::BrowserEvent::CloseAccountMenu);
         self.apply_navigation_page(target, window, cx);
     }
 
@@ -822,10 +823,10 @@ impl LyruneView {
         if query.is_empty() {
             return;
         }
-        window.blur();
+        window.blur(cx);
         let resource = self
             .page_resource_cache
-            .search(self.account.id().unwrap_or(0), &query);
+            .search(self.account.read(cx).id().unwrap_or(0), &query);
         let target = NavigationPage::Search {
             query,
             category: SearchCategory::Songs,

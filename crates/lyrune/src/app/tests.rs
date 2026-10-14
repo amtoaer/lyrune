@@ -9,12 +9,13 @@ use lyrune_api::{
     UserPlaylist, UserPlaylistId,
 };
 
+use super::animation::frame_is_due;
 use super::home::HomePageState;
 use super::lyrics::parse_lyrics;
 use super::lyrics_view::{
     LYRIC_MINIMUM_CONTRAST, adjacent_lyric_timing, combined_lyric_frame_interval, contrast_ratio,
-    lyric_edge_opacity, lyric_frame_is_due, lyric_horizontal_scroll_offset,
-    lyric_position_for_frame_rate, readable_lyric_color,
+    lyric_edge_opacity, lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
+    readable_lyric_color,
 };
 use super::navigation::NavigationHistory;
 use super::navigation::{
@@ -22,16 +23,14 @@ use super::navigation::{
     PlaylistScrollPosition, SearchCategory, SearchMoreResults, SearchResource, SearchVisibleCounts,
     resolved_playlist_scroll_row,
 };
-use super::playback::{Playback, PlaybackLoad};
-use super::player_view::format_playback_time;
+use super::playback::{PlaybackLoad, PlaybackState};
 use super::playlists::playlist_title_is_long;
+use super::progress_view::format_playback_time;
 use super::queue::{
     PlaybackQueue, canonical_queue_track_index, insert_external_track_after_current,
     insert_track_after_current,
 };
-use crate::settings::{
-    DEFAULT_NAVIGATION_HISTORY_LIMIT, LyricFrameRate, PersistedQueueContinuation,
-};
+use crate::settings::{DEFAULT_NAVIGATION_HISTORY_LIMIT, FrameRate, PersistedQueueContinuation};
 
 fn track(mid: &str) -> Track {
     Track {
@@ -87,7 +86,7 @@ fn test_replace_playback_queue() {
         modified: false,
         continuation: None,
     };
-    let mut playback = Playback::new(None, Quality::Standard, None);
+    let mut playback = PlaybackState::new(None, Quality::Standard, None);
     let first = playback.replace_queue(queue("first"));
     playback.recommendation_loading = true;
     playback.waiting_for_recommendation = true;
@@ -114,7 +113,7 @@ fn test_replace_playback_queue() {
 
 #[test]
 fn test_playback_snapshot() {
-    let mut playback = Playback::new(None, Quality::High, None);
+    let mut playback = PlaybackState::new(None, Quality::High, None);
     playback.position = Duration::from_micros(123_456);
     assert!(playback.snapshot(123).is_none());
     playback.queue = Some(PlaybackQueue {
@@ -254,15 +253,15 @@ fn lyric_rows_fade_before_reaching_the_viewport_edge() {
 #[test]
 fn lyric_frame_intervals_preserve_the_fastest_animation_requirement() {
     assert_eq!(
-        combined_lyric_frame_interval(LyricFrameRate::Fps30, LyricFrameRate::Fps60),
-        LyricFrameRate::Fps60.frame_interval()
+        combined_lyric_frame_interval(FrameRate::Fps30, FrameRate::Fps60),
+        FrameRate::Fps60.frame_interval()
     );
     assert_eq!(
-        combined_lyric_frame_interval(LyricFrameRate::Display, LyricFrameRate::Fps60),
+        combined_lyric_frame_interval(FrameRate::Display, FrameRate::Fps60),
         None
     );
     assert_eq!(
-        combined_lyric_frame_interval(LyricFrameRate::Fps30, LyricFrameRate::Display),
+        combined_lyric_frame_interval(FrameRate::Fps30, FrameRate::Display),
         None
     );
 }
@@ -271,40 +270,36 @@ fn lyric_frame_intervals_preserve_the_fastest_animation_requirement() {
 fn lyric_position_is_quantized_only_for_limited_highlight_rates() {
     let position = Duration::from_millis(50);
     assert_eq!(
-        lyric_position_for_frame_rate(position, LyricFrameRate::Fps30),
+        lyric_position_for_frame_rate(position, FrameRate::Fps30),
         Duration::from_nanos(1_000_000_000 / 30)
     );
     assert_eq!(
-        lyric_position_for_frame_rate(position, LyricFrameRate::Display),
+        lyric_position_for_frame_rate(position, FrameRate::Display),
         position
     );
 }
 
 #[test]
-fn limited_lyric_frames_follow_one_stable_deadline() {
+fn limited_frames_follow_one_stable_deadline() {
     let now = Instant::now();
-    let interval = LyricFrameRate::Fps30.frame_interval().unwrap();
+    let interval = FrameRate::Fps30.frame_interval().unwrap();
     let mut next_frame = None;
 
-    assert!(!lyric_frame_is_due(
-        now,
-        LyricFrameRate::Fps30,
-        &mut next_frame
-    ));
+    assert!(!frame_is_due(now, FrameRate::Fps30, &mut next_frame));
     assert_eq!(next_frame, Some(now + interval));
-    assert!(!lyric_frame_is_due(
+    assert!(!frame_is_due(
         now + Duration::from_millis(10),
-        LyricFrameRate::Fps30,
+        FrameRate::Fps30,
         &mut next_frame
     ));
-    assert!(lyric_frame_is_due(
+    assert!(frame_is_due(
         now + interval,
-        LyricFrameRate::Fps30,
+        FrameRate::Fps30,
         &mut next_frame
     ));
-    assert!(lyric_frame_is_due(
+    assert!(frame_is_due(
         now + interval,
-        LyricFrameRate::Display,
+        FrameRate::Display,
         &mut next_frame
     ));
     assert_eq!(next_frame, None);

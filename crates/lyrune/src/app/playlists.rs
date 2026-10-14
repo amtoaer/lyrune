@@ -384,9 +384,7 @@ impl BrowserView {
         }
         self.track_table.update(cx, |table, cx| {
             table.clear_selection(cx);
-            table
-                .delegate_mut()
-                .reset(playlist.id == UserPlaylistId::Liked);
+            table.delegate_mut().reset(&playlist.id);
             table.refresh(cx);
             cx.notify();
         });

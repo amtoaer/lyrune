@@ -22,6 +22,8 @@ use crate::library::format_duration;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 
+const ARTIST_SONG_PREVIEW_LIMIT: usize = 10;
+
 pub(super) struct ArtistPageState {
     pub(super) selected: Option<SearchArtist>,
     pub(super) resource: Option<SharedArtistResource>,
@@ -102,10 +104,7 @@ impl BrowserView {
             return;
         };
         if append {
-            self.artist.visible_song_count = self
-                .artist
-                .visible_song_count
-                .saturating_add(ARTIST_PAGE_SIZE as usize);
+            self.artist.visible_song_count = ARTIST_SONG_PREVIEW_LIMIT;
         }
         let target_count = self.artist.visible_song_count;
         let offset = {
@@ -438,6 +437,7 @@ impl BrowserView {
         let song_has_more = songs
             .as_ref()
             .is_some_and(|page| page.items.len() > self.artist.visible_song_count || page.has_more);
+        let songs_expanded = self.artist.visible_song_count > ARTIST_PAGE_SIZE as usize;
         let song_body = if songs_loading && songs.is_none() {
             h_flex()
                 .h(px(92.))
@@ -543,7 +543,7 @@ impl BrowserView {
                                             div().text_size(px(24.)).font_semibold().child("歌曲"),
                                         )
                                         .child(song_body)
-                                        .when(song_has_more, |this| {
+                                        .when(songs_expanded || song_has_more, |this| {
                                             this.child(
                                                 h_flex().child(
                                                     Button::new("load-more-artist-songs")
@@ -554,11 +554,21 @@ impl BrowserView {
                                                         .disabled(songs_loading_more)
                                                         .label(if songs_loading_more {
                                                             "正在加载…"
+                                                        } else if songs_expanded {
+                                                            "收起"
                                                         } else {
                                                             "查看更多"
                                                         })
                                                         .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.load_artist_songs(true, cx)
+                                                            if this.artist.visible_song_count
+                                                                > ARTIST_PAGE_SIZE as usize
+                                                            {
+                                                                this.artist.visible_song_count =
+                                                                    ARTIST_PAGE_SIZE as usize;
+                                                                cx.notify();
+                                                            } else {
+                                                                this.load_artist_songs(true, cx);
+                                                            }
                                                         })),
                                                 ),
                                             )

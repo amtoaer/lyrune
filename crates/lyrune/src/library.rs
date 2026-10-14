@@ -588,6 +588,7 @@ pub struct TrackTableDelegate {
     loading_index: Option<usize>,
     playback_active: bool,
     show_liked_actions: bool,
+    show_covers: bool,
     compact: bool,
     load_more_sender: mpsc::Sender<()>,
     event_sender: mpsc::UnboundedSender<TrackTableEvent>,
@@ -609,6 +610,7 @@ impl TrackTableDelegate {
             loading_index: None,
             playback_active: false,
             show_liked_actions: false,
+            show_covers: true,
             compact: false,
             load_more_sender,
             event_sender,
@@ -666,14 +668,15 @@ impl TrackTableDelegate {
             .into_any_element()
     }
 
-    pub fn reset(&mut self, show_liked_actions: bool) {
+    pub fn reset(&mut self, playlist_id: &UserPlaylistId) {
         self.tracks.clear();
         self.loading = true;
         self.has_more = false;
         self.playing_index = None;
         self.loading_index = None;
         self.playback_active = false;
-        self.show_liked_actions = show_liked_actions;
+        self.show_liked_actions = *playlist_id == UserPlaylistId::Liked;
+        self.show_covers = !matches!(playlist_id, UserPlaylistId::Album { .. });
         self.columns = track_columns(self.compact);
     }
 
@@ -729,6 +732,7 @@ impl TrackTableDelegate {
         self.loading_index = None;
         self.playback_active = false;
         self.show_liked_actions = false;
+        self.show_covers = true;
         self.columns = track_columns(self.compact);
     }
 }
@@ -864,7 +868,7 @@ impl TableDelegate for TrackTableDelegate {
                 }
             }
             "title" => {
-                let cover = match track.cover_url.clone() {
+                let cover = self.show_covers.then(|| match track.cover_url.clone() {
                     Some(url) => img(cached_image_source(url, px(44.), window.scale_factor()))
                         .size(px(44.))
                         .flex_shrink_0()
@@ -885,13 +889,13 @@ impl TableDelegate for TrackTableDelegate {
                             px(17.),
                         ))
                         .into_any_element(),
-                };
+                });
                 h_flex()
                     .w_full()
                     .h_full()
                     .min_w_0()
                     .gap_3()
-                    .child(cover)
+                    .children(cover)
                     .child(
                         v_flex()
                             .min_w_0()

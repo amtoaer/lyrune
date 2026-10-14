@@ -11,7 +11,7 @@ Lyrune 内部使用的 QQ 音乐协议库，不独立发布。
 - `client/lyrics.rs` / `lyrics/qrc_des.rs`：歌词请求、解码和 QRC 算法。
 - `client/response.rs`：现有字段兼容及递归查找规则。
 - `login.rs` / `login/`：登录请求、响应校验和 MQTT 扫码状态机。
-- `request.rs`：请求签名、哈希和协议标识算法。
+- `signing.rs`：登录与资源请求共用的签名、哈希；登录 GUID 和搜索 ID 由各自模块生成。
 
 应用从 crate 根入口调用具体能力。登录使用进程级 GUID，资源请求使用各自的凭据或 CDN 标识；这些标识和 Cookie 规则不能因代码相似而合并。
 

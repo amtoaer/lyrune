@@ -224,3 +224,6 @@
 
 
 阶段 2b：客户端请求与解析按曲库/搜索/音源/CDN/歌词归组，原有测试随职责移动；client.rs 只保留客户端构造、签名网关与错误分类。子模块可直接访问客户端资源，跨领域仅公开必要的内部函数。对移动前后的 119 个函数、方法与测试做内容比对（忽略可见性和格式），全部相同；API 42 passed / 1 ignored、应用 all-targets 编译、格式及 diff 检查通过。没有新增测试。
+
+
+阶段 2c：request.rs 收窄并改名为 signing.rs；单独使用的登录 GUID、搜索 ID 算法及其原测试移动到 login.rs / client/search.rs，随机范围与常量不变。补充签名索引 40 必须跳过的协议原因。导入统一按标准库、外部库、项目模块分组。一次编译发现残留的 get_search_id 导入，已移除；重新运行 API 测试 42 passed / 1 ignored、应用 all-targets 编译及格式/diff 检查通过。

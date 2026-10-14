@@ -5,7 +5,7 @@ mod client;
 mod error;
 mod login;
 mod models;
-mod request;
+mod signing;
 
 pub use account::{CredentialError, CredentialSession, LoginEvent, QqCredential, run_qr_login};
 pub use client::{CdnCache, ProtocolClient};

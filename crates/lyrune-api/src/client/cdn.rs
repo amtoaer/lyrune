@@ -1,12 +1,14 @@
-use super::ProtocolClient;
-use super::response::{integer_field, string_field};
-use crate::account::new_client_guid;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
 use anyhow::{Context as _, Result, bail};
 use futures_util::StreamExt as _;
 use reqwest::header::{ACCEPT_ENCODING, RANGE, REFERER};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use super::ProtocolClient;
+use super::response::{integer_field, string_field};
+use crate::account::new_client_guid;
 
 pub(super) const DEFAULT_STREAM_DOMAIN: &str = "http://dl.stream.qqmusic.qq.com/";
 const CDN_PROBE_BYTES: usize = 64 * 1024;

@@ -1,22 +1,43 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context as _, Result, bail};
+use rand::RngExt;
+use reqwest::header::{COOKIE, REFERER};
+use serde_json::{Value, json};
+
 use super::library::{
     album_cover_url, force_https, parse_track, playlist_owner_avatar_url, playlist_owner_name,
     singer_cover_url,
 };
 use super::response::{find_array_recursively, integer_field, string_field};
 use super::{ProtocolClient, is_credential_rejection_code};
-use crate::request::get_search_id;
 use crate::{
     CredentialError, CredentialSession, SearchAlbum, SearchArtist, SearchPage, SearchResults,
     Track, UserPlaylist, UserPlaylistId,
 };
-use anyhow::{Context as _, Result, bail};
-use reqwest::header::{COOKIE, REFERER};
-use serde_json::{Value, json};
 
 const MOBILE_SEARCH_API_URL: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const MOBILE_SEARCH_CLIENT_VERSION: u64 = 13_020_508;
 const MOBILE_SEARCH_QIMEI36: &str = "6c9d3cd110abca9b16311cee10001e717614";
 const MOBILE_SEARCH_UID: &str = "3931641530";
+
+const SEARCH_ID_E_BASE: u64 = 18_014_398_509_481_984;
+const SEARCH_ID_N_BASE: u64 = 4_294_967_296;
+const SEARCH_ID_N_MAX: u64 = 4_194_304;
+const DAY_MILLIS: u64 = 24 * 60 * 60 * 1000;
+
+fn get_search_id() -> String {
+    let mut rng = rand::rng();
+    let e = rng.random_range(1_u64..=20);
+    let t = e * SEARCH_ID_E_BASE;
+    let n = rng.random_range(0_u64..=SEARCH_ID_N_MAX) * SEARCH_ID_N_BASE;
+    let r = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        % DAY_MILLIS as u128) as u64;
+    (t + n + r).to_string()
+}
 
 impl ProtocolClient {
     pub async fn search(
@@ -384,6 +405,19 @@ fn parse_search_playlist(value: &Value) -> Result<UserPlaylist> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_id_is_numeric_and_in_expected_range() {
+        let search_id = get_search_id();
+        assert!(!search_id.is_empty());
+        assert!(search_id.chars().all(|c| c.is_ascii_digit()));
+
+        let value: u64 = search_id.parse().expect("search_id should parse to u64");
+        let min = SEARCH_ID_E_BASE;
+        let max = (20 * SEARCH_ID_E_BASE) + (SEARCH_ID_N_MAX * SEARCH_ID_N_BASE) + (DAY_MILLIS - 1);
+        assert!(value >= min);
+        assert!(value <= max);
+    }
 
     #[test]
     fn parses_each_qq_music_search_category() {

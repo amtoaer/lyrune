@@ -1,12 +1,14 @@
 mod qrc_des;
-use super::ProtocolClient;
-use super::response::{integer_field, string_field};
-use crate::{CredentialSession, LyricResult, Track};
+use std::io::Read as _;
+
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use flate2::read::ZlibDecoder;
 use serde_json::{Value, json};
-use std::io::Read as _;
+
+use super::ProtocolClient;
+use super::response::{integer_field, string_field};
+use crate::{CredentialSession, LyricResult, Track};
 
 impl ProtocolClient {
     pub async fn lyrics(

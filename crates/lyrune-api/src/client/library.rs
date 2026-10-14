@@ -1,18 +1,20 @@
+use std::collections::HashSet;
+
+use anyhow::{Context as _, Result, bail};
+use reqwest::header::{COOKIE, REFERER};
+use serde_json::{Value, json};
+
 use super::ProtocolClient;
 use super::response::{
     bool_field, bool_value, find_array_recursively, find_object_recursively, find_string_in_object,
     find_string_recursively, integer_array_field, integer_field, string_field,
 };
 use crate::account::is_credential_rejected;
-use crate::request::hash33;
+use crate::signing::hash33;
 use crate::{
     CredentialSession, PlaylistPage, QqCredential, RadarTrackPage, SearchArtist, SearchPage, Track,
     UserPlaylist, UserPlaylistId, UserProfile,
 };
-use anyhow::{Context as _, Result, bail};
-use reqwest::header::{COOKIE, REFERER};
-use serde_json::{Value, json};
-use std::collections::HashSet;
 
 const PROFILE_URL: &str = "https://c6.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg";
 

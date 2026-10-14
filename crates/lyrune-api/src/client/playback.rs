@@ -1,3 +1,9 @@
+use std::collections::HashSet;
+
+use anyhow::{Context as _, Result, bail};
+use reqwest::header::{COOKIE, REFERER};
+use serde_json::{Value, json};
+
 use super::ProtocolClient;
 use super::cdn::{
     DEFAULT_STREAM_DOMAIN, append_unique_domain, append_unique_domains, playback_stream_domains,
@@ -5,10 +11,6 @@ use super::cdn::{
 };
 use super::response::{integer_field, string_field};
 use crate::{CredentialSession, PlaybackOption, Quality, Track};
-use anyhow::{Context as _, Result, bail};
-use reqwest::header::{COOKIE, REFERER};
-use serde_json::{Value, json};
-use std::collections::HashSet;
 
 const EVKEY_API_URL: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 

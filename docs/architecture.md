@@ -31,7 +31,7 @@
 
 工作区现由三个内部 crate 组成：`crates/lyrune` 是桌面应用，`crates/lyrune-api` 是 QQ 音乐协议实现，`crates/lyrune-decrypt` 负责 QMC 音频解密。包名与目录名一致。
 
-`lyrune-api` 根入口选择性导出应用需要的能力；`account.rs` 持有凭据会话与扫码/刷新编排，`models.rs` 保留共享数据类型，`client.rs` 持有 HTTP 客户端并负责签名网关请求、错误检查；具体请求与解析放在 `client/library.rs`、`search.rs`、`playback.rs`、`cdn.rs` 和 `lyrics.rs`。这些模块直接实现 ProtocolClient 的领域方法，没有额外转发对象。共享的响应兼容规则位于 `client/response.rs`。扫码与刷新直接调用 `login.rs`，响应校验和 MQTT 状态机位于 `login/`，协议标识和签名算法位于 `request.rs`。网易云、跨平台 builder、平台 token 包装，以及应用未使用的旧查询接口已移除。`QqCredential` 和 `LyricResult` 的序列化字段保持原样；登录 Cookie 和 GUID 继续使用原来的规则。
+`lyrune-api` 根入口选择性导出应用需要的能力；`account.rs` 持有凭据会话与扫码/刷新编排，`models.rs` 保留共享数据类型，`client.rs` 持有 HTTP 客户端并负责签名网关请求、错误检查；具体请求与解析放在 `client/library.rs`、`search.rs`、`playback.rs`、`cdn.rs` 和 `lyrics.rs`。这些模块直接实现 ProtocolClient 的领域方法，没有额外转发对象。共享的响应兼容规则位于 `client/response.rs`。扫码与刷新直接调用 `login.rs`，响应校验和 MQTT 状态机位于 `login/`，共用签名和哈希位于 `signing.rs`，登录 GUID 与搜索 ID 的生成保留在各自调用模块。网易云、跨平台 builder、平台 token 包装，以及应用未使用的旧查询接口已移除。`QqCredential` 和 `LyricResult` 的序列化字段保持原样；登录 Cookie 和 GUID 继续使用原来的规则。
 
 ## 关键调用关系
 

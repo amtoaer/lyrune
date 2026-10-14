@@ -5,17 +5,19 @@ mod playback;
 mod response;
 mod search;
 
-use self::response::integer_field;
-use crate::request::{hash33, sign};
-use crate::{CredentialError, CredentialSession, QqCredential};
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{Context as _, Result, bail};
-pub use cdn::CdnCache;
 use reqwest::Client;
 use reqwest::header::{COOKIE, REFERER};
 use serde_json::{Value, json};
-use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
+
+use self::response::integer_field;
+use crate::signing::{hash33, sign};
+use crate::{CredentialError, CredentialSession, QqCredential};
+pub use cdn::CdnCache;
 
 const API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
 

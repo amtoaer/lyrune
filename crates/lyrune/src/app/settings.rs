@@ -553,11 +553,7 @@ impl Render for SettingsPage {
             .into_iter()
             .map(|frame_rate| {
                 Button::new(format!("progress-{}", frame_rate.id()))
-                    .label(if frame_rate == FrameRate::Display {
-                        "跟随显示器"
-                    } else {
-                        frame_rate.label()
-                    })
+                    .label(frame_rate.label())
                     .ghost()
                     .flex_1()
                     .h(px(36.))
@@ -838,7 +834,7 @@ impl Render for SettingsPage {
                                         ))
                                         .child(number_setting(
                                             "图片内存缓存",
-                                            "限制近期图片缓存数量；当前界面使用中的图片会保留至不再使用",
+                                            "图片最大缓存数，缩小该数值可以减少内存占用，但同屏显示图片超过该数值会出现渲染问题",
                                             &self.settings_inputs.image_cache_capacity,
                                             "张",
                                             true,
@@ -884,7 +880,7 @@ impl Render for SettingsPage {
                                             div()
                                                 .text_xs()
                                                 .text_color(theme.muted_foreground)
-                                                .child("在所有页面使用相同的刷新频率，独立于歌词动画设置"),
+                                                .child("控制播放进度条的刷新率"),
                                         )
                                         .child(
                                             h_flex()

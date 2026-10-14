@@ -22,6 +22,7 @@ pub(super) enum MainContent {
     Home,
     Search,
     Artist,
+    ArtistAlbums,
     Playlist,
     Settings,
 }
@@ -472,7 +473,11 @@ pub(super) enum NavigationPage {
     Artist {
         artist: SearchArtist,
         visible_song_count: usize,
-        visible_album_count: usize,
+        resource: Option<SharedArtistResource>,
+    },
+    ArtistAlbums {
+        artist: SearchArtist,
+        scroll_offset: Pixels,
         resource: Option<SharedArtistResource>,
     },
     Playlist {
@@ -489,7 +494,8 @@ impl NavigationPage {
             (Self::Home, Self::Home) => true,
             (Self::Settings, Self::Settings) => true,
             (Self::Search { query, .. }, Self::Search { query: other, .. }) => query == other,
-            (Self::Artist { artist, .. }, Self::Artist { artist: other, .. }) => {
+            (Self::Artist { artist, .. }, Self::Artist { artist: other, .. })
+            | (Self::ArtistAlbums { artist, .. }, Self::ArtistAlbums { artist: other, .. }) => {
                 artist.mid == other.mid
             }
             (
@@ -650,7 +656,20 @@ impl BrowserView {
                     .map(|artist| NavigationPage::Artist {
                         artist,
                         visible_song_count: self.artist.visible_song_count,
-                        visible_album_count: self.artist.visible_album_count,
+                        resource: self.artist.resource.clone(),
+                    })
+            }
+            MainContent::ArtistAlbums => {
+                self.artist
+                    .selected
+                    .clone()
+                    .map(|artist| NavigationPage::ArtistAlbums {
+                        artist,
+                        scroll_offset: if self.artist.pending_album_scroll {
+                            self.artist.album_scroll_offset
+                        } else {
+                            self.artist_album_grid.read(cx).scroll_handle().offset().y
+                        },
                         resource: self.artist.resource.clone(),
                     })
             }
@@ -745,7 +764,6 @@ impl BrowserView {
             NavigationPage::Artist {
                 artist,
                 visible_song_count,
-                visible_album_count,
                 resource,
             } => {
                 self.playlist_list.update(cx, |list, cx| {
@@ -754,12 +772,34 @@ impl BrowserView {
                 self.search.resource = None;
                 self.playlist.resource = None;
                 self.artist.visible_song_count = visible_song_count;
-                self.artist.visible_album_count = visible_album_count;
                 let resource = resource.unwrap_or_else(|| {
                     self.page_resource_cache
                         .artist(self.account.read(cx).id().unwrap_or(0), artist.mid.as_str())
                 });
                 self.open_artist(artist, resource, cx);
+            }
+            NavigationPage::ArtistAlbums {
+                artist,
+                scroll_offset,
+                resource,
+            } => {
+                self.playlist_list.update(cx, |list, cx| {
+                    list.set_selected_index(None, window, cx);
+                });
+                self.search.resource = None;
+                self.playlist.resource = None;
+                self.main_content = MainContent::ArtistAlbums;
+                self.artist.album_scroll_offset = scroll_offset;
+                self.artist.pending_album_scroll = true;
+                self.artist.pending_albums_sync = true;
+                let resource = resource.unwrap_or_else(|| {
+                    self.page_resource_cache
+                        .artist(self.account.read(cx).id().unwrap_or(0), &artist.mid)
+                });
+                self.artist.selected = Some(artist);
+                self.artist.resource = Some(resource);
+                self.load_artist_albums(false, cx);
+                cx.notify();
             }
             NavigationPage::Playlist {
                 playlist,

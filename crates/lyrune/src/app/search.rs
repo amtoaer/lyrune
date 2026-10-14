@@ -345,10 +345,9 @@ impl BrowserView {
 
     pub(super) fn render_search(
         &mut self,
-        compact: bool,
         narrow: bool,
-        scale_factor: f32,
         content_width: Pixels,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -451,23 +450,14 @@ impl BrowserView {
                     is_empty: empty,
                 } => {
                     is_empty = empty;
-                    let cover_size = if compact { px(132.) } else { px(148.) };
-                    let card_width = cover_size + px(16.);
-                    let available_width =
-                        (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
-                    let columns = ((f32::from(available_width) + 16.)
-                        / (f32::from(card_width) + 16.))
-                        .floor() as usize;
                     self.search_card_grid.update(cx, |list, cx| {
                         if list.delegate_mut().set_cards(
                             cards,
-                            columns,
-                            card_width,
-                            cover_size + caption_height,
-                            cover_size,
-                            scale_factor,
+                            content_width,
+                            caption_height,
                             has_more,
                             search_loading_more,
+                            window,
                         ) {
                             cx.notify();
                         }

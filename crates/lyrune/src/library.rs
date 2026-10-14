@@ -69,14 +69,22 @@ impl SearchCardGridDelegate {
     pub fn set_cards(
         &mut self,
         cards: Option<Vec<SearchCard>>,
-        columns: usize,
-        card_width: Pixels,
-        card_height: Pixels,
-        cover_size: Pixels,
-        scale_factor: f32,
+        content_width: Pixels,
+        caption_height: Pixels,
         has_more: bool,
         loading_more: bool,
+        window: &Window,
     ) -> bool {
+        let compact = window.viewport_size().width < px(1120.);
+        let narrow = window.viewport_size().width < px(900.);
+        let cover_size = if compact { px(132.) } else { px(148.) };
+        let card_width = cover_size + px(16.);
+        let card_height = cover_size + caption_height;
+        let available_width = (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
+        let columns = (((f32::from(available_width) + 16.) / (f32::from(card_width) + 16.)).floor()
+            as usize)
+            .max(1);
+        let scale_factor = window.scale_factor();
         // None 保留已同步的数据，布局与分页状态仍可独立更新。
         let cards_changed = cards.as_ref().is_some_and(|cards| {
             self.cards.len() != cards.len()
@@ -108,7 +116,7 @@ impl SearchCardGridDelegate {
         if let Some(cards) = cards {
             self.cards = cards;
         }
-        self.columns = columns.max(1);
+        self.columns = columns;
         self.card_width = card_width;
         self.card_height = card_height;
         self.cover_size = cover_size;

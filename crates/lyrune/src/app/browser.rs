@@ -57,6 +57,7 @@ pub(super) struct BrowserView {
     pub(super) track_table: Entity<TableState<TrackTableDelegate>>,
     pub(super) search_track_table: Entity<TableState<TrackTableDelegate>>,
     pub(super) search_card_grid: Entity<ListState<SearchCardGridDelegate>>,
+    pub(super) artist_album_grid: Entity<ListState<SearchCardGridDelegate>>,
     pub(super) search_input: Entity<InputState>,
     pub(super) library_cache: LibraryCache,
     pub(super) page_resource_cache: PageResourceCache,
@@ -104,6 +105,7 @@ impl BrowserView {
         let (load_more_sender, load_more_receiver) = mpsc::channel(1);
         let (search_load_more_sender, search_load_more_receiver) = mpsc::channel(1);
         let (search_card_load_more_sender, search_card_load_more_receiver) = mpsc::channel(1);
+        let (artist_album_load_more_sender, artist_album_load_more_receiver) = mpsc::channel(1);
         let (track_event_sender, mut track_event_receiver) = mpsc::unbounded_channel();
         let track_table = cx.new(|cx| {
             TableState::new(
@@ -130,6 +132,18 @@ impl BrowserView {
                 SearchCardGridDelegate::new(
                     track_event_sender.clone(),
                     search_card_load_more_sender,
+                ),
+                window,
+                cx,
+            )
+            .searchable(false)
+            .selectable(false)
+        });
+        let artist_album_grid = cx.new(|cx| {
+            ListState::new(
+                SearchCardGridDelegate::new(
+                    track_event_sender.clone(),
+                    artist_album_load_more_sender,
                 ),
                 window,
                 cx,
@@ -194,6 +208,15 @@ impl BrowserView {
         Self::listen_for_load_more(load_more_receiver, Self::load_playlist_page, cx);
         Self::listen_for_load_more(search_load_more_receiver, Self::load_more_search, cx);
         Self::listen_for_load_more(search_card_load_more_receiver, Self::load_more_search, cx);
+        Self::listen_for_load_more(
+            artist_album_load_more_receiver,
+            |this, cx| {
+                if this.main_content == MainContent::ArtistAlbums {
+                    this.load_artist_albums(true, cx);
+                }
+            },
+            cx,
+        );
 
         cx.spawn(async move |this, cx| {
             while let Some(event) = track_event_receiver.recv().await {
@@ -241,6 +264,7 @@ impl BrowserView {
             track_table,
             search_track_table,
             search_card_grid,
+            artist_album_grid,
             search_input,
             library_cache: LibraryCache::default(),
             page_resource_cache: PageResourceCache::default(),
@@ -412,10 +436,11 @@ impl Render for BrowserView {
         });
         let page = match self.main_content {
             MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
-            MainContent::Search => {
-                self.render_search(compact, narrow, scale_factor, self.content_width, cx)
-            }
+            MainContent::Search => self.render_search(narrow, self.content_width, window, cx),
             MainContent::Artist => self.render_artist_content(compact, narrow, scale_factor, cx),
+            MainContent::ArtistAlbums => {
+                self.render_artist_album_page(narrow, self.content_width, window, cx)
+            }
             MainContent::Playlist => {
                 self.render_playlist_content(compact, narrow, scale_factor, cx)
             }
@@ -478,9 +503,7 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn test_browser_cache_and_reopen(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+    fn new_browser(window: &mut Window, cx: &mut gpui::App) -> Entity<BrowserView> {
         let preferences = cx.new(|_| Preferences {
             settings: AppSettings::default(),
             fonts: AppFonts {
@@ -504,10 +527,15 @@ mod tests {
                 SingleFlight::default(),
             )
         });
+        let settings = cx.new(|cx| SettingsPage::new(preferences.clone(), window, cx));
+        cx.new(|cx| BrowserView::new(window, account, preferences, playback, settings, cx))
+    }
+
+    #[gpui::test]
+    fn test_browser_cache_and_reopen(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
         let (host, cx) = cx.add_window_view(|window, cx| {
-            let settings = cx.new(|cx| SettingsPage::new(preferences.clone(), window, cx));
-            let browser =
-                cx.new(|cx| BrowserView::new(window, account, preferences, playback, settings, cx));
+            let browser = new_browser(window, cx);
             TestBrowser {
                 browser,
                 reveal: 0.,
@@ -592,5 +620,162 @@ mod tests {
             assert!(browser.main_content == MainContent::Search);
             assert_eq!(browser.search.query, "reopened");
         });
+    }
+
+    #[gpui::test]
+    fn test_artist_album_navigation(cx: &mut TestAppContext) {
+        use std::sync::Arc;
+
+        use gpui::{Modifiers, point, size};
+        use gpui_component::list::ListDelegate;
+        use lyrune_api::{PlaylistPage, SearchAlbum, SearchArtist, SearchPage};
+
+        use crate::app::navigation::{NavigationPage, lock_resource};
+
+        cx.update(gpui_component::init);
+        let (host, cx) = cx.add_window_view(|window, cx| TestBrowser {
+            browser: new_browser(window, cx),
+            reveal: 0.,
+            hidden: false,
+        });
+        cx.simulate_resize(size(px(1000.), px(1900.)));
+        let browser = host.read_with(cx, |host, _| host.browser.clone());
+        let artist = SearchArtist {
+            mid: "artist".into(),
+            name: "Artist".into(),
+            cover_url: None,
+        };
+        let albums = (0..80)
+            .map(|i| SearchAlbum {
+                mid: format!("album-{i}"),
+                title: format!("Album {i}"),
+                artist: artist.name.clone(),
+                cover_url: None,
+            })
+            .collect::<Vec<_>>();
+        let resource = cx.update(|window, cx| {
+            browser.update(cx, |browser, cx| {
+                let resource = browser.page_resource_cache.artist(0, &artist.mid);
+                let mut state = lock_resource(&resource);
+                state.apply_songs(
+                    0,
+                    Ok(PlaylistPage {
+                        playlist: artist.clone().into_playlist(),
+                        tracks: (0..20)
+                            .map(|i| {
+                                serde_json::from_value(serde_json::json!({
+                                    "mid": format!("song-{i}"),
+                                    "title": format!("Song {i}"),
+                                    "artists": "Artist",
+                                    "album": "Album",
+                                    "album_mid": "album",
+                                    "duration_seconds": 180,
+                                }))
+                                .unwrap()
+                            })
+                            .collect(),
+                        total: 20,
+                        has_more: false,
+                        next_offset: 20,
+                    }),
+                );
+                state.apply_albums(
+                    0,
+                    Ok(SearchPage {
+                        items: albums[..40].to_vec(),
+                        has_more: false,
+                        next_offset: 40,
+                    }),
+                );
+                drop(state);
+                browser.open_search_artist(artist, window, cx);
+                resource
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("artist-preview-song-4").is_some());
+        assert!(cx.debug_bounds("artist-preview-song-5").is_none());
+        assert!(cx.debug_bounds("artist-preview-album-9").is_some());
+        assert!(cx.debug_bounds("artist-preview-album-10").is_none());
+        for expanded in [true, false, true] {
+            let toggle = cx.debug_bounds("artist-song-toggle").unwrap();
+            cx.simulate_click(toggle.center(), Modifiers::none());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(cx.debug_bounds("artist-preview-song-9").is_some(), expanded);
+            assert!(cx.debug_bounds("artist-preview-song-10").is_none());
+        }
+        let view_all = cx.debug_bounds("view-all-artist-albums").unwrap();
+        cx.simulate_click(view_all.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let grid = browser.read_with(cx, |browser, _| {
+            assert!(browser.main_content == MainContent::ArtistAlbums);
+            browser.artist_album_grid.clone()
+        });
+        let rows_before = grid.read_with(cx, |list, cx| list.delegate().items_count(0, cx));
+        assert!(rows_before > 0);
+        lock_resource(&resource).apply_albums(40, Err(anyhow::anyhow!("offline")));
+        browser.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        grid.read_with(cx, |list, cx| {
+            assert_eq!(list.delegate().items_count(0, cx), rows_before);
+            assert!(!list.delegate().has_more(cx));
+        });
+        lock_resource(&resource).album_error = None;
+        lock_resource(&resource).apply_albums(
+            40,
+            Ok(SearchPage {
+                items: albums[40..].to_vec(),
+                has_more: false,
+                next_offset: 80,
+            }),
+        );
+        browser.update(cx, |browser, cx| {
+            browser.artist.pending_albums_sync = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(grid.read_with(cx, |list, cx| list.delegate().items_count(0, cx)) > rows_before);
+        grid.update(cx, |list, cx| {
+            list.scroll_handle().set_offset(point(px(0.), -px(300.)));
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| {
+            browser.update(cx, |browser, cx| {
+                let Some(NavigationPage::ArtistAlbums { scroll_offset, .. }) =
+                    browser.current_navigation_page(cx)
+                else {
+                    panic!("artist albums must have their own history entry");
+                };
+                assert_eq!(scroll_offset, -px(300.));
+                browser.open_home_playlist(albums[0].clone().into_playlist(), window, cx);
+                browser.navigate_back(window, cx);
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            grid.read_with(cx, |list, _| list.scroll_handle().offset().y),
+            -px(300.)
+        );
+        cx.update(|window, cx| browser.update(cx, |browser, cx| browser.navigate_back(window, cx)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        browser.read_with(cx, |browser, _| {
+            assert!(browser.main_content == MainContent::Artist);
+            assert_eq!(browser.artist.visible_song_count, 10);
+            assert!(Arc::ptr_eq(
+                browser.artist.resource.as_ref().unwrap(),
+                &resource
+            ));
+        });
+        assert!(cx.debug_bounds("artist-preview-album-9").is_some());
+        assert!(cx.debug_bounds("artist-preview-album-10").is_none());
+        cx.update(|window, cx| {
+            browser.update(cx, |browser, cx| browser.navigate_forward(window, cx))
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            grid.read_with(cx, |list, _| list.scroll_handle().offset().y),
+            -px(300.)
+        );
     }
 }

@@ -19,7 +19,7 @@ use super::navigation::{MainContent, NavigationPage, SharedArtistResource, lock_
 use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, page_horizontal_padding};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
-use crate::library::{SearchCard, format_duration};
+use crate::library::{SearchCard, card_grid_dimensions, format_duration};
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 
@@ -412,6 +412,7 @@ impl BrowserView {
         compact: bool,
         narrow: bool,
         scale_factor: f32,
+        content_width: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -515,7 +516,8 @@ impl BrowserView {
                 )
                 .into_any_element()
         } else if let Some(albums) = albums.filter(|albums| !albums.is_empty()) {
-            self.render_artist_albums(albums, compact, scale_factor, cx)
+            let available_width = content_width - page_horizontal_padding(narrow) * 2.;
+            self.render_artist_albums(albums, available_width, compact, scale_factor, cx)
         } else {
             h_flex()
                 .h(px(72.))
@@ -653,7 +655,7 @@ impl BrowserView {
         self.artist_album_grid.update(cx, |list, cx| {
             if list.delegate_mut().set_cards(
                 cards,
-                content_width,
+                content_width - page_horizontal_padding(narrow) * 2.,
                 px(74.),
                 has_more && error.is_none(),
                 loading_more,
@@ -924,13 +926,14 @@ impl BrowserView {
     fn render_artist_albums(
         &mut self,
         albums: Vec<Arc<SearchAlbum>>,
+        available_width: Pixels,
         compact: bool,
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let cover_size = if compact { px(132.) } else { px(148.) };
-        let card_width = cover_size + px(16.);
+        let (columns, card_width) = card_grid_dimensions(available_width, compact);
+        let cover_size = card_width - px(16.);
         let cards = albums
             .into_iter()
             .enumerate()
@@ -983,10 +986,10 @@ impl BrowserView {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        h_flex()
+        div()
+            .grid()
+            .grid_cols(columns as u16)
             .w_full()
-            .items_start()
-            .flex_wrap()
             .gap_4()
             .children(cards)
             .into_any_element()

@@ -34,6 +34,14 @@ pub enum SearchCard {
     Playlist(Arc<UserPlaylist>),
 }
 
+pub fn card_grid_dimensions(available_width: Pixels, compact: bool) -> (usize, Pixels) {
+    let min_card_width = if compact { px(148.) } else { px(164.) };
+    let columns =
+        (((available_width + px(16.)) / (min_card_width + px(16.))).floor() as usize).max(1);
+    let card_width = (available_width - px(16.) * (columns - 1) as f32) / columns as f32;
+    (columns, card_width)
+}
+
 pub struct SearchCardGridDelegate {
     cards: Vec<SearchCard>,
     columns: usize,
@@ -69,21 +77,16 @@ impl SearchCardGridDelegate {
     pub fn set_cards(
         &mut self,
         cards: Option<Vec<SearchCard>>,
-        content_width: Pixels,
+        available_width: Pixels,
         caption_height: Pixels,
         has_more: bool,
         loading_more: bool,
         window: &Window,
     ) -> bool {
         let compact = window.viewport_size().width < px(1120.);
-        let narrow = window.viewport_size().width < px(900.);
-        let cover_size = if compact { px(132.) } else { px(148.) };
-        let card_width = cover_size + px(16.);
+        let (columns, card_width) = card_grid_dimensions(available_width, compact);
+        let cover_size = card_width - px(16.);
         let card_height = cover_size + caption_height;
-        let available_width = (content_width - if narrow { px(40.) } else { px(64.) }).max(px(1.));
-        let columns = (((f32::from(available_width) + 16.) / (f32::from(card_width) + 16.)).floor()
-            as usize)
-            .max(1);
         let scale_factor = window.scale_factor();
         // None 保留已同步的数据，布局与分页状态仍可独立更新。
         let cards_changed = cards.as_ref().is_some_and(|cards| {
@@ -222,6 +225,7 @@ impl SearchCardGridDelegate {
                     cx,
                 );
                 Button::new(format!("search-album-{index}"))
+                    .debug_selector(move || format!("search-album-{index}"))
                     .ghost()
                     .w(self.card_width)
                     .h(self.card_height)

@@ -369,7 +369,8 @@ pub(super) fn browsing_area(
         .clamp(min_sidebar_width, max_sidebar_width));
     let content_width = window.viewport_size().width - sidebar_width;
     browser.update(cx, |view, cx| {
-        if view.content_width != content_width {
+        // 首帧先估算，后续以实际布局宽度为准；侧栏跨尺寸断点时未必采用默认宽度。
+        if view.content_width == px(0.) {
             view.content_width = content_width;
             cx.notify();
         }
@@ -437,7 +438,9 @@ impl Render for BrowserView {
         let page = match self.main_content {
             MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
             MainContent::Search => self.render_search(narrow, self.content_width, window, cx),
-            MainContent::Artist => self.render_artist_content(compact, narrow, scale_factor, cx),
+            MainContent::Artist => {
+                self.render_artist_content(compact, narrow, scale_factor, self.content_width, cx)
+            }
             MainContent::ArtistAlbums => {
                 self.render_artist_album_page(narrow, self.content_width, window, cx)
             }
@@ -450,7 +453,18 @@ impl Render for BrowserView {
                 .cached(StyleRefinement::default().flex_1().w_full().min_h_0())
                 .into_any_element(),
         };
-        div().size_full().flex().flex_col().child(page)
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(page)
+            .on_children_prepainted(cx.processor(|this, bounds: Vec<Bounds<Pixels>>, _, cx| {
+                let width = bounds[0].size.width;
+                if this.content_width != width {
+                    this.content_width = width;
+                    cx.notify();
+                }
+            }))
     }
 }
 
@@ -697,6 +711,32 @@ mod tests {
         assert!(cx.debug_bounds("artist-preview-song-5").is_none());
         assert!(cx.debug_bounds("artist-preview-album-9").is_some());
         assert!(cx.debug_bounds("artist-preview-album-10").is_none());
+        for (width, row_end) in [
+            (850., "artist-preview-album-2"),
+            (1000., "artist-preview-album-3"),
+            (1250., "artist-preview-album-4"),
+            (1440., "artist-preview-album-5"),
+        ] {
+            cx.simulate_resize(size(px(width), px(1900.)));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let first = cx.debug_bounds("artist-preview-album-0").unwrap();
+            let last = cx.debug_bounds(row_end).unwrap();
+            assert_eq!(first.origin.y, last.origin.y);
+            let view_all = cx.debug_bounds("view-all-artist-albums").unwrap();
+            assert!(
+                (last.right() - view_all.right()).abs() <= px(1.),
+                "album row must align with its heading at width {width}: {last:?}, {view_all:?}"
+            );
+            assert_eq!(
+                first.size.width,
+                cx.debug_bounds("artist-preview-album-9")
+                    .unwrap()
+                    .size
+                    .width
+            );
+        }
+        cx.simulate_resize(size(px(1000.), px(1900.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         for expanded in [true, false, true] {
             let toggle = cx.debug_bounds("artist-song-toggle").unwrap();
             cx.simulate_click(toggle.center(), Modifiers::none());
@@ -711,6 +751,22 @@ mod tests {
             assert!(browser.main_content == MainContent::ArtistAlbums);
             browser.artist_album_grid.clone()
         });
+        for (width, row_end) in [
+            (850., "search-album-2"),
+            (1000., "search-album-3"),
+            (1250., "search-album-4"),
+            (1440., "search-album-5"),
+        ] {
+            cx.simulate_resize(size(px(width), px(1900.)));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let first = cx.debug_bounds("search-album-0").unwrap();
+            let last = cx.debug_bounds(row_end).unwrap();
+            assert_eq!(first.origin.y, last.origin.y);
+            let padding = super::super::page_horizontal_padding(width < 900.);
+            assert!((last.right() - (px(width) - padding)).abs() <= px(1.));
+        }
+        cx.simulate_resize(size(px(1000.), px(1900.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         let rows_before = grid.read_with(cx, |list, cx| list.delegate().items_count(0, cx));
         assert!(rows_before > 0);
         lock_resource(&resource).apply_albums(40, Err(anyhow::anyhow!("offline")));

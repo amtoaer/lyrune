@@ -453,7 +453,7 @@ impl BrowserView {
                     self.search_card_grid.update(cx, |list, cx| {
                         if list.delegate_mut().set_cards(
                             cards,
-                            content_width,
+                            content_width - page_horizontal_padding(narrow) * 2.,
                             caption_height,
                             has_more,
                             search_loading_more,

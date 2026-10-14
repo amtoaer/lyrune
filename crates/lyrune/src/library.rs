@@ -732,6 +732,11 @@ impl TrackTableDelegate {
         &self.tracks
     }
 
+    pub fn without_header(mut self) -> Self {
+        self.header_height = px(0.);
+        self
+    }
+
     pub fn has_more(&self) -> bool {
         self.has_more
     }
@@ -769,11 +774,12 @@ impl TableDelegate for TrackTableDelegate {
     ) -> Stateful<gpui::Div> {
         div()
             .id("track-table-header")
+            .debug_selector(|| "track-table-header".into())
             .h(self.header_height)
-            .mb(px(4.))
             .overflow_hidden()
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .when(self.header_height > px(0.), |this| {
+                this.mb(px(4.)).border_b_1().border_color(cx.theme().border)
+            })
     }
 
     fn render_th(
@@ -806,6 +812,7 @@ impl TableDelegate for TrackTableDelegate {
     ) -> Stateful<gpui::Div> {
         div()
             .id(("track-row", row_ix))
+            .debug_selector(move || format!("track-row-{row_ix}"))
             .group(format!("track-row-{row_ix}"))
             .mx_1()
             .rounded(px(9.))

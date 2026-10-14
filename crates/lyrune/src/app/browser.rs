@@ -56,6 +56,7 @@ pub(super) struct BrowserView {
     pub(super) playlist_list: Entity<ListState<PlaylistListDelegate>>,
     pub(super) track_table: Entity<TableState<TrackTableDelegate>>,
     pub(super) search_track_table: Entity<TableState<TrackTableDelegate>>,
+    pub(super) artist_song_table: Entity<TableState<TrackTableDelegate>>,
     pub(super) search_card_grid: Entity<ListState<SearchCardGridDelegate>>,
     pub(super) artist_album_grid: Entity<ListState<SearchCardGridDelegate>>,
     pub(super) search_input: Entity<InputState>,
@@ -106,6 +107,7 @@ impl BrowserView {
         let (search_load_more_sender, search_load_more_receiver) = mpsc::channel(1);
         let (search_card_load_more_sender, search_card_load_more_receiver) = mpsc::channel(1);
         let (artist_album_load_more_sender, artist_album_load_more_receiver) = mpsc::channel(1);
+        let (artist_song_load_more_sender, _) = mpsc::channel(1);
         let (track_event_sender, mut track_event_receiver) = mpsc::unbounded_channel();
         let track_table = cx.new(|cx| {
             TableState::new(
@@ -138,6 +140,17 @@ impl BrowserView {
             )
             .searchable(false)
             .selectable(false)
+        });
+        let artist_song_table = cx.new(|cx| {
+            TableState::new(
+                TrackTableDelegate::new(artist_song_load_more_sender, track_event_sender.clone())
+                    .without_header(),
+                window,
+                cx,
+            )
+            .col_selectable(false)
+            .col_movable(false)
+            .sortable(false)
         });
         let artist_album_grid = cx.new(|cx| {
             ListState::new(
@@ -204,6 +217,11 @@ impl BrowserView {
                     this.select_search_track(*index, cx);
                 }
             }),
+            cx.subscribe(&artist_song_table, |this, _, event: &TableEvent, cx| {
+                if let TableEvent::DoubleClickedRow(index) = event {
+                    this.select_artist_track(*index, cx);
+                }
+            }),
         ];
         Self::listen_for_load_more(load_more_receiver, Self::load_playlist_page, cx);
         Self::listen_for_load_more(search_load_more_receiver, Self::load_more_search, cx);
@@ -263,6 +281,7 @@ impl BrowserView {
             playlist_list,
             track_table,
             search_track_table,
+            artist_song_table,
             search_card_grid,
             artist_album_grid,
             search_input,
@@ -640,8 +659,8 @@ mod tests {
     fn test_artist_album_navigation(cx: &mut TestAppContext) {
         use std::sync::Arc;
 
-        use gpui::{Modifiers, point, size};
-        use gpui_component::list::ListDelegate;
+        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point, size};
+        use gpui_component::{list::ListDelegate, table::TableEvent};
         use lyrune_api::{PlaylistPage, SearchAlbum, SearchArtist, SearchPage};
 
         use crate::app::navigation::{NavigationPage, PlaylistCachePolicy, lock_resource};
@@ -710,8 +729,55 @@ mod tests {
             })
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("artist-preview-song-4").is_some());
-        assert!(cx.debug_bounds("artist-preview-song-5").is_none());
+        assert!(cx.debug_bounds("track-row-4").is_some());
+        assert!(cx.debug_bounds("track-row-5").is_none());
+        assert_eq!(
+            cx.debug_bounds("track-table-header").unwrap().size.height,
+            px(0.)
+        );
+        assert_eq!(cx.debug_bounds("track-row-0").unwrap().size.height, px(64.));
+        cx.simulate_resize(size(px(1000.), px(850.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx.debug_bounds("track-row-2").unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: row.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), -px(100.))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("track-row-2").unwrap().top() < row.top());
+        let preview = browser.read_with(cx, |browser, _| browser.artist_song_table.clone());
+        preview.read_with(cx, |table, _| {
+            assert_eq!(table.delegate().tracks().len(), 5);
+            assert!(!table.delegate().has_more());
+            assert_eq!(
+                table
+                    .vertical_scroll_handle
+                    .0
+                    .borrow()
+                    .base_handle
+                    .offset()
+                    .y,
+                px(0.)
+            );
+        });
+        let row = cx.debug_bounds("track-row-2").unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: row.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(100.))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.simulate_resize(size(px(1000.), px(1900.)));
+        preview.update(cx, |_, cx| cx.emit(TableEvent::DoubleClickedRow(3)));
+        cx.run_until_parked();
+        browser.read_with(cx, |browser, cx| {
+            let playback = browser.playback.read(cx);
+            let queue = playback.state.queue.as_ref().unwrap();
+            assert_eq!(queue.tracks.len(), 20);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("artist-preview-album-9").is_some());
         assert!(cx.debug_bounds("artist-preview-album-10").is_none());
         for (width, row_end) in [
@@ -773,8 +839,8 @@ mod tests {
         });
         cx.update(|window, cx| browser.update(cx, |browser, cx| browser.navigate_back(window, cx)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("artist-preview-song-4").is_some());
-        assert!(cx.debug_bounds("artist-preview-song-5").is_none());
+        assert!(cx.debug_bounds("track-row-4").is_some());
+        assert!(cx.debug_bounds("track-row-5").is_none());
         let view_all = cx.debug_bounds("view-all-artist-albums").unwrap();
         cx.simulate_click(view_all.center(), Modifiers::none());
         cx.update(|window, cx| window.draw(cx).clear(cx));

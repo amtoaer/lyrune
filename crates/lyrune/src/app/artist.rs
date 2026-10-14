@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use gpui::{prelude::*, *};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     list::List,
     scroll::ScrollableElement as _,
     spinner::Spinner,
+    table::DataTable,
     v_flex,
 };
 use lyrune_api::{SearchAlbum, SearchArtist, Track};
@@ -19,7 +20,7 @@ use super::navigation::{MainContent, NavigationPage, SharedArtistResource, lock_
 use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, page_horizontal_padding};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
-use crate::library::{SearchCard, card_grid_dimensions, format_duration};
+use crate::library::{SearchCard, card_grid_dimensions};
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 
@@ -29,6 +30,7 @@ pub(super) struct ArtistPageState {
     pub(super) album_scroll_offset: Pixels,
     pub(super) pending_album_scroll: bool,
     pub(super) pending_albums_sync: bool,
+    pending_songs_sync: bool,
 }
 
 impl Default for ArtistPageState {
@@ -39,6 +41,7 @@ impl Default for ArtistPageState {
             album_scroll_offset: px(0.),
             pending_album_scroll: false,
             pending_albums_sync: true,
+            pending_songs_sync: true,
         }
     }
 }
@@ -70,6 +73,9 @@ impl BrowserView {
     ) {
         self.artist.selected = Some(artist);
         self.artist.resource = Some(resource.clone());
+        self.artist.pending_songs_sync = true;
+        self.artist_song_table
+            .update(cx, |table, cx| table.clear_selection(cx));
         self.main_content = MainContent::Artist;
         let (load_songs, load_albums) = {
             let state = lock_resource(&resource);
@@ -131,6 +137,7 @@ impl BrowserView {
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &resource))
                 {
+                    this.artist.pending_songs_sync = true;
                     cx.notify();
                 }
             });
@@ -216,7 +223,7 @@ impl BrowserView {
         self.apply_navigation_page(target, window, cx);
     }
 
-    fn select_artist_track(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn select_artist_track(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(artist) = self.artist.selected.clone() else {
             return;
         };
@@ -448,7 +455,7 @@ impl BrowserView {
                 .into_any_element()
         } else if let Some(songs) = songs.filter(|page| !page.items.is_empty()) {
             let visible = (ARTIST_PAGE_SIZE as usize).min(songs.items.len());
-            self.render_artist_song_rows(songs.items[..visible].to_vec(), narrow, scale_factor, cx)
+            self.render_artist_song_table(songs.items[..visible].to_vec(), compact, cx)
         } else {
             h_flex()
                 .h(px(72.))
@@ -779,160 +786,57 @@ impl BrowserView {
         }
     }
 
-    fn render_artist_song_rows(
+    fn render_artist_song_table(
         &mut self,
         songs: Vec<Arc<Track>>,
-        narrow: bool,
-        scale_factor: f32,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let monospace_font = self.preferences.read(cx).fonts.monospace.clone();
-        let current_mid = self
-            .playback
-            .read(cx)
-            .state
-            .track()
-            .map(|track| track.mid.clone());
-        let loading_mid = self
-            .playback
-            .read(cx)
-            .state
-            .load
-            .track
-            .and_then(|index| {
-                self.playback
-                    .read(cx)
-                    .state
-                    .queue
-                    .as_ref()?
-                    .tracks
-                    .get(index)
-            })
-            .map(|track| track.mid.clone());
-        let is_playing = self
-            .playback
-            .read(cx)
+        let height = px(64.) * songs.len() as f32;
+        let sync_results = std::mem::take(&mut self.artist.pending_songs_sync);
+        let playback = self.playback.read(cx);
+        let playback_active = playback
             .state
             .audio
             .as_deref()
             .is_some_and(AudioPlayer::is_playing);
-        let rows = songs
-            .into_iter()
-            .enumerate()
-            .map(|(index, track)| {
-                let is_current = current_mid.as_deref() == Some(track.mid.as_str());
-                let is_loading = loading_mid.as_deref() == Some(track.mid.as_str());
-                let title = track.title.clone();
-                let artists = track.artists.clone();
-                let album = track.album.clone();
-                let duration = format_duration(track.duration_seconds);
-                let cover = self.render_artist_cover(
-                    track.cover_url.clone(),
-                    MediaIcon::Music,
-                    px(48.),
-                    px(9.),
-                    scale_factor,
-                    cx,
-                );
-                Button::new(format!("artist-song-{}-{}", track.mid, index))
-                    .debug_selector(move || format!("artist-preview-song-{index}"))
-                    .ghost()
-                    .w_full()
-                    .h(px(68.))
-                    .px_3()
-                    .rounded(px(10.))
-                    .selected(is_current)
-                    .child(
-                        h_flex()
-                            .size_full()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .w(px(28.))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .when_else(
-                                        is_loading,
-                                        |this| {
-                                            this.child(
-                                                Spinner::new()
-                                                    .with_size(px(17.))
-                                                    .color(theme.primary),
-                                            )
-                                        },
-                                        |this| {
-                                            this.child(media_icon_hsla(
-                                                if is_current && is_playing {
-                                                    MediaIcon::Pause
-                                                } else {
-                                                    MediaIcon::Play
-                                                },
-                                                if is_current {
-                                                    theme.primary
-                                                } else {
-                                                    theme.muted_foreground
-                                                },
-                                                px(17.),
-                                            ))
-                                        },
-                                    ),
-                            )
-                            .child(cover)
-                            .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .font_medium()
-                                            .text_color(if is_current {
-                                                theme.primary
-                                            } else {
-                                                theme.foreground
-                                            })
-                                            .child(title),
-                                    )
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(artists),
-                                    ),
-                            )
-                            .when(!narrow, |row| {
-                                row.child(
-                                    div()
-                                        .w(px(300.))
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(theme.secondary_foreground)
-                                        .child(album),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .w(px(52.))
-                                    .flex_shrink_0()
-                                    .text_right()
-                                    .font(monospace_font.clone())
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(duration),
-                            ),
-                    )
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.select_artist_track(index, cx)),
-                    )
-            })
-            .collect::<Vec<_>>();
-        v_flex().w_full().gap_1().children(rows).into_any_element()
+        let (playing_index, loading_index) =
+            playback.state.queue.as_ref().map_or((None, None), |queue| {
+                queue.playback_indices_in(
+                    &songs,
+                    playback.state.current_track,
+                    playback.state.load.track,
+                )
+            });
+        self.artist_song_table.update(cx, |table, cx| {
+            let compact_changed = table.delegate_mut().set_compact(compact);
+            if sync_results {
+                table.delegate_mut().set_tracks(songs, false, false);
+            }
+            let playback_changed = table.delegate_mut().set_playback_state(
+                playing_index,
+                loading_index,
+                playback_active,
+            );
+            if compact_changed {
+                table.refresh(cx);
+            } else if sync_results || playback_changed {
+                cx.notify();
+            }
+        });
+        div()
+            .w_full()
+            .h(height)
+            .flex_shrink_0()
+            .child(
+                DataTable::new(&self.artist_song_table)
+                    .bordered(false)
+                    .stripe(false)
+                    .header_row_height(px(0.))
+                    .scrollbar_visible(false, false)
+                    .with_size(px(64.)),
+            )
+            .into_any_element()
     }
 
     fn render_artist_albums(

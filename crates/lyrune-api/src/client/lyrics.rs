@@ -4,11 +4,25 @@ use std::io::Read as _;
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
 use flate2::read::ZlibDecoder;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::ProtocolClient;
-use super::response::{integer_field, string_field};
+use super::response::{optional_integer, optional_string};
 use crate::{CredentialSession, LyricResult, Track};
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct LyricResponse {
+    #[serde(deserialize_with = "optional_integer")]
+    crypt: Option<u64>,
+    #[serde(deserialize_with = "optional_string")]
+    lyric: Option<String>,
+    #[serde(deserialize_with = "optional_string")]
+    trans: Option<String>,
+    #[serde(deserialize_with = "optional_string")]
+    roma: Option<String>,
+}
 
 impl ProtocolClient {
     pub async fn lyrics(
@@ -36,7 +50,7 @@ impl ProtocolClient {
                 None,
             )
             .await;
-        if let Ok(lyrics) = preferred.and_then(|data| parse_lyric_result(&data, &track.mid))
+        if let Ok(lyrics) = preferred.and_then(|data| parse_lyric_result(data, &track.mid))
             && !lyrics.lyric.trim().is_empty()
         {
             return Ok(lyrics);
@@ -58,23 +72,32 @@ impl ProtocolClient {
             )
             .await
             .with_context(|| format!("无法加载“{}”的歌词", track.title))?;
-        parse_lyric_result(&fallback, &track.mid)
+        parse_lyric_result(fallback, &track.mid)
             .with_context(|| format!("无法解析“{}”的歌词", track.title))
     }
 }
 
-fn parse_lyric_result(data: &Value, id: &str) -> Result<LyricResult> {
-    let encrypted = integer_field(data, &["crypt"]) == Some(1);
-    let lyric = string_field(data, &["lyric"])
+fn parse_lyric_result(data: Value, id: &str) -> Result<LyricResult> {
+    // 原解析把非对象响应视为全部字段缺失；数组不能被 Serde 当成字段序列。
+    let data: LyricResponse = if data.is_object() {
+        serde_json::from_value(data)?
+    } else {
+        LyricResponse::default()
+    };
+    let encrypted = data.crypt == Some(1);
+    let lyric = data
+        .lyric
         .map(|value| decode_lyric_text(value, encrypted))
         .transpose()?
         .unwrap_or_default();
-    let trans_lyric = string_field(data, &["trans"])
+    let trans_lyric = data
+        .trans
         .filter(|value| !value.trim().is_empty())
         .map(|value| decode_lyric_text(value, encrypted))
         .transpose()?
         .filter(|value| !value.trim().is_empty());
-    let roma_lyric = string_field(data, &["roma"])
+    let roma_lyric = data
+        .roma
         .filter(|value| !value.trim().is_empty())
         .map(|value| decode_lyric_text(value, encrypted))
         .transpose()?
@@ -125,13 +148,29 @@ mod tests {
     use std::io::Write as _;
 
     #[test]
+    fn test_lyric_field_compatibility() {
+        let lyric = parse_lyric_result(
+            json!({
+                "crypt": "0", "lyric": 123, "trans": false, "roma": null
+            }),
+            "song",
+        )
+        .unwrap();
+        assert_eq!(lyric.lyric, "123");
+        assert!(lyric.trans_lyric.is_none() && lyric.roma_lyric.is_none());
+        for data in [Value::Null, json!([1, "text"]), json!({"lyric": {}})] {
+            assert!(parse_lyric_result(data, "song").unwrap().lyric.is_empty());
+        }
+    }
+
+    #[test]
     fn decodes_lyric_and_translation_payloads() {
         let data = json!({
             "lyric": base64::engine::general_purpose::STANDARD.encode("[00:01.000]原文"),
             "trans": base64::engine::general_purpose::STANDARD.encode("[00:01.000]translation"),
         });
 
-        let lyrics = parse_lyric_result(&data, "song-mid").unwrap();
+        let lyrics = parse_lyric_result(data, "song-mid").unwrap();
 
         assert_eq!(lyrics.id, "song-mid");
         assert_eq!(lyrics.lyric, "[00:01.000]原文");
@@ -155,7 +194,7 @@ mod tests {
             "lyric": hex::encode_upper(encrypted),
         });
 
-        let lyrics = parse_lyric_result(&data, "song-mid").unwrap();
+        let lyrics = parse_lyric_result(data, "song-mid").unwrap();
 
         assert_eq!(lyrics.lyric, original);
     }

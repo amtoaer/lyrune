@@ -1,4 +1,5 @@
 //! QQ 响应的字段兼容与历史层级查找规则。
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 pub(super) fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
@@ -131,4 +132,19 @@ pub(super) fn find_string_in_object(object: &Map<String, Value>, keys: &[&str]) 
             .then(|| value_to_string(value))
             .flatten()
     })
+}
+
+// 这些转换沿用字段读取规则：非法类型视为缺失，数字/字符串保持原有兼容范围。
+pub(super) fn optional_string<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(value_to_string(&value))
+}
+
+pub(super) fn optional_integer<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(integer_value(&value))
 }

@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context as _, Result, bail};
 use reqwest::header::{COOKIE, REFERER};
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use super::ProtocolClient;
@@ -9,10 +10,32 @@ use super::cdn::{
     DEFAULT_STREAM_DOMAIN, append_unique_domain, append_unique_domains, playback_stream_domains,
     playback_urls,
 };
-use super::response::{integer_field, string_field};
+use super::response::{integer_field, optional_integer, optional_string};
 use crate::{CredentialSession, PlaybackOption, Quality, Track};
 
 const EVKEY_API_URL: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PlaybackEntry {
+    #[serde(deserialize_with = "optional_integer")]
+    result: Option<u64>,
+    // 外层区分缺失与存在：purl 为 null/非法时仍优先，不能改用 wifiurl。
+    #[serde(deserialize_with = "present_path")]
+    purl: Option<Option<String>>,
+    #[serde(deserialize_with = "optional_string")]
+    wifiurl: Option<String>,
+    #[serde(deserialize_with = "optional_string")]
+    filename: Option<String>,
+    #[serde(deserialize_with = "optional_string")]
+    ekey: Option<String>,
+}
+
+fn present_path<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<String>>, D::Error> {
+    optional_string(deserializer).map(Some)
+}
 
 impl ProtocolClient {
     pub async fn playback_options(
@@ -88,8 +111,13 @@ impl ProtocolClient {
         Ok(entries
             .iter()
             .filter_map(|entry| {
-                playback_entry_succeeded(entry).then_some(())?;
-                let purl = string_field(entry, &["purl"]).filter(|purl| !purl.trim().is_empty())?;
+                entry.as_object()?;
+                let entry = PlaybackEntry::deserialize(entry).ok()?;
+                playback_entry_succeeded(&entry).then_some(())?;
+                let purl = entry
+                    .purl
+                    .flatten()
+                    .filter(|purl| !purl.trim().is_empty())?;
                 let quality = requests
                     .iter()
                     .map(|(quality, _)| *quality)
@@ -204,18 +232,22 @@ impl ProtocolClient {
         Ok(entries
             .iter()
             .filter_map(|entry| {
-                if integer_field(entry, &["result"]).is_some_and(|code| code != 0) {
+                entry.as_object()?;
+                let entry = PlaybackEntry::deserialize(entry).ok()?;
+                if !playback_entry_succeeded(&entry) {
                     return None;
                 }
-                let purl = string_field(entry, &["purl", "wifiurl"])
+                let purl = entry
+                    .purl
+                    .unwrap_or(entry.wifiurl)
                     .filter(|value| !value.trim().is_empty())?;
-                let filename = string_field(entry, &["filename"]).unwrap_or_default();
+                let filename = entry.filename.unwrap_or_default();
                 let quality =
                     encrypted_path_quality(&filename).or_else(|| encrypted_path_quality(&purl))?;
                 if !seen.insert(quality) {
                     return None;
                 }
-                let ekey = string_field(entry, &["ekey"]).filter(|value| !value.is_empty())?;
+                let ekey = entry.ekey.filter(|value| !value.is_empty())?;
                 let mut urls = playback_urls(&domains, &purl);
                 let url = urls.first()?.clone();
                 let fallback_urls = urls.drain(1..).collect();
@@ -275,8 +307,8 @@ fn encrypted_path_quality(path: &str) -> Option<Quality> {
     .find_map(|(prefix, quality)| filename.starts_with(prefix).then_some(quality))
 }
 
-fn playback_entry_succeeded(entry: &Value) -> bool {
-    integer_field(entry, &["result"]).is_none_or(|result| result == 0)
+fn playback_entry_succeeded(entry: &PlaybackEntry) -> bool {
+    entry.result.is_none_or(|result| result == 0)
 }
 
 #[cfg(test)]
@@ -284,18 +316,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requires_a_successful_vkey_result_when_it_is_present() {
-        assert!(playback_entry_succeeded(&json!({
-            "result": 0,
-            "purl": "M500song.mp3?vkey=opaque"
-        })));
-        assert!(playback_entry_succeeded(&json!({
-            "purl": "M500song.mp3?vkey=opaque"
-        })));
-        assert!(!playback_entry_succeeded(&json!({
-            "result": 104003,
-            "purl": "M500song.mp3?vkey=opaque"
-        })));
+    fn test_vkey_response() {
+        for (data, succeeded, path) in [
+            (
+                json!({"result": "0", "purl": "song.mp3"}),
+                true,
+                Some("song.mp3"),
+            ),
+            (
+                json!({"result": 104003, "purl": "song.mp3"}),
+                false,
+                Some("song.mp3"),
+            ),
+            (json!({"wifiurl": "song.mflac"}), true, Some("song.mflac")),
+            (json!({"purl": null, "wifiurl": "song.mflac"}), true, None),
+            (json!({"purl": false, "wifiurl": "song.mflac"}), true, None),
+            (json!({"result": [], "purl": 123}), true, Some("123")),
+        ] {
+            let entry: PlaybackEntry = serde_json::from_value(data).unwrap();
+            assert_eq!(playback_entry_succeeded(&entry), succeeded);
+            assert_eq!(entry.purl.unwrap_or(entry.wifiurl).as_deref(), path);
+        }
     }
 
     #[test]

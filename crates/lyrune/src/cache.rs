@@ -317,8 +317,9 @@ impl AudioCache {
             .write_all(&bytes)
             .await
             .context("无法写入歌曲缓存临时索引")?;
+        // 等待 Tokio 完成写入再替换文件，磁盘回写交给内核。
         temporary
-            .sync_data()
+            .flush()
             .await
             .context("无法同步歌曲缓存临时索引")?;
         drop(temporary);

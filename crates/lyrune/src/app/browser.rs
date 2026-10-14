@@ -793,8 +793,8 @@ mod tests {
             assert_eq!(first.origin.y, last.origin.y);
             let view_all = cx.debug_bounds("view-all-artist-albums").unwrap();
             assert!(
-                (last.right() - view_all.right()).abs() <= px(1.),
-                "album row must align with its heading at width {width}: {last:?}, {view_all:?}"
+                (last.right() - view_all.right() - px(8.)).abs() <= px(1.),
+                "view-all button must be inset from the album row at width {width}: {last:?}, {view_all:?}"
             );
             assert_eq!(
                 first.size.width,

@@ -541,6 +541,7 @@ impl BrowserView {
                                                         .ghost()
                                                         .size(px(32.))
                                                         .p_0()
+                                                        .mr(px(8.))
                                                         .tooltip("查看全部歌曲")
                                                         .child(media_icon_hsla(
                                                             MediaIcon::Forward,
@@ -585,6 +586,7 @@ impl BrowserView {
                                                         .ghost()
                                                         .size(px(32.))
                                                         .p_0()
+                                                        .mr(px(8.))
                                                         .tooltip("查看全部专辑")
                                                         .child(media_icon_hsla(
                                                             MediaIcon::Forward,

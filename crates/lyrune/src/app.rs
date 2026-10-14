@@ -132,10 +132,8 @@ pub struct LyruneView {
     search_card_grid: Entity<ListState<SearchCardGridDelegate>>,
     search_input: Entity<InputState>,
     settings_page: Entity<SettingsPage>,
-    _settings_subscription: Option<Subscription>,
     progress: Entity<PlaybackProgressView>,
     player_controls: Entity<PlayerControlsView>,
-    _player_subscription: Option<Subscription>,
     image_cache: Entity<CachedImageCache>,
     window_drag_pressed: bool,
 
@@ -152,7 +150,6 @@ pub struct LyruneView {
     cover_backdrop_fully_expanded: bool,
     lyrics: LyricsCache,
     lyrics_view: Entity<LyricsView>,
-    _lyrics_subscription: Option<Subscription>,
     preferences: Entity<Preferences>,
     library_cache: LibraryCache,
     page_resource_cache: PageResourceCache,
@@ -162,10 +159,9 @@ pub struct LyruneView {
     update_check_in_progress: bool,
 
     window_handle: AnyWindowHandle,
-    // 保存控件订阅句柄；下方两个窗口观察句柄由 attach_window 在窗口重开时替换。
     _subscriptions: Vec<Subscription>,
-    _window_subscription: Option<Subscription>,
-    _appearance_subscription: Option<Subscription>,
+    // 窗口关闭不销毁应用实体；所有 subscribe_in 订阅都在重开时重新绑定。
+    _window_subscriptions: Vec<Subscription>,
     background_tick_wake: Option<mpsc::Sender<()>>,
     #[cfg(target_os = "linux")]
     mpris: Option<MprisHandle>,
@@ -288,15 +284,6 @@ impl LyruneView {
             cx.subscribe(&account, |this, _, event: &AccountEvent, cx| {
                 this.handle_account_event(event, cx)
             }),
-            cx.subscribe_in(
-                &playlist_list,
-                window,
-                |this, _, event: &ListEvent, window, cx| {
-                    if let ListEvent::Select(index) | ListEvent::Confirm(index) = event {
-                        this.select_playlist(index.row, window, cx);
-                    }
-                },
-            ),
             cx.subscribe(&track_table, |this, _, event: &TableEvent, cx| {
                 if let TableEvent::DoubleClickedRow(index) = event {
                     this.select_track(*index, cx);
@@ -307,15 +294,6 @@ impl LyruneView {
                     this.select_search_track(*index, cx);
                 }
             }),
-            cx.subscribe_in(
-                &search_input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.submit_search(window, cx);
-                    }
-                },
-            ),
             cx.subscribe(&progress, |this, _, event: &SeekTo, cx| {
                 this.seek_to(event.0, cx);
             }),
@@ -325,10 +303,14 @@ impl LyruneView {
         Self::listen_for_load_more(search_load_more_receiver, Self::load_more_search, cx);
         Self::listen_for_load_more(search_card_load_more_receiver, Self::load_more_search, cx);
 
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             while let Some(event) = track_event_receiver.recv().await {
-                if this
-                    .update_in(cx, |this, window, cx| match event {
+                let Ok(window) = this.read_with(cx, |this, _| this.window_handle) else {
+                    break;
+                };
+                // 监听按应用寿命运行；窗口关闭时忽略残留的 UI 事件，重开后使用新窗口。
+                let _ = window.update(cx, |_, window, cx| {
+                    this.update(cx, |this, cx| match event {
                         TrackTableEvent::Artist(artist) => {
                             this.open_search_artist(artist, window, cx)
                         }
@@ -340,10 +322,7 @@ impl LyruneView {
                             this.open_home_playlist(playlist, window, cx)
                         }
                     })
-                    .is_err()
-                {
-                    break;
-                }
+                });
             }
         })
         .detach();
@@ -366,10 +345,8 @@ impl LyruneView {
             search_card_grid,
             search_input,
             settings_page,
-            _settings_subscription: None,
             progress,
             player_controls,
-            _player_subscription: None,
             image_cache,
             window_drag_pressed: false,
             playback: Playback::new(audio, playback_quality, pending_playback_restore),
@@ -383,7 +360,6 @@ impl LyruneView {
             cover_backdrop_fully_expanded: false,
             lyrics: LyricsCache::new(lyric_disk_cache),
             lyrics_view,
-            _lyrics_subscription: None,
             preferences,
             library_cache,
             page_resource_cache: PageResourceCache::default(),
@@ -393,8 +369,7 @@ impl LyruneView {
             update_check_in_progress: false,
             window_handle: window.window_handle(),
             _subscriptions: subscriptions,
-            _window_subscription: None,
-            _appearance_subscription: None,
+            _window_subscriptions: Vec::new(),
             background_tick_wake: None,
             #[cfg(target_os = "linux")]
             mpris: None,
@@ -448,49 +423,68 @@ impl LyruneView {
         Theme::global_mut(cx).notification.margins.bottom = px(PLAYER_BAR_HEIGHT + 16.);
         self.lyrics_view
             .update(cx, |view, cx| view.attach_window(cx));
-        self._lyrics_subscription = Some(cx.subscribe_in(
-            &self.lyrics_view,
-            window,
-            |this, _, _: &CollapseLyrics, window, cx| {
-                this.set_cover_backdrop_expanded(false, window, cx);
-            },
-        ));
         window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
-        self._appearance_subscription =
-            Some(cx.observe_window_appearance(window, |this, window, cx| {
-                this.preferences
-                    .update(cx, |preferences, cx| preferences.apply_theme(window, cx))
-            }));
-        self._window_subscription = Some(cx.observe_window_bounds(window, |this, window, cx| {
-            let size = window.window_bounds().get_bounds().size;
-            let width = f32::from(size.width).round() as u32;
-            let height = f32::from(size.height).round() as u32;
-            if width > 0 && height > 0 {
-                {
-                    let value = Some(PersistedWindowSize { width, height });
-                    this.preferences.update(cx, |preferences, _| {
-                        preferences.settings.window_size = value;
-                    });
-                }
-            }
-            cx.notify();
-        }));
-        self._player_subscription = Some(cx.subscribe_in(
-            &self.player_controls,
-            window,
-            |this, _, action: &PlayerAction, window, cx| {
-                this.handle_player_action(action, window, cx)
-            },
-        ));
         self.settings_page
             .update(cx, |page, cx| page.attach_window(window, cx));
-        self._settings_subscription = Some(cx.subscribe_in(
-            &self.settings_page,
-            window,
-            |this, _, action: &SettingsAction, window, cx| {
-                this.handle_settings_action(action, window, cx)
-            },
-        ));
+        self._window_subscriptions = vec![
+            cx.subscribe_in(
+                &self.lyrics_view,
+                window,
+                |this, _, _: &CollapseLyrics, window, cx| {
+                    this.set_cover_backdrop_expanded(false, window, cx);
+                },
+            ),
+            cx.observe_window_appearance(window, |this, window, cx| {
+                this.preferences
+                    .update(cx, |preferences, cx| preferences.apply_theme(window, cx))
+            }),
+            cx.observe_window_bounds(window, |this, window, cx| {
+                let size = window.window_bounds().get_bounds().size;
+                let width = f32::from(size.width).round() as u32;
+                let height = f32::from(size.height).round() as u32;
+                if width > 0 && height > 0 {
+                    {
+                        let value = Some(PersistedWindowSize { width, height });
+                        this.preferences.update(cx, |preferences, _| {
+                            preferences.settings.window_size = value;
+                        });
+                    }
+                }
+                cx.notify();
+            }),
+            cx.subscribe_in(
+                &self.player_controls,
+                window,
+                |this, _, action: &PlayerAction, window, cx| {
+                    this.handle_player_action(action, window, cx)
+                },
+            ),
+            cx.subscribe_in(
+                &self.settings_page,
+                window,
+                |this, _, action: &SettingsAction, window, cx| {
+                    this.handle_settings_action(action, window, cx)
+                },
+            ),
+            cx.subscribe_in(
+                &self.playlist_list,
+                window,
+                |this, _, event: &ListEvent, window, cx| {
+                    if let ListEvent::Select(index) | ListEvent::Confirm(index) = event {
+                        this.select_playlist(index.row, window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &self.search_input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.submit_search(window, cx);
+                    }
+                },
+            ),
+        ];
         self.progress
             .update(cx, |view, cx| view.attach_window(window, cx));
     }

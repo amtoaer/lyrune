@@ -1,12 +1,6 @@
 //! 播放栏、进度预览和音质菜单。音频加载与控制动作在 playback。
 
-use std::time::Duration;
-
 use gpui::{prelude::*, *};
-use gpui_base::{
-    Slider as BaseSlider, SliderIndicator, SliderTrack,
-    motion::{Transition, transition},
-};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Selectable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
@@ -17,27 +11,12 @@ use gpui_component::{
 use lyrune_api::SearchAlbum;
 
 use super::lyrics_view::LYRIC_BACKGROUND_OVERLAY_OPACITY;
+use super::progress_view::ProgressInput;
 use super::queue::RepeatMode;
-use super::{LyruneView, PLAYER_BAR_HEIGHT, progress_fraction};
+use super::{LyruneView, PLAYER_BAR_HEIGHT};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
 use crate::player::AudioPlayer;
-
-const PROGRESS_THUMB_RADIUS: Pixels = px(8.);
-
-pub(super) fn format_playback_time(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    if seconds >= 60 * 60 {
-        format!(
-            "{}:{:02}:{:02}",
-            seconds / (60 * 60),
-            seconds / 60 % 60,
-            seconds % 60
-        )
-    } else {
-        format!("{}:{:02}", seconds / 60, seconds % 60)
-    }
-}
 
 impl LyruneView {
     fn render_quality_selector(&mut self, has_track: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -125,213 +104,6 @@ impl LyruneView {
             .into_any_element()
     }
 
-    fn render_player_progress(
-        &mut self,
-        has_track: bool,
-        narrow: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let monospace_font = self.fonts.monospace.clone();
-        let duration = self.playback.duration().unwrap_or_default();
-        let percentage =
-            if self.cover_backdrop_visible && self.seek_preview.is_none() && !duration.is_zero() {
-                progress_fraction(self.playback.position, duration)
-            } else {
-                self.progress_slider.read(cx).percentage().end
-            };
-        let interactive = has_track && self.playback.started && self.playback.load.track.is_none();
-        let bar_color = theme.slider_bar;
-        let thumb_color = theme.slider_thumb;
-        let hover_fraction = interactive
-            .then_some(self.progress_hover_fraction)
-            .flatten();
-        let hover_visible = self.progress_hovered && hover_fraction.is_some();
-        let hover_opacity = transition(
-            ("player-progress", "hover-opacity"),
-            if hover_visible { 1. } else { 0. },
-            Transition::new(Duration::from_millis(if hover_visible { 120 } else { 170 })),
-            window,
-            cx,
-        );
-        let edge_time_color = if self.cover_backdrop_expanded && hover_fraction.is_some() {
-            self.foreground_target(
-                theme.background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY),
-                theme.foreground,
-                |cover| cover.sampled_rgb(narrow),
-                window,
-                cx,
-            )
-            .unwrap_or(theme.foreground)
-        } else {
-            theme.secondary_foreground
-        };
-
-        let track = SliderTrack::new(&self.progress_slider)
-            .disabled(!interactive)
-            .h(px(20.))
-            .w_full()
-            .child(
-                SliderIndicator::new(&self.progress_slider)
-                    .relative()
-                    .h(px(4.))
-                    .w_full()
-                    .bg(theme.border)
-                    .active(|this| this.bg(bar_color.opacity(0.35)))
-                    .child(
-                        // Painted as paths because quads and layout snap to device pixels,
-                        // which makes slow progress advance in visible one-pixel steps.
-                        canvas(
-                            |_, _, _| {},
-                            move |bounds, _, window, _| {
-                                let x = bounds.left() + bounds.size.width * percentage;
-                                if x > bounds.left() {
-                                    let mut fill = PathBuilder::fill();
-                                    fill.add_polygon(
-                                        &[
-                                            bounds.origin,
-                                            point(x, bounds.top()),
-                                            point(x, bounds.bottom()),
-                                            bounds.bottom_left(),
-                                        ],
-                                        true,
-                                    );
-                                    if let Ok(path) = fill.build() {
-                                        window.paint_path(path, bar_color);
-                                    }
-                                }
-                                if has_track {
-                                    let center = point(x, bounds.center().y);
-                                    for (radius, color) in [
-                                        (PROGRESS_THUMB_RADIUS, bar_color.opacity(0.5)),
-                                        (PROGRESS_THUMB_RADIUS - px(1.), thumb_color),
-                                    ] {
-                                        let mut circle = PathBuilder::fill();
-                                        circle.move_to(point(center.x - radius, center.y));
-                                        for to in [center.x + radius, center.x - radius] {
-                                            circle.arc_to(
-                                                point(radius, radius),
-                                                px(0.),
-                                                false,
-                                                true,
-                                                point(to, center.y),
-                                            );
-                                        }
-                                        circle.close();
-                                        if let Ok(path) = circle.build() {
-                                            window.paint_path(path, color);
-                                        }
-                                    }
-                                }
-                            },
-                        )
-                        .absolute()
-                        .size_full(),
-                    ),
-            );
-        let control = BaseSlider::new(&self.progress_slider)
-            .disabled(!interactive)
-            .h(px(20.))
-            .w_full()
-            .child(track);
-
-        let current_time = format_playback_time(self.playback.position.min(duration));
-        let total_time = format_playback_time(duration);
-        div()
-            .id("player-progress")
-            .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .h(px(20.))
-            .when(interactive, |layer| {
-                layer
-                    .cursor_pointer()
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                        let bounds = this.progress_slider.read(cx).bounds();
-                        if bounds.size.width <= px(0.) {
-                            return;
-                        }
-                        let inner =
-                            (event.position.x - bounds.left()).clamp(px(0.), bounds.size.width);
-                        this.progress_hover_fraction = Some(inner / bounds.size.width);
-                        this.progress_hovered = true;
-                        cx.notify();
-                    }))
-                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        if !hovered && this.progress_hovered {
-                            this.progress_hovered = false;
-                            cx.notify();
-                        }
-                    }))
-            })
-            .child(control)
-            .when_some(hover_fraction, |layer, fraction| {
-                let tooltip = div()
-                    .absolute()
-                    .top(px(-36.))
-                    .w(px(64.))
-                    .h(px(28.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(7.))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.popover)
-                    .shadow_md()
-                    .when(hover_visible, |tooltip| tooltip.occlude())
-                    .font(monospace_font.clone())
-                    .text_xs()
-                    .font_medium()
-                    .text_color(theme.primary)
-                    .child(format_playback_time(duration.mul_f32(fraction)));
-                let tooltip = if fraction <= 0.03 {
-                    tooltip.left_0()
-                } else if fraction >= 0.97 {
-                    tooltip.right_0()
-                } else {
-                    tooltip.left(relative(fraction)).ml(-px(32.))
-                };
-                layer.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .h(px(20.))
-                        .opacity(hover_opacity)
-                        .child(
-                            div()
-                                .absolute()
-                                .top(px(-27.))
-                                .left_0()
-                                .w(px(64.))
-                                .text_center()
-                                .font(monospace_font.clone())
-                                .text_xs()
-                                .text_color(edge_time_color)
-                                .child(current_time),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .top(px(-27.))
-                                .right_0()
-                                .w(px(64.))
-                                .text_center()
-                                .font(monospace_font.clone())
-                                .text_xs()
-                                .text_color(edge_time_color)
-                                .child(total_time),
-                        )
-                        .child(tooltip),
-                )
-            })
-            .into_any_element()
-    }
-
     pub(super) fn render_player_bar(
         &mut self,
         compact: bool,
@@ -346,7 +118,31 @@ impl LyruneView {
             .and_then(|queue| queue.tracks.get(self.playback.current_track?).cloned());
         let has_track = track.is_some();
         let quality_selector = self.render_quality_selector(has_track, cx);
-        let progress = self.render_player_progress(has_track, narrow, window, cx);
+        let foreground = if self.cover_backdrop_expanded {
+            self.foreground_target(
+                cx.theme()
+                    .background
+                    .opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY),
+                cx.theme().foreground,
+                |cover| cover.sampled_rgb(narrow),
+                window,
+                cx,
+            )
+            .unwrap_or(cx.theme().foreground)
+        } else {
+            cx.theme().secondary_foreground
+        };
+        let input = ProgressInput {
+            duration: self.playback.duration(),
+            position: self.playback.position,
+            interactive: has_track && self.playback.started && self.playback.load.track.is_none(),
+            use_position: self.cover_backdrop_visible,
+            font: self.fonts.monospace.clone(),
+            foreground,
+        };
+        self.progress
+            .update(cx, |progress, cx| progress.set_input(input, cx));
+        let progress = self.progress.clone();
         let theme = cx.theme();
         let is_playing = self
             .playback

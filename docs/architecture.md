@@ -17,7 +17,8 @@
 | [queue](../crates/lyrune/src/app/queue.rs) | 播放队列的建立、插入、补全、恢复和推荐续播 |
 | [playback](../crates/lyrune/src/app/playback.rs) | `Playback` 持有音频设备、队列、当前曲、位置、音质和恢复信息；音源加载、音源选择、音质回退、解码准备、播放/暂停/跳歌/seek |
 | [playback_sync](../crates/lyrune/src/app/playback_sync.rs) | 窗口进度、曲终处理、定期保存、MPRIS 和休眠抑制 |
-| [player_view](../crates/lyrune/src/app/player_view.rs) | 播放栏、进度预览和音质菜单 |
+| [player_view](../crates/lyrune/src/app/player_view.rs) | 播放栏组合和音质菜单 |
+| [progress_view](../crates/lyrune/src/app/progress_view.rs) | 独立进度实体拥有滑块、拖动预览和悬停状态，松手后发出 seek 事件 |
 | [lyrics_loading](../crates/lyrune/src/app/lyrics_loading.rs) | `LyricsCache` 持有歌词数据缓存并应用结果；视图编排磁盘读取、网络刷新与通知 |
 | [lyrics](../crates/lyrune/src/app/lyrics.rs) | LRC/QRC 解析、翻译和注音对齐 |
 | [lyrics_view](../crates/lyrune/src/app/lyrics_view.rs) | 歌词排版、逐字高亮、滚动、封面背景和动画帧调度 |
@@ -50,7 +51,7 @@
 3. 歌单页和歌手页选曲共用 `select_playlist_track`，统一判断复用队列、切换暂停或建立新队列；搜索结果仍按独立规则插入当前歌曲之后。随后调用 `start_playback`，Tokio 任务通过 `prepare_playback_stream` 复用或重新解析音源，再到阻塞线程准备解码器；GPUI 回调检查播放版本后才调用 `AudioPlayer::replace`。
 4. 后台 tick 读取音频进度、判断曲终、保存播放状态并同步系统媒体控制。歌词显示另有按设置帧率运行的动画回调。
 
-`LyruneView::playback` 持有播放会话；滑块、悬停预览和音质菜单仍是视图状态。会话内的 `PlaybackLoad` 统一维护请求版本、版本检查和加载标记清理。`invalidate` 只使旧结果失效，`clear` 只清除加载索引与播放意图，保留版本；退出账号时不能用默认值替换整个会话或加载对象。调用处保留以下顺序：
+`LyruneView::playback` 持有播放会话；滑块和悬停预览由 `PlaybackProgressView` 持有，音质菜单仍是播放栏状态。会话内的 `PlaybackLoad` 统一维护请求版本、版本检查和加载标记清理。`invalidate` 只使旧结果失效，`clear` 只清除加载索引与播放意图，保留版本；退出账号时不能用默认值替换整个会话或加载对象。调用处保留以下顺序：
 
 | 触发 | 加载状态与外部操作的顺序 |
 | --- | --- |

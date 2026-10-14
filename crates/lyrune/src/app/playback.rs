@@ -16,7 +16,7 @@ use crate::settings::{PersistedPlayback, PersistedQueueContinuation};
 #[cfg(target_os = "linux")]
 use super::playback_sync::{duration_micros, mpris_track_id};
 use super::queue::{PlaybackQueue, RepeatMode};
-use super::{LyruneView, progress_fraction, progress_slider_state};
+use super::{LyruneView, progress_fraction};
 
 // 播放会话独立于当前浏览页和窗口控件；关闭窗口后仍由应用实体持有。
 pub(super) struct Playback {
@@ -339,13 +339,9 @@ impl LyruneView {
         self.playback.started = false;
         self.wake_playback_ticks();
         self.playback.position = resume_at;
-        self.progress_hovered = false;
-        self.progress_hover_fraction = None;
         let progress = progress_fraction(resume_at, Duration::from_secs(track.duration_seconds));
-        self.progress_slider.update(cx, |slider, cx| {
-            *slider = progress_slider_state(progress);
-            cx.notify();
-        });
+        self.progress
+            .update(cx, |view, cx| view.start_track(progress, cx));
         self.playback.waiting_for_recommendation = false;
         self.persist_current_playback();
         self.sync_table_playback_state(cx);
@@ -524,11 +520,7 @@ impl LyruneView {
         self.playback.started = false;
         self.wake_playback_ticks();
         self.playback.position = Duration::ZERO;
-        self.seek_preview = None;
-        self.progress_slider.update(cx, |slider, cx| {
-            *slider = progress_slider_state(0.);
-            cx.notify();
-        });
+        self.progress.update(cx, |view, cx| view.stop(cx));
         self.persist_current_playback();
         self.sync_table_playback_state(cx);
         self.sync_mpris(false);

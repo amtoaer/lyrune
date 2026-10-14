@@ -13,6 +13,7 @@ mod playback;
 mod playback_sync;
 mod player_view;
 mod playlists;
+mod progress_view;
 mod queue;
 mod search;
 mod settings;
@@ -55,6 +56,7 @@ use self::{
     navigation::{MainContent, NavigationHistory, PageResourceCache},
     playback::Playback,
     playlists::{PlaylistPageKey, PlaylistPageState},
+    progress_view::{PlaybackProgressView, SeekTo},
     search::SearchPageState,
     settings::SettingsInputs,
 };
@@ -88,14 +90,6 @@ const PLAYER_BAR_HEIGHT: f32 = 112.;
 
 fn page_horizontal_padding(narrow: bool) -> Pixels {
     if narrow { px(20.) } else { px(24.) }
-}
-
-fn progress_slider_state(value: f32) -> SliderState {
-    SliderState::new()
-        .min(0.)
-        .max(1.)
-        .step(0.001)
-        .default_value(value)
 }
 
 fn volume_slider_state(value: f32) -> SliderState {
@@ -142,7 +136,7 @@ pub struct LyruneView {
     search_input: Entity<InputState>,
     settings_inputs: SettingsInputs,
     settings_scroll_handle: ScrollHandle,
-    progress_slider: Entity<SliderState>,
+    progress: Entity<PlaybackProgressView>,
     volume_slider: Entity<SliderState>,
     image_cache: Entity<CachedImageCache>,
     window_drag_pressed: bool,
@@ -154,9 +148,6 @@ pub struct LyruneView {
     cdn_maintenance: Option<JoinHandle<()>>,
     audio_cache_maintenance: Option<JoinHandle<()>>,
     quality_menu_open: bool,
-    seek_preview: Option<Duration>,
-    progress_hovered: bool,
-    progress_hover_fraction: Option<f32>,
     // expanded 是用户目标，visible 包含过渡动画，fully_expanded 用于跳过被遮挡的主页面渲染。
     cover_backdrop_expanded: bool,
     cover_backdrop_visible: bool,
@@ -293,7 +284,7 @@ impl LyruneView {
             .searchable(false)
             .selectable(false)
         });
-        let progress_slider = cx.new(|_| progress_slider_state(0.));
+        let progress = cx.new(|cx| PlaybackProgressView::new(fonts.monospace.clone(), cx));
         let volume_slider = cx.new(|_| volume_slider_state(settings.volume));
         let image_cache = CachedImageCache::new(settings.image_cache_capacity, cx);
         let subscriptions = vec![
@@ -370,29 +361,9 @@ impl LyruneView {
                     }
                 },
             ),
-            cx.subscribe(
-                &progress_slider,
-                |this, _, event: &SliderEvent, cx| match event {
-                    SliderEvent::Change(value) => {
-                        // 拖动时仅预览，Release 才真正 seek；音频进度同步不能覆盖预览。
-                        this.seek_preview = this
-                            .playback
-                            .duration()
-                            .map(|duration| duration.mul_f32(value.end().clamp(0., 1.)));
-                        cx.notify();
-                    }
-                    SliderEvent::Release(value) => {
-                        let target = this
-                            .playback
-                            .duration()
-                            .map(|duration| duration.mul_f32(value.end().clamp(0., 1.)));
-                        this.seek_preview = None;
-                        if let Some(target) = target {
-                            this.seek_to(target, cx);
-                        }
-                    }
-                },
-            ),
+            cx.subscribe(&progress, |this, _, event: &SeekTo, cx| {
+                this.seek_to(event.0, cx);
+            }),
             cx.subscribe(
                 &volume_slider,
                 |this, _, event: &SliderEvent, cx| match event {
@@ -451,7 +422,7 @@ impl LyruneView {
             search_input,
             settings_inputs,
             settings_scroll_handle: ScrollHandle::new(),
-            progress_slider,
+            progress,
             volume_slider,
             image_cache,
             window_drag_pressed: false,
@@ -461,9 +432,6 @@ impl LyruneView {
             cdn_maintenance: None,
             audio_cache_maintenance: None,
             quality_menu_open: false,
-            seek_preview: None,
-            progress_hovered: false,
-            progress_hover_fraction: None,
             cover_backdrop_expanded: false,
             cover_backdrop_visible: false,
             cover_backdrop_fully_expanded: false,
@@ -943,7 +911,7 @@ impl LyruneView {
 
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.cover_backdrop_visible && self.playback.is_advancing() {
-            if self.seek_preview.is_none() {
+            if self.progress.read(cx).seek_preview.is_none() {
                 self.playback.position = self
                     .playback
                     .audio

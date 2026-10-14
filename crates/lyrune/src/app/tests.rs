@@ -23,8 +23,8 @@ use super::navigation::{
     resolved_playlist_scroll_row,
 };
 use super::playback::{Playback, PlaybackLoad};
-use super::player_view::format_playback_time;
 use super::playlists::playlist_title_is_long;
+use super::progress_view::format_playback_time;
 use super::queue::{
     PlaybackQueue, canonical_queue_track_index, insert_external_track_after_current,
     insert_track_after_current,

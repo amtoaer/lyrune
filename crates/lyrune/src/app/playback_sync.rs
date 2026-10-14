@@ -290,21 +290,16 @@ impl LyruneView {
     }
 
     pub(super) fn sync_progress_slider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.seek_preview.is_none() {
-            let progress = self.playback.duration().map_or(0., |duration| {
-                progress_fraction(self.playback.position, duration)
-            });
-            self.progress_slider.update(cx, |slider, cx| {
-                if slider.value().end() != progress {
-                    slider.set_value(progress, window, cx);
-                }
-            });
-        }
+        let progress = self.playback.duration().map_or(0., |duration| {
+            progress_fraction(self.playback.position, duration)
+        });
+        self.progress
+            .update(cx, |view, cx| view.sync_slider(progress, window, cx));
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
         let previous_position = self.playback.position;
-        if self.seek_preview.is_none()
+        if self.progress.read(cx).seek_preview.is_none()
             && self.playback.load.track.is_none()
             && self.playback.started
         {
@@ -341,7 +336,7 @@ impl LyruneView {
             self.last_mpris_position_sync = Instant::now();
         }
 
-        if self.playback.position != previous_position && self.progress_hovered {
+        if self.playback.position != previous_position && self.progress.read(cx).hovered {
             cx.notify();
         }
     }

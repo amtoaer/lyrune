@@ -875,27 +875,7 @@ impl Render for SettingsPage {
                                         .pt_4()
                                         .border_t_1()
                                         .border_color(theme.border)
-                                        .child(div().font_medium().child("播放进度条帧率"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("控制播放进度条的刷新率"),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .w_full()
-                                                .gap_1()
-                                                .children(progress_frame_rate_buttons),
-                                        ),
-                                )
-                                .child(
-                                    v_flex()
-                                        .gap_2()
-                                        .pt_4()
-                                        .border_t_1()
-                                        .border_color(theme.border)
-                                        .child(div().font_medium().child("歌词动画帧率"))
+                                        .child(div().font_medium().child("动画帧率"))
                                         .child(
                                             div()
                                                 .text_xs()
@@ -926,6 +906,25 @@ impl Render for SettingsPage {
                                                 .w_full()
                                                 .gap_1()
                                                 .children(scroll_frame_rate_buttons),
+                                        )
+                                        .child(
+                                            div()
+                                                .pt_1()
+                                                .text_xs()
+                                                .text_color(theme.secondary_foreground)
+                                                .child("播放进度条"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("控制播放进度条的刷新率"),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .gap_1()
+                                                .children(progress_frame_rate_buttons),
                                         ),
                                 ),
                         ),

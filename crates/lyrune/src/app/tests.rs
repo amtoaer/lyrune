@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{Hsla, Pixels, black, px, rgb};
+use gpui::{Hsla, Pixels, Rgba, px, rgb};
 use lyrune_api::{
     PlaylistPage, Quality, RecommendationKind, SearchAlbum, SearchPage, SearchResults, Track,
     UserPlaylist, UserPlaylistId,
@@ -14,8 +14,8 @@ use super::home::HomePageState;
 use super::lyrics::parse_lyrics;
 use super::lyrics_view::{
     LYRIC_TARGET_CONTRAST, adjacent_lyric_timing, combined_lyric_frame_interval, contrast_ratio,
-    lyric_edge_opacity, lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
-    readable_lyric_color,
+    lyric_background_overlay, lyric_edge_opacity, lyric_horizontal_scroll_offset,
+    lyric_position_for_frame_rate,
 };
 use super::navigation::NavigationHistory;
 use super::navigation::{
@@ -30,6 +30,7 @@ use super::queue::{
     PlaybackQueue, canonical_queue_track_index, insert_external_track_after_current,
     insert_track_after_current,
 };
+use crate::design::ColorTheme;
 use crate::settings::{DEFAULT_NAVIGATION_HISTORY_LIMIT, FrameRate, PersistedQueueContinuation};
 
 fn track(mid: &str) -> Track {
@@ -192,43 +193,37 @@ fn playback_load_rejects_requests_across_restarts() {
 }
 
 #[test]
-fn lyric_foreground_preserves_a_readable_theme_color() {
-    for (background, preferred) in [(0.95, 0x182030), (0.1, 0xdcd7ba)] {
-        let preferred = rgb(preferred).into();
-        let result = readable_lyric_color([background; 3], black().opacity(0.28), preferred);
-        assert_eq!(result, preferred);
+fn lyric_overlay_preserves_readable_backgrounds() {
+    for (sample, background, foreground) in [(0.1, 0x1f1f28, 0xdcd7ba), (0.95, 0xf2ecbc, 0x545464)]
+    {
+        let background: Hsla = rgb(background).into();
+        let result = lyric_background_overlay([[sample; 3]; 2], background, rgb(foreground).into());
+        assert_eq!(result, background.opacity(0.4));
     }
 }
 
 #[test]
-fn lyric_foreground_keeps_theme_tint_on_midtones() {
-    let preferred: Hsla = rgb(0xdcd7ba).into();
-    for background in [rgb(0x8a8a8d), rgb(0x73808d)] {
-        let result = readable_lyric_color(
-            [background.r, background.g, background.b],
-            black().opacity(0.),
-            preferred,
+fn lyric_overlay_keeps_theme_contrast_across_cover_colors() {
+    for theme in ColorTheme::ALL {
+        let palette = theme.palette();
+        let background: Hsla = Rgba::try_from(palette.background).unwrap().into();
+        let foreground = Rgba::try_from(palette.foreground).unwrap();
+        let overlay = lyric_background_overlay([[0.; 3], [1.; 3]], background, foreground.into());
+
+        assert_eq!(
+            (overlay.h, overlay.s, overlay.l),
+            (background.h, background.s, background.l)
         );
-
-        assert_eq!((result.h, result.s), (preferred.h, preferred.s));
-        assert!(result.l >= 0.12 && result.l < 0.2);
-        assert!(contrast_ratio(result.to_rgb(), background) >= 3.5);
+        assert!(overlay.a >= 0.4 && overlay.a < 1.);
+        for sample in [0x000000, 0xffffff, 0xff80b0, 0x80b0ff] {
+            let displayed = rgb(sample).blend(overlay.to_rgb());
+            assert!(
+                contrast_ratio(foreground, displayed) >= LYRIC_TARGET_CONTRAST,
+                "{}",
+                theme.id()
+            );
+        }
     }
-}
-
-#[test]
-fn lyric_foreground_limits_brightening() {
-    let background = rgb(0x60636d);
-    let preferred: Hsla = rgb(0xdcd7ba).into();
-    let result = readable_lyric_color(
-        [background.r, background.g, background.b],
-        black().opacity(0.),
-        preferred,
-    );
-
-    assert_eq!((result.h, result.s), (preferred.h, preferred.s));
-    assert!(result.l > preferred.l && result.l <= 0.85);
-    assert!(contrast_ratio(result.to_rgb(), background) >= LYRIC_TARGET_CONTRAST);
 }
 
 #[test]

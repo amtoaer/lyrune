@@ -90,28 +90,8 @@ pub struct CachedImageCache {
 
 pub struct BlurredCover {
     image: Arc<Image>,
-    wide_lyrics_rgb: [f32; 3],
-    narrow_lyrics_rgb: [f32; 3],
-    collapse_rgb: [f32; 3],
-    controls_rgb: [f32; 3],
-}
-
-impl BlurredCover {
-    pub fn sampled_rgb(&self, narrow: bool) -> [f32; 3] {
-        if narrow {
-            self.narrow_lyrics_rgb
-        } else {
-            self.wide_lyrics_rgb
-        }
-    }
-
-    pub fn controls_rgb(&self) -> [f32; 3] {
-        self.controls_rgb
-    }
-
-    pub fn collapse_rgb(&self) -> [f32; 3] {
-        self.collapse_rgb
-    }
+    /// 各 RGB 通道的最小值、最大值；边界颜色不一定对应同一个像素。
+    pub rgb_bounds: [[f32; 3]; 2],
 }
 
 impl Asset for CachedImageFile {
@@ -305,20 +285,22 @@ fn generate_blurred_cover(path: &Path) -> anyhow::Result<Arc<BlurredCover>> {
             .resize_to_fill(BLURRED_COVER_SIZE, BLURRED_COVER_SIZE, FilterType::Triangle)
             .blur(10.),
     );
-    let wide_lyrics_rgb = sample_lyrics_region(&blurred, false);
-    let narrow_lyrics_rgb = sample_lyrics_region(&blurred, true);
-    let collapse_rgb = sample_controls_region(&blurred, true);
-    let controls_rgb = sample_controls_region(&blurred, false);
+    // 各通道的上下界同时覆盖局部亮斑和窗口裁剪变化，不依赖歌词当前所在的位置。
+    let mut rgb_bounds = [[1_f32; 3], [0_f32; 3]];
+    for pixel in blurred.to_rgb8().pixels() {
+        for (channel, value) in pixel.0.into_iter().enumerate() {
+            let value = f32::from(value) / 255.;
+            rgb_bounds[0][channel] = rgb_bounds[0][channel].min(value);
+            rgb_bounds[1][channel] = rgb_bounds[1][channel].max(value);
+        }
+    }
     let mut bytes = Cursor::new(Vec::new());
     blurred
         .write_to(&mut bytes, image::ImageFormat::Png)
         .context("无法编码模糊封面")?;
     Ok(Arc::new(BlurredCover {
         image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes.into_inner())),
-        wide_lyrics_rgb,
-        narrow_lyrics_rgb,
-        collapse_rgb,
-        controls_rgb,
+        rgb_bounds,
     }))
 }
 
@@ -347,78 +329,6 @@ fn compress_high_saturation(image: image::DynamicImage) -> image::DynamicImage {
         }
     }
     image::DynamicImage::ImageRgba8(image)
-}
-
-fn sample_lyrics_region(image: &image::DynamicImage, narrow: bool) -> [f32; 3] {
-    let image = image.to_rgb8();
-    let (width, height) = image.dimensions();
-    let (start_x, end_x) = if narrow {
-        (width / 10, width * 4 / 5)
-    } else {
-        (width * 2 / 5, width * 4 / 5)
-    };
-    let mut totals = [0_u64; 3];
-    let mut count = 0_u64;
-    for pixel in image
-        .rows()
-        .skip((height / 4) as usize)
-        .take((height / 2) as usize)
-    {
-        for color in pixel
-            .skip(start_x as usize)
-            .take(end_x.saturating_sub(start_x) as usize)
-        {
-            totals[0] += u64::from(color[0]);
-            totals[1] += u64::from(color[1]);
-            totals[2] += u64::from(color[2]);
-            count += 1;
-        }
-    }
-    if count == 0 {
-        return [0.; 3];
-    }
-    [
-        totals[0] as f32 / count as f32 / 255.,
-        totals[1] as f32 / count as f32 / 255.,
-        totals[2] as f32 / count as f32 / 255.,
-    ]
-}
-
-fn sample_controls_region(image: &image::DynamicImage, left: bool) -> [f32; 3] {
-    let image = image.to_rgb8();
-    let (width, height) = image.dimensions();
-    let (start_x, end_x) = if left {
-        (0, width / 5)
-    } else {
-        (width * 4 / 5, width)
-    };
-    let start_y = height / 20;
-    let end_y = height / 5;
-    let mut totals = [0_u64; 3];
-    let mut count = 0_u64;
-    for pixel in image
-        .rows()
-        .skip(start_y as usize)
-        .take(end_y.saturating_sub(start_y) as usize)
-    {
-        for color in pixel
-            .skip(start_x as usize)
-            .take(end_x.saturating_sub(start_x) as usize)
-        {
-            totals[0] += u64::from(color[0]);
-            totals[1] += u64::from(color[1]);
-            totals[2] += u64::from(color[2]);
-            count += 1;
-        }
-    }
-    if count == 0 {
-        return [0.; 3];
-    }
-    [
-        totals[0] as f32 / count as f32 / 255.,
-        totals[1] as f32 / count as f32 / 255.,
-        totals[2] as f32 / count as f32 / 255.,
-    ]
 }
 
 async fn cache_image_file(client: Arc<dyn HttpClient>, url: String) -> anyhow::Result<PathBuf> {
@@ -895,26 +805,22 @@ mod tests {
 
         assert_eq!(blurred.image.format, ImageFormat::Png);
         assert_eq!((decoded.width(), decoded.height()), (128, 128));
-        let sampled_rgb = blurred.sampled_rgb(false);
+        let sampled_rgb = blurred.rgb_bounds[0];
+        assert_eq!(blurred.rgb_bounds[0], blurred.rgb_bounds[1]);
         assert!(sampled_rgb[0] > 120. / 255.);
         assert!(sampled_rgb[1] > 80. / 255.);
         assert!(sampled_rgb[2] < 200. / 255.);
         let compressed_lightness = (sampled_rgb[1] + sampled_rgb[2]) / 2.;
         assert!((compressed_lightness - 140. / 255.).abs() < 0.01);
+
+        image::RgbImage::from_fn(128, 128, |x, _| {
+            image::Rgb([if x < 64 { 0 } else { 255 }; 3])
+        })
+        .save(&source)
+        .unwrap();
+        let blurred = generate_blurred_cover(&source).unwrap();
+        assert!(blurred.rgb_bounds[0].into_iter().all(|value| value < 0.1));
+        assert!(blurred.rgb_bounds[1].into_iter().all(|value| value > 0.9));
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn samples_the_area_occupied_by_wide_lyrics() {
-        let mut image = image::RgbImage::from_pixel(100, 100, image::Rgb([32, 32, 32]));
-        for y in 0..100 {
-            for x in 80..100 {
-                image.put_pixel(x, y, image::Rgb([240, 240, 240]));
-            }
-        }
-
-        let sampled = sample_lyrics_region(&image::DynamicImage::ImageRgb8(image), false);
-
-        assert_eq!(sampled, [32. / 255.; 3]);
     }
 }

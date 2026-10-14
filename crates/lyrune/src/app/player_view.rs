@@ -12,7 +12,6 @@ use gpui_component::{
 };
 use lyrune_api::{Quality, SearchAlbum, SearchArtist, Track};
 
-use super::lyrics_view::LYRIC_BACKGROUND_OVERLAY_OPACITY;
 use super::progress_view::{PlaybackProgressView, ProgressInput};
 use super::queue::RepeatMode;
 use super::{LyruneView, PLAYER_BAR_HEIGHT};
@@ -740,7 +739,6 @@ impl LyruneView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let narrow = window.viewport_size().width < px(900.);
         let track = self
             .playback
             .read(cx)
@@ -755,16 +753,7 @@ impl LyruneView {
             });
         let has_track = track.is_some();
         let foreground = if self.cover_backdrop_expanded {
-            self.foreground_target(
-                cx.theme()
-                    .background
-                    .opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY),
-                cx.theme().foreground,
-                |cover| cover.sampled_rgb(narrow),
-                window,
-                cx,
-            )
-            .unwrap_or(cx.theme().foreground)
+            cx.theme().foreground
         } else {
             cx.theme().secondary_foreground
         };

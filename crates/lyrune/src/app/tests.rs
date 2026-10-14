@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{Hsla, Pixels, Rgba, px, rgb};
+use gpui::{Pixels, px};
 use lyrune_api::{
     PlaylistPage, Quality, RecommendationKind, SearchAlbum, SearchPage, SearchResults, Track,
     UserPlaylist, UserPlaylistId,
@@ -13,8 +13,8 @@ use super::animation::frame_is_due;
 use super::home::HomePageState;
 use super::lyrics::parse_lyrics;
 use super::lyrics_view::{
-    adjacent_lyric_timing, combined_lyric_frame_interval, contrast_ratio, lyric_background_overlay,
-    lyric_edge_opacity, lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
+    adjacent_lyric_timing, combined_lyric_frame_interval, lyric_edge_opacity,
+    lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
 };
 use super::navigation::NavigationHistory;
 use super::navigation::{
@@ -29,7 +29,6 @@ use super::queue::{
     PlaybackQueue, canonical_queue_track_index, insert_external_track_after_current,
     insert_track_after_current,
 };
-use crate::design::ColorTheme;
 use crate::settings::{DEFAULT_NAVIGATION_HISTORY_LIMIT, FrameRate, PersistedQueueContinuation};
 
 fn track(mid: &str) -> Track {
@@ -189,40 +188,6 @@ fn playback_load_rejects_requests_across_restarts() {
     assert!(!load.is_current(original));
     assert!(load.is_current(restarted));
     assert!(!load.autoplay);
-}
-
-#[test]
-fn lyric_overlay_preserves_readable_backgrounds() {
-    for (sample, background, foreground) in [(0.1, 0x1f1f28, 0xdcd7ba), (0.95, 0xf2ecbc, 0x545464)]
-    {
-        let background: Hsla = rgb(background).into();
-        let result = lyric_background_overlay([[sample; 3]; 2], background, rgb(foreground).into());
-        assert_eq!(result, background.opacity(0.));
-    }
-}
-
-#[test]
-fn lyric_overlay_keeps_theme_contrast_across_cover_colors() {
-    for theme in ColorTheme::ALL {
-        let palette = theme.palette();
-        let background: Hsla = Rgba::try_from(palette.background).unwrap().into();
-        let foreground = Rgba::try_from(palette.foreground).unwrap();
-        let overlay = lyric_background_overlay([[0.; 3], [1.; 3]], background, foreground.into());
-
-        assert_eq!(
-            (overlay.h, overlay.s, overlay.l),
-            (background.h, background.s, background.l)
-        );
-        assert!(overlay.a > 0. && overlay.a < 1.);
-        for sample in [0x000000, 0xffffff, 0xff80b0, 0x80b0ff] {
-            let displayed = rgb(sample).blend(overlay.to_rgb());
-            assert!(
-                contrast_ratio(foreground, displayed) >= crate::http::LYRIC_TARGET_CONTRAST,
-                "{}",
-                theme.id()
-            );
-        }
-    }
 }
 
 #[test]

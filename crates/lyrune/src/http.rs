@@ -24,7 +24,8 @@ use crate::runtime::RUNTIME;
 const IMAGE_CACHE_DIR: &str = "images-v1";
 const THUMBNAIL_CACHE_DIR: &str = "thumbnails-v1";
 pub(crate) const BLURRED_COVER_SIZE: u32 = 128;
-pub(crate) const LYRIC_TARGET_CONTRAST: f32 = 4.5;
+pub(crate) const LYRIC_BACKGROUND_OVERLAY_OPACITY: f32 = 0.4;
+const LYRIC_TARGET_CONTRAST: f32 = 4.5;
 
 #[derive(Clone)]
 enum CachedImageFile {}
@@ -96,12 +97,6 @@ struct BlurredCoverSource {
 
 pub struct CachedImageCache {
     items: LruCache<u64, Entity<ImageCacheItem>>,
-}
-
-pub struct BlurredCover {
-    image: Arc<Image>,
-    /// 各 RGB 通道的最小值、最大值；边界颜色不一定对应同一个像素。
-    pub rgb_bounds: [[f32; 3]; 2],
 }
 
 impl Asset for CachedImageFile {
@@ -234,7 +229,7 @@ impl ImageCache for CachedImageCache {
 #[allow(clippy::manual_async_fn)]
 impl Asset for BlurredCoverImage {
     type Source = BlurredCoverSource;
-    type Output = Result<Arc<BlurredCover>, ImageCacheError>;
+    type Output = Result<Arc<Image>, ImageCacheError>;
 
     fn load(
         source: Self::Source,
@@ -268,18 +263,18 @@ pub fn blurred_image_source(url: String, background: Hsla, foreground: Hsla) -> 
             Ok(cover) => cover,
             Err(error) => return Some(Err(error)),
         };
-        cover.image.clone().use_render_image(window, cx).map(Ok)
+        cover.use_render_image(window, cx).map(Ok)
     })
     .into()
 }
 
-pub fn blurred_cover(
+fn blurred_cover(
     url: &str,
     background: Hsla,
     foreground: Hsla,
     window: &mut Window,
     cx: &mut App,
-) -> Option<Result<Arc<BlurredCover>, ImageCacheError>> {
+) -> Option<Result<Arc<Image>, ImageCacheError>> {
     let path = match window.use_asset::<CachedImageFile>(&url.to_owned(), cx)? {
         Ok(path) => path,
         Err(error) => return Some(Err(error)),
@@ -298,7 +293,7 @@ fn generate_blurred_cover(
     path: &Path,
     background: Hsla,
     foreground: Hsla,
-) -> anyhow::Result<Arc<BlurredCover>> {
+) -> anyhow::Result<Arc<Image>> {
     let image = image::ImageReader::open(path)
         .context("无法打开待模糊的封面")?
         .with_guessed_format()
@@ -308,22 +303,25 @@ fn generate_blurred_cover(
     let blurred = image
         .resize_to_fill(BLURRED_COVER_SIZE, BLURRED_COVER_SIZE, FilterType::Triangle)
         .blur(10.);
-    let (blurred, rgb_bounds) = tone_blurred_cover(blurred, background, foreground);
+    let blurred = tone_blurred_cover(blurred, background, foreground);
     let mut bytes = Cursor::new(Vec::new());
     blurred
         .write_to(&mut bytes, image::ImageFormat::Png)
         .context("无法编码模糊封面")?;
-    Ok(Arc::new(BlurredCover {
-        image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes.into_inner())),
-        rgb_bounds,
-    }))
+    Ok(Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        bytes.into_inner(),
+    )))
 }
 
 fn tone_blurred_cover(
     image: image::DynamicImage,
     background: Hsla,
     foreground: Hsla,
-) -> (image::RgbImage, [[f32; 3]; 2]) {
+) -> image::RgbImage {
+    let overlay = background
+        .opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY)
+        .to_rgb();
     let background = background.to_rgb();
     let foreground_luminance = relative_luminance(foreground.to_rgb());
     let light_foreground = foreground_luminance > relative_luminance(background);
@@ -367,17 +365,30 @@ fn tone_blurred_cover(
             }
         }
         let [r, g, b] = bounds[usize::from(light_foreground)];
-        let luminance = relative_luminance(Rgba { r, g, b, a: 1. });
+        // 对比度按固定遮罩合成后的颜色计算，避免调色和遮罩重复压暗。
+        let mut displayed = Rgba { r, g, b, a: 1. }.blend(overlay);
+        if !light_foreground {
+            // sRGB 混色不是线性亮度混色。用加权灰阶的亮度下界约束浅色背景，
+            // 使不同色相的封面在交叉渐变时仍有足够亮度承托深色文字。
+            let gray = 0.2126 * displayed.r + 0.7152 * displayed.g + 0.0722 * displayed.b;
+            displayed = Rgba {
+                r: gray,
+                g: gray,
+                b: gray,
+                a: 1.,
+            };
+        }
+        let luminance = relative_luminance(displayed);
         let readable = if light_foreground {
             luminance <= luminance_limit
         } else {
             luminance >= luminance_limit
         };
-        (result, bounds, readable)
+        (result, readable)
     };
-    let (image, bounds, readable) = render(0.);
+    let (image, readable) = render(0.);
     if readable {
-        return (image, bounds);
+        return image;
     }
     let mut result = render(1.);
     let mut lower = 0.;
@@ -385,14 +396,14 @@ fn tone_blurred_cover(
     for _ in 0..12 {
         let amount = (lower + upper) / 2.;
         let candidate = render(amount);
-        if candidate.2 {
+        if candidate.1 {
             upper = amount;
             result = candidate;
         } else {
             lower = amount;
         }
     }
-    (result.0, result.1)
+    result.0
 }
 
 fn oklch_to_srgb(color: Oklch) -> Srgb<u8> {
@@ -421,7 +432,7 @@ fn oklch_to_srgb(color: Oklch) -> Srgb<u8> {
     Srgb::from_linear(rgb)
 }
 
-pub(crate) fn relative_luminance(color: Rgba) -> f32 {
+fn relative_luminance(color: Rgba) -> f32 {
     let linearize = |channel: f32| {
         if channel <= 0.04045 {
             channel / 12.92
@@ -904,23 +915,14 @@ mod tests {
         let background = gpui::rgb(0x1f1f28).into();
         let foreground = gpui::rgb(0xdcd7ba).into();
         let blurred = generate_blurred_cover(&source, background, foreground).unwrap();
-        let decoded = image::load_from_memory(&blurred.image.bytes).unwrap();
+        let decoded = image::load_from_memory(&blurred.bytes).unwrap();
 
-        assert_eq!(blurred.image.format, ImageFormat::Png);
+        assert_eq!(blurred.format, ImageFormat::Png);
         assert_eq!((decoded.width(), decoded.height()), (128, 128));
-        let sampled_rgb = blurred.rgb_bounds[0];
-        assert_eq!(blurred.rgb_bounds[0], blurred.rgb_bounds[1]);
-        let pixel = decoded.to_rgb8().get_pixel(0, 0).0;
-        assert_eq!(sampled_rgb, pixel.map(|channel| f32::from(channel) / 255.));
-
-        image::RgbImage::from_fn(128, 128, |x, _| {
-            image::Rgb([if x < 64 { 0 } else { 255 }; 3])
-        })
-        .save(&source)
-        .unwrap();
-        let blurred = generate_blurred_cover(&source, background, foreground).unwrap();
-        assert!(blurred.rgb_bounds[0].into_iter().all(|value| value < 0.1));
-        assert!(blurred.rgb_bounds[1].into_iter().all(|value| value < 0.5));
+        assert_eq!(
+            image::open(&source).unwrap().to_rgba8().get_pixel(0, 0).0,
+            [120, 80, 200, 255]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -937,23 +939,24 @@ mod tests {
             let palette = theme.palette();
             let background = Rgba::try_from(palette.background).unwrap();
             let foreground = Rgba::try_from(palette.foreground).unwrap();
-            let (toned, bounds) = tone_blurred_cover(
+            let toned = tone_blurred_cover(
                 image::DynamicImage::ImageRgb8(original.clone()),
                 background.into(),
                 foreground.into(),
             );
             let foreground_luminance = relative_luminance(foreground);
-            let light_foreground = foreground_luminance > relative_luminance(background);
-            let [r, g, b] = bounds[usize::from(light_foreground)];
-            let background_luminance = relative_luminance(Rgba { r, g, b, a: 1. });
-            assert!(
-                (foreground_luminance.max(background_luminance) + 0.05)
-                    / (foreground_luminance.min(background_luminance) + 0.05)
-                    >= LYRIC_TARGET_CONTRAST,
-                "{}",
-                theme.id()
-            );
             for (original, toned) in original.pixels().zip(toned.pixels()) {
+                let [r, g, b] = toned.0.map(|channel| f32::from(channel) / 255.);
+                let displayed = Rgba { r, g, b, a: 1. }
+                    .blend(background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY));
+                let background_luminance = relative_luminance(displayed);
+                assert!(
+                    (foreground_luminance.max(background_luminance) + 0.05)
+                        / (foreground_luminance.min(background_luminance) + 0.05)
+                        >= LYRIC_TARGET_CONTRAST,
+                    "{}",
+                    theme.id()
+                );
                 let [original, toned] = [original, toned]
                     .map(|pixel| Oklch::from_color(Srgb::from(pixel.0).into_format::<f32>()));
                 if original.chroma > 0.03 && toned.chroma > 0.03 {
@@ -961,9 +964,87 @@ mod tests {
                         + 180.)
                         .rem_euclid(360.)
                         - 180.;
+                    // 低彩度处的 8 位量化会放大角度误差，按色相变化对应的色差检查。
+                    let hue_error =
+                        2. * toned.chroma * (hue_difference.to_radians() / 2.).sin().abs();
                     assert!(
-                        hue_difference.abs() < 3.,
-                        "{}: {hue_difference}",
+                        hue_error < 0.004,
+                        "{}: {hue_difference}, {original:?} -> {toned:?}",
+                        theme.id()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_blurred_cover_uses_overlay_contrast() {
+        for (background, foreground, original) in [
+            (0x1f1f28, 0xdcd7ba, [128, 120, 150]),
+            (0xf2ecbc, 0x545464, [192, 184, 200]),
+        ] {
+            let background = gpui::rgb(background);
+            let foreground_luminance = relative_luminance(gpui::rgb(foreground));
+            let [r, g, b] = original.map(|channel| f32::from(channel) / 255.);
+            let color = Rgba { r, g, b, a: 1. };
+            for (color, readable) in [
+                (color, false),
+                (
+                    color.blend(background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY)),
+                    true,
+                ),
+            ] {
+                let luminance = relative_luminance(color);
+                assert_eq!(
+                    (foreground_luminance.max(luminance) + 0.05)
+                        / (foreground_luminance.min(luminance) + 0.05)
+                        >= LYRIC_TARGET_CONTRAST,
+                    readable
+                );
+            }
+            let image = image::RgbImage::from_pixel(1, 1, image::Rgb(original));
+            let toned = tone_blurred_cover(
+                image.into(),
+                background.into(),
+                gpui::rgb(foreground).into(),
+            );
+            assert_eq!(toned.get_pixel(0, 0).0, original);
+        }
+    }
+
+    #[test]
+    fn test_blurred_cover_crossfade_contrast() {
+        for theme in crate::design::ColorTheme::ALL {
+            let palette = theme.palette();
+            let background = Rgba::try_from(palette.background).unwrap();
+            let foreground_luminance =
+                relative_luminance(Rgba::try_from(palette.foreground).unwrap());
+            let covers = [[255, 0, 0], [0, 255, 0], [0, 0, 255]].map(|color| {
+                let image = image::RgbImage::from_pixel(1, 1, image::Rgb(color));
+                let toned = tone_blurred_cover(
+                    image.into(),
+                    background.into(),
+                    Rgba::try_from(palette.foreground).unwrap().into(),
+                );
+                let [r, g, b] = toned
+                    .get_pixel(0, 0)
+                    .0
+                    .map(|channel| f32::from(channel) / 255.);
+                Rgba { r, g, b, a: 1. }
+            });
+            for (index, current) in covers.iter().enumerate() {
+                let previous = covers[(index + 1) % covers.len()];
+                for progress in [0., 0.125, 0.25, 0.5, 0.75, 0.875, 1.] {
+                    let displayed = background
+                        .blend(previous.opacity(1. - progress))
+                        .blend(current.opacity(progress))
+                        .blend(background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY));
+                    let luminance = relative_luminance(displayed);
+                    assert!(
+                        (foreground_luminance.max(luminance) + 0.05)
+                            / (foreground_luminance.min(luminance) + 0.05)
+                            >= LYRIC_TARGET_CONTRAST,
+                        "{}: {progress}",
                         theme.id()
                     );
                 }

@@ -15,8 +15,7 @@ use super::animation::frame_is_due;
 use super::lyrics;
 use super::lyrics::{LyricLine, ParsedLyrics};
 use crate::http::{
-    BLURRED_COVER_SIZE, LYRIC_TARGET_CONTRAST, blurred_cover, blurred_image_source,
-    cached_image_source, relative_luminance,
+    BLURRED_COVER_SIZE, LYRIC_BACKGROUND_OVERLAY_OPACITY, blurred_image_source, cached_image_source,
 };
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::player::AudioPlayer;
@@ -31,57 +30,6 @@ pub(super) const LYRIC_EXPANSION_DURATION: Duration = Duration::from_millis(480)
 const LYRIC_TRACK_SWITCH_DURATION: Duration = Duration::from_millis(420);
 const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
 const LYRIC_HORIZONTAL_STEP: f32 = 0.5;
-
-#[cfg(test)]
-pub(super) fn contrast_ratio(first: Rgba, second: Rgba) -> f32 {
-    let first = relative_luminance(first);
-    let second = relative_luminance(second);
-    (first.max(second) + 0.05) / (first.min(second) + 0.05)
-}
-
-pub(super) fn lyric_background_overlay(
-    rgb_bounds: [[f32; 3]; 2],
-    background: Hsla,
-    foreground: Hsla,
-) -> Hsla {
-    let overlay = background.to_rgb();
-    let foreground_luminance = relative_luminance(foreground.to_rgb());
-    let light_foreground = foreground_luminance > relative_luminance(overlay);
-    let sampled_rgb = rgb_bounds[usize::from(light_foreground)];
-    let luminance_limit = if light_foreground {
-        (foreground_luminance + 0.05) / LYRIC_TARGET_CONTRAST - 0.05
-    } else {
-        (foreground_luminance + 0.05) * LYRIC_TARGET_CONTRAST - 0.05
-    };
-    // 封面已在后台调色，遮罩仅补足切歌时图层混合可能损失的对比度。
-    let readable = |opacity: f32| {
-        let luminance = relative_luminance(Rgba {
-            r: sampled_rgb[0] * (1. - opacity) + overlay.r * opacity,
-            g: sampled_rgb[1] * (1. - opacity) + overlay.g * opacity,
-            b: sampled_rgb[2] * (1. - opacity) + overlay.b * opacity,
-            a: 1.,
-        });
-        if light_foreground {
-            luminance <= luminance_limit
-        } else {
-            luminance >= luminance_limit
-        }
-    };
-    let mut lower = 0.;
-    let mut upper = 1.;
-    if readable(lower) {
-        return background.opacity(lower);
-    }
-    for _ in 0..12 {
-        let opacity = (lower + upper) / 2.;
-        if readable(opacity) {
-            upper = opacity;
-        } else {
-            lower = opacity;
-        }
-    }
-    background.opacity(upper)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum LyricLayoutStyle {
@@ -1448,30 +1396,7 @@ impl LyricsView {
                 };
                 let previous_backdrop_opacity = 1. - current_backdrop_opacity;
                 let cover_url = url.clone();
-                let background = theme.background.to_rgb();
-                let background_rgb = [background.r, background.g, background.b];
-                let [previous_bounds, current_bounds] = [
-                    previous_backdrop_url.as_deref(),
-                    Some(current_backdrop_url.as_str()),
-                ]
-                .map(|url| {
-                    url.and_then(|url| {
-                        blurred_cover(url, theme.background, theme.foreground, window, cx)
-                    })
-                    .and_then(Result::ok)
-                    .map_or([background_rgb; 2], |cover| cover.rgb_bounds)
-                });
-                // 与下方图层一致：先画旧封面，再画新封面，余下部分露出主题背景。
-                let rgb_bounds = std::array::from_fn(|bound| {
-                    std::array::from_fn(|channel| {
-                        let previous = previous_bounds[bound][channel] * previous_backdrop_opacity
-                            + background_rgb[channel] * current_backdrop_opacity;
-                        current_bounds[bound][channel] * current_backdrop_opacity
-                            + previous * previous_backdrop_opacity
-                    })
-                });
-                let overlay =
-                    lyric_background_overlay(rgb_bounds, theme.background, theme.foreground);
+                let overlay = theme.background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY);
                 let lyrics = if defer_new_lyrics {
                     div().into_any_element()
                 } else {

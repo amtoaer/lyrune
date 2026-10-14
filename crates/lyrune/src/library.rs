@@ -1036,7 +1036,11 @@ impl TableDelegate for TrackTableDelegate {
 fn track_columns(available_width: Pixels) -> Vec<Column> {
     let compact = available_width < px(792.);
     let flexible_width = available_width - px(48. + 84.);
-    let album_width = if compact { px(0.) } else { flexible_width / 3. };
+    let album_width = if compact {
+        px(0.)
+    } else {
+        flexible_width * 4. / 11.
+    };
     let mut columns = vec![
         Column::new("number", "#")
             .width(px(48.))

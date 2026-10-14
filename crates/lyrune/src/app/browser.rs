@@ -829,6 +829,23 @@ mod tests {
         let song_header = cx.debug_bounds("artist-collection-header").unwrap();
         assert_eq!(song_header.top(), search_header.top());
         assert_eq!(song_header.size.height, search_header.size.height);
+        let table_header = cx.debug_bounds("track-table-header").unwrap();
+        assert_eq!(table_header.size.height, px(36.));
+        assert_eq!(
+            cx.debug_bounds("track-row-0").unwrap().top(),
+            table_header.bottom()
+        );
+        for selector in [
+            "track-table-heading-0",
+            "track-table-heading-1",
+            "track-table-heading-2",
+        ] {
+            let heading = cx.debug_bounds(selector).unwrap();
+            assert!(
+                heading.top() >= table_header.top() && heading.bottom() < table_header.bottom(),
+                "heading must fit above the header border: {heading:?}, {table_header:?}"
+            );
+        }
         browser.read_with(cx, |browser, cx| {
             assert!(browser.main_content == MainContent::Playlist);
             assert!(Arc::ptr_eq(

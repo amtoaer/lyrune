@@ -592,7 +592,6 @@ pub fn playlist_cover(
 pub struct TrackTableDelegate {
     columns: Vec<Column>,
     header_height: Pixels,
-    header_text_padding: Pixels,
     tracks: Vec<Arc<Track>>,
     loading: bool,
     has_more: bool,
@@ -613,8 +612,7 @@ impl TrackTableDelegate {
     ) -> Self {
         Self {
             columns: track_columns(false),
-            header_height: px(32.),
-            header_text_padding: px(14.),
+            header_height: px(36.),
             tracks: Vec::new(),
             loading: false,
             has_more: false,
@@ -778,7 +776,7 @@ impl TableDelegate for TrackTableDelegate {
             .h(self.header_height)
             .overflow_hidden()
             .when(self.header_height > px(0.), |this| {
-                this.mb(px(4.)).border_b_1().border_color(cx.theme().border)
+                this.border_b_1().border_color(cx.theme().border)
             })
     }
 
@@ -794,14 +792,17 @@ impl TableDelegate for TrackTableDelegate {
         } else {
             self.columns[col_ix].name.clone().into_any_element()
         };
-        div()
+        h_flex()
             .size_full()
             .when(self.columns[col_ix].align == TextAlign::Right, |this| {
-                this.flex().justify_end().text_right()
+                this.justify_end().text_right()
             })
-            .pt(self.header_text_padding)
             .when(is_duration, |this| this.pr(px(8.)))
-            .child(content)
+            .child(
+                div()
+                    .debug_selector(move || format!("track-table-heading-{col_ix}"))
+                    .child(content),
+            )
     }
 
     fn render_tr(

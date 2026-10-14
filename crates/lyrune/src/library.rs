@@ -12,6 +12,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     list::{ListDelegate, ListItem, ListState},
+    scroll::Scrollbar,
     spinner::Spinner,
     table::{Column, TableDelegate, TableState},
     v_flex,
@@ -32,6 +33,14 @@ pub enum SearchCard {
     Artist(Arc<SearchArtist>),
     Album(Arc<SearchAlbum>),
     Playlist(Arc<UserPlaylist>),
+}
+
+pub fn card_grid_dimensions(available_width: Pixels, compact: bool) -> (usize, Pixels) {
+    let min_card_width = if compact { px(148.) } else { px(164.) };
+    let columns =
+        (((available_width + px(16.)) / (min_card_width + px(16.))).floor() as usize).max(1);
+    let card_width = (available_width - px(16.) * (columns - 1) as f32) / columns as f32;
+    (columns, card_width)
 }
 
 pub struct SearchCardGridDelegate {
@@ -69,14 +78,17 @@ impl SearchCardGridDelegate {
     pub fn set_cards(
         &mut self,
         cards: Option<Vec<SearchCard>>,
-        columns: usize,
-        card_width: Pixels,
-        card_height: Pixels,
-        cover_size: Pixels,
-        scale_factor: f32,
+        available_width: Pixels,
+        caption_height: Pixels,
         has_more: bool,
         loading_more: bool,
+        window: &Window,
     ) -> bool {
+        let compact = window.viewport_size().width < px(1120.);
+        let (columns, card_width) = card_grid_dimensions(available_width, compact);
+        let cover_size = card_width - px(16.);
+        let card_height = cover_size + caption_height;
+        let scale_factor = window.scale_factor();
         // None 保留已同步的数据，布局与分页状态仍可独立更新。
         let cards_changed = cards.as_ref().is_some_and(|cards| {
             self.cards.len() != cards.len()
@@ -108,7 +120,7 @@ impl SearchCardGridDelegate {
         if let Some(cards) = cards {
             self.cards = cards;
         }
-        self.columns = columns.max(1);
+        self.columns = columns;
         self.card_width = card_width;
         self.card_height = card_height;
         self.cover_size = cover_size;
@@ -214,6 +226,7 @@ impl SearchCardGridDelegate {
                     cx,
                 );
                 Button::new(format!("search-album-{index}"))
+                    .debug_selector(move || format!("search-album-{index}"))
                     .ghost()
                     .w(self.card_width)
                     .h(self.card_height)
@@ -580,7 +593,6 @@ pub fn playlist_cover(
 pub struct TrackTableDelegate {
     columns: Vec<Column>,
     header_height: Pixels,
-    header_text_padding: Pixels,
     tracks: Vec<Arc<Track>>,
     loading: bool,
     has_more: bool,
@@ -588,7 +600,8 @@ pub struct TrackTableDelegate {
     loading_index: Option<usize>,
     playback_active: bool,
     show_liked_actions: bool,
-    compact: bool,
+    show_covers: bool,
+    available_width: Pixels,
     load_more_sender: mpsc::Sender<()>,
     event_sender: mpsc::UnboundedSender<TrackTableEvent>,
 }
@@ -599,9 +612,8 @@ impl TrackTableDelegate {
         event_sender: mpsc::UnboundedSender<TrackTableEvent>,
     ) -> Self {
         Self {
-            columns: track_columns(false),
-            header_height: px(32.),
-            header_text_padding: px(14.),
+            columns: track_columns(px(792.)),
+            header_height: px(36.),
             tracks: Vec::new(),
             loading: false,
             has_more: false,
@@ -609,7 +621,8 @@ impl TrackTableDelegate {
             loading_index: None,
             playback_active: false,
             show_liked_actions: false,
-            compact: false,
+            show_covers: true,
+            available_width: px(792.),
             load_more_sender,
             event_sender,
         }
@@ -666,15 +679,16 @@ impl TrackTableDelegate {
             .into_any_element()
     }
 
-    pub fn reset(&mut self, show_liked_actions: bool) {
+    pub fn reset(&mut self, playlist_id: &UserPlaylistId) {
         self.tracks.clear();
         self.loading = true;
         self.has_more = false;
         self.playing_index = None;
         self.loading_index = None;
         self.playback_active = false;
-        self.show_liked_actions = show_liked_actions;
-        self.columns = track_columns(self.compact);
+        self.show_liked_actions = *playlist_id == UserPlaylistId::Liked;
+        self.show_covers = !matches!(playlist_id, UserPlaylistId::Album { .. });
+        self.columns = track_columns(self.available_width);
     }
 
     pub fn set_tracks(&mut self, tracks: Vec<Arc<Track>>, has_more: bool, loading: bool) {
@@ -704,17 +718,22 @@ impl TrackTableDelegate {
         changed
     }
 
-    pub fn set_compact(&mut self, compact: bool) -> bool {
-        if self.compact == compact {
+    pub fn set_width(&mut self, available_width: Pixels) -> bool {
+        if self.available_width == available_width {
             return false;
         }
-        self.compact = compact;
-        self.columns = track_columns(compact);
+        self.available_width = available_width;
+        self.columns = track_columns(available_width);
         true
     }
 
     pub fn tracks(&self) -> &[Arc<Track>] {
         &self.tracks
+    }
+
+    pub fn without_header(mut self) -> Self {
+        self.header_height = px(0.);
+        self
     }
 
     pub fn has_more(&self) -> bool {
@@ -729,7 +748,8 @@ impl TrackTableDelegate {
         self.loading_index = None;
         self.playback_active = false;
         self.show_liked_actions = false;
-        self.columns = track_columns(self.compact);
+        self.show_covers = true;
+        self.columns = track_columns(self.available_width);
     }
 }
 
@@ -753,11 +773,12 @@ impl TableDelegate for TrackTableDelegate {
     ) -> Stateful<gpui::Div> {
         div()
             .id("track-table-header")
+            .debug_selector(|| "track-table-header".into())
             .h(self.header_height)
-            .mb(px(4.))
             .overflow_hidden()
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .when(self.header_height > px(0.), |this| {
+                this.border_b_1().border_color(cx.theme().border)
+            })
     }
 
     fn render_th(
@@ -772,14 +793,17 @@ impl TableDelegate for TrackTableDelegate {
         } else {
             self.columns[col_ix].name.clone().into_any_element()
         };
-        div()
+        h_flex()
             .size_full()
             .when(self.columns[col_ix].align == TextAlign::Right, |this| {
-                this.flex().justify_end().text_right()
+                this.justify_end().text_right()
             })
-            .pt(self.header_text_padding)
             .when(is_duration, |this| this.pr(px(8.)))
-            .child(content)
+            .child(
+                div()
+                    .debug_selector(move || format!("track-table-heading-{col_ix}"))
+                    .child(content),
+            )
     }
 
     fn render_tr(
@@ -790,6 +814,7 @@ impl TableDelegate for TrackTableDelegate {
     ) -> Stateful<gpui::Div> {
         div()
             .id(("track-row", row_ix))
+            .debug_selector(move || format!("track-row-{row_ix}"))
             .group(format!("track-row-{row_ix}"))
             .mx_1()
             .rounded(px(9.))
@@ -864,7 +889,7 @@ impl TableDelegate for TrackTableDelegate {
                 }
             }
             "title" => {
-                let cover = match track.cover_url.clone() {
+                let cover = self.show_covers.then(|| match track.cover_url.clone() {
                     Some(url) => img(cached_image_source(url, px(44.), window.scale_factor()))
                         .size(px(44.))
                         .flex_shrink_0()
@@ -885,13 +910,14 @@ impl TableDelegate for TrackTableDelegate {
                             px(17.),
                         ))
                         .into_any_element(),
-                };
+                });
                 h_flex()
+                    .debug_selector(move || format!("track-title-{row_ix}"))
                     .w_full()
                     .h_full()
                     .min_w_0()
                     .gap_3()
-                    .child(cover)
+                    .children(cover)
                     .child(
                         v_flex()
                             .min_w_0()
@@ -952,6 +978,7 @@ impl TableDelegate for TrackTableDelegate {
                 let hover_background = cx.theme().muted;
                 let duration = format_duration(track.duration_seconds);
                 h_flex()
+                    .debug_selector(move || format!("track-duration-{row_ix}"))
                     .w_full()
                     .h_full()
                     .justify_end()
@@ -992,6 +1019,15 @@ impl TableDelegate for TrackTableDelegate {
         }
     }
 
+    fn render_last_empty_col(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        // 为纵向滚动条留位；计算列宽时扣除同一宽度，避免横向溢出。
+        div().w(Scrollbar::width()).h_full().flex_shrink_0()
+    }
+
     fn loading(&self, _: &App) -> bool {
         self.loading && self.tracks.is_empty()
     }
@@ -1007,21 +1043,30 @@ impl TableDelegate for TrackTableDelegate {
     }
 }
 
-fn track_columns(compact: bool) -> Vec<Column> {
+fn track_columns(available_width: Pixels) -> Vec<Column> {
+    let compact = available_width < px(792.);
+    let flexible_width = available_width - px(48. + 84.) - Scrollbar::width();
+    let title_width = if compact {
+        flexible_width
+    } else {
+        available_width * 0.5 - px(48.)
+    };
     let mut columns = vec![
         Column::new("number", "#")
             .width(px(48.))
             .resizable(false)
             .movable(false),
         Column::new("title", "标题")
-            .width(px(420.))
-            .min_width(px(240.)),
+            .width(title_width)
+            .min_width(px(240.))
+            .resizable(false),
     ];
     if !compact {
         columns.push(
             Column::new("album", "专辑")
-                .width(px(240.))
-                .min_width(px(136.)),
+                .width(flexible_width - title_width)
+                .min_width(px(136.))
+                .resizable(false),
         );
     }
     columns.push(

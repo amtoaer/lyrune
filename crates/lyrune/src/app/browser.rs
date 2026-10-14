@@ -56,7 +56,9 @@ pub(super) struct BrowserView {
     pub(super) playlist_list: Entity<ListState<PlaylistListDelegate>>,
     pub(super) track_table: Entity<TableState<TrackTableDelegate>>,
     pub(super) search_track_table: Entity<TableState<TrackTableDelegate>>,
+    pub(super) artist_song_table: Entity<TableState<TrackTableDelegate>>,
     pub(super) search_card_grid: Entity<ListState<SearchCardGridDelegate>>,
+    pub(super) artist_album_grid: Entity<ListState<SearchCardGridDelegate>>,
     pub(super) search_input: Entity<InputState>,
     pub(super) library_cache: LibraryCache,
     pub(super) page_resource_cache: PageResourceCache,
@@ -104,6 +106,8 @@ impl BrowserView {
         let (load_more_sender, load_more_receiver) = mpsc::channel(1);
         let (search_load_more_sender, search_load_more_receiver) = mpsc::channel(1);
         let (search_card_load_more_sender, search_card_load_more_receiver) = mpsc::channel(1);
+        let (artist_album_load_more_sender, artist_album_load_more_receiver) = mpsc::channel(1);
+        let (artist_song_load_more_sender, _) = mpsc::channel(1);
         let (track_event_sender, mut track_event_receiver) = mpsc::unbounded_channel();
         let track_table = cx.new(|cx| {
             TableState::new(
@@ -130,6 +134,29 @@ impl BrowserView {
                 SearchCardGridDelegate::new(
                     track_event_sender.clone(),
                     search_card_load_more_sender,
+                ),
+                window,
+                cx,
+            )
+            .searchable(false)
+            .selectable(false)
+        });
+        let artist_song_table = cx.new(|cx| {
+            TableState::new(
+                TrackTableDelegate::new(artist_song_load_more_sender, track_event_sender.clone())
+                    .without_header(),
+                window,
+                cx,
+            )
+            .col_selectable(false)
+            .col_movable(false)
+            .sortable(false)
+        });
+        let artist_album_grid = cx.new(|cx| {
+            ListState::new(
+                SearchCardGridDelegate::new(
+                    track_event_sender.clone(),
+                    artist_album_load_more_sender,
                 ),
                 window,
                 cx,
@@ -190,10 +217,24 @@ impl BrowserView {
                     this.select_search_track(*index, cx);
                 }
             }),
+            cx.subscribe(&artist_song_table, |this, _, event: &TableEvent, cx| {
+                if let TableEvent::DoubleClickedRow(index) = event {
+                    this.select_artist_track(*index, cx);
+                }
+            }),
         ];
         Self::listen_for_load_more(load_more_receiver, Self::load_playlist_page, cx);
         Self::listen_for_load_more(search_load_more_receiver, Self::load_more_search, cx);
         Self::listen_for_load_more(search_card_load_more_receiver, Self::load_more_search, cx);
+        Self::listen_for_load_more(
+            artist_album_load_more_receiver,
+            |this, cx| {
+                if this.main_content == MainContent::ArtistAlbums {
+                    this.load_artist_albums(true, cx);
+                }
+            },
+            cx,
+        );
 
         cx.spawn(async move |this, cx| {
             while let Some(event) = track_event_receiver.recv().await {
@@ -240,7 +281,9 @@ impl BrowserView {
             playlist_list,
             track_table,
             search_track_table,
+            artist_song_table,
             search_card_grid,
+            artist_album_grid,
             search_input,
             library_cache: LibraryCache::default(),
             page_resource_cache: PageResourceCache::default(),
@@ -345,7 +388,8 @@ pub(super) fn browsing_area(
         .clamp(min_sidebar_width, max_sidebar_width));
     let content_width = window.viewport_size().width - sidebar_width;
     browser.update(cx, |view, cx| {
-        if view.content_width != content_width {
+        // 首帧先估算，后续以实际布局宽度为准；侧栏跨尺寸断点时未必采用默认宽度。
+        if view.content_width == px(0.) {
             view.content_width = content_width;
             cx.notify();
         }
@@ -405,17 +449,30 @@ impl Render for BrowserView {
         let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);
         let scale_factor = window.scale_factor();
-        self.track_table.update(cx, |table, cx| {
-            if table.delegate_mut().set_compact(compact) {
-                table.refresh(cx);
-            }
-        });
+        let track_table = match self.main_content {
+            MainContent::Playlist => Some(&self.track_table),
+            MainContent::Search => Some(&self.search_track_table),
+            MainContent::Artist => Some(&self.artist_song_table),
+            _ => None,
+        };
+        if let Some(track_table) = track_table {
+            let available_width = self.content_width - super::page_horizontal_padding(narrow) * 2.;
+            track_table.update(cx, |table, cx| {
+                if table.delegate_mut().set_width(available_width) {
+                    table.refresh(cx);
+                    cx.notify();
+                }
+            });
+        }
         let page = match self.main_content {
             MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
-            MainContent::Search => {
-                self.render_search(compact, narrow, scale_factor, self.content_width, cx)
+            MainContent::Search => self.render_search(narrow, self.content_width, window, cx),
+            MainContent::Artist => {
+                self.render_artist_content(compact, narrow, scale_factor, self.content_width, cx)
             }
-            MainContent::Artist => self.render_artist_content(compact, narrow, scale_factor, cx),
+            MainContent::ArtistAlbums => {
+                self.render_artist_album_page(narrow, self.content_width, window, cx)
+            }
             MainContent::Playlist => {
                 self.render_playlist_content(compact, narrow, scale_factor, cx)
             }
@@ -425,7 +482,18 @@ impl Render for BrowserView {
                 .cached(StyleRefinement::default().flex_1().w_full().min_h_0())
                 .into_any_element(),
         };
-        div().size_full().flex().flex_col().child(page)
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(page)
+            .on_children_prepainted(cx.processor(|this, bounds: Vec<Bounds<Pixels>>, _, cx| {
+                let width = bounds[0].size.width;
+                if this.content_width != width {
+                    this.content_width = width;
+                    cx.notify();
+                }
+            }))
     }
 }
 
@@ -478,9 +546,7 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn test_browser_cache_and_reopen(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+    fn new_browser(window: &mut Window, cx: &mut gpui::App) -> Entity<BrowserView> {
         let preferences = cx.new(|_| Preferences {
             settings: AppSettings::default(),
             fonts: AppFonts {
@@ -504,10 +570,15 @@ mod tests {
                 SingleFlight::default(),
             )
         });
+        let settings = cx.new(|cx| SettingsPage::new(preferences.clone(), window, cx));
+        cx.new(|cx| BrowserView::new(window, account, preferences, playback, settings, cx))
+    }
+
+    #[gpui::test]
+    fn test_browser_cache_and_reopen(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
         let (host, cx) = cx.add_window_view(|window, cx| {
-            let settings = cx.new(|cx| SettingsPage::new(preferences.clone(), window, cx));
-            let browser =
-                cx.new(|cx| BrowserView::new(window, account, preferences, playback, settings, cx));
+            let browser = new_browser(window, cx);
             TestBrowser {
                 browser,
                 reveal: 0.,
@@ -592,5 +663,340 @@ mod tests {
             assert!(browser.main_content == MainContent::Search);
             assert_eq!(browser.search.query, "reopened");
         });
+    }
+
+    #[gpui::test]
+    fn test_artist_album_navigation(cx: &mut TestAppContext) {
+        use std::sync::Arc;
+
+        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point, size};
+        use gpui_component::{list::ListDelegate, scroll::Scrollbar, table::TableEvent};
+        use lyrune_api::{PlaylistPage, SearchAlbum, SearchArtist, SearchPage};
+
+        use crate::app::navigation::{NavigationPage, PlaylistCachePolicy, lock_resource};
+
+        cx.update(gpui_component::init);
+        let (host, cx) = cx.add_window_view(|window, cx| TestBrowser {
+            browser: new_browser(window, cx),
+            reveal: 0.,
+            hidden: false,
+        });
+        cx.simulate_resize(size(px(1000.), px(1900.)));
+        let browser = host.read_with(cx, |host, _| host.browser.clone());
+        browser.update(cx, |browser, cx| {
+            browser.main_content = MainContent::Search;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let search_header = cx.debug_bounds("search-category-header").unwrap();
+        let artist = SearchArtist {
+            mid: "artist".into(),
+            name: "Artist".into(),
+            cover_url: None,
+        };
+        let albums = (0..80)
+            .map(|i| SearchAlbum {
+                mid: format!("album-{i}"),
+                title: format!("Album {i}"),
+                artist: artist.name.clone(),
+                cover_url: None,
+            })
+            .collect::<Vec<_>>();
+        let resource = cx.update(|window, cx| {
+            browser.update(cx, |browser, cx| {
+                let resource = browser.page_resource_cache.artist(0, &artist.mid);
+                let mut state = lock_resource(&resource);
+                state.apply_songs(Ok(PlaylistPage {
+                    playlist: artist.clone().into_playlist(),
+                    tracks: (0..20)
+                        .map(|i| {
+                            serde_json::from_value(serde_json::json!({
+                                "mid": format!("song-{i}"),
+                                "title": format!("Song {i}"),
+                                "artists": "Artist",
+                                "album": "Album",
+                                "album_mid": "album",
+                                "duration_seconds": 180,
+                            }))
+                            .unwrap()
+                        })
+                        .collect(),
+                    total: 20,
+                    has_more: false,
+                    next_offset: 20,
+                }));
+                state.apply_albums(
+                    0,
+                    Ok(SearchPage {
+                        items: albums[..40].to_vec(),
+                        has_more: false,
+                        next_offset: 40,
+                    }),
+                );
+                drop(state);
+                browser.open_search_artist(artist, window, cx);
+                resource
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("track-row-4").is_some());
+        assert!(cx.debug_bounds("track-row-5").is_none());
+        assert_eq!(
+            cx.debug_bounds("track-table-header").unwrap().size.height,
+            px(0.)
+        );
+        assert_eq!(cx.debug_bounds("track-row-0").unwrap().size.height, px(64.));
+        cx.simulate_resize(size(px(1000.), px(850.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx.debug_bounds("track-row-2").unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: row.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), -px(100.))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("track-row-2").unwrap().top() < row.top());
+        let preview = browser.read_with(cx, |browser, _| browser.artist_song_table.clone());
+        preview.read_with(cx, |table, _| {
+            assert_eq!(table.delegate().tracks().len(), 5);
+            assert!(!table.delegate().has_more());
+            assert_eq!(
+                table
+                    .vertical_scroll_handle
+                    .0
+                    .borrow()
+                    .base_handle
+                    .offset()
+                    .y,
+                px(0.)
+            );
+        });
+        let row = cx.debug_bounds("track-row-2").unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: row.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(100.))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.simulate_resize(size(px(1000.), px(1900.)));
+        preview.update(cx, |_, cx| cx.emit(TableEvent::DoubleClickedRow(3)));
+        cx.run_until_parked();
+        browser.read_with(cx, |browser, cx| {
+            let playback = browser.playback.read(cx);
+            let queue = playback.state.queue.as_ref().unwrap();
+            assert_eq!(queue.tracks.len(), 20);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("artist-preview-album-9").is_some());
+        assert!(cx.debug_bounds("artist-preview-album-10").is_none());
+        for (width, row_end) in [
+            (850., "artist-preview-album-2"),
+            (1000., "artist-preview-album-3"),
+            (1250., "artist-preview-album-4"),
+            (1440., "artist-preview-album-5"),
+        ] {
+            cx.simulate_resize(size(px(width), px(1900.)));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let first = cx.debug_bounds("artist-preview-album-0").unwrap();
+            let last = cx.debug_bounds(row_end).unwrap();
+            assert_eq!(first.origin.y, last.origin.y);
+            let row = cx.debug_bounds("track-row-0").unwrap();
+            let duration = cx.debug_bounds("track-duration-0").unwrap();
+            assert!(
+                (row.right() - duration.right() - px(8.) - Scrollbar::width()).abs() <= px(1.),
+                "duration must align with the row at width {width}: {row:?}, {duration:?}"
+            );
+            preview.read_with(cx, |table, _| {
+                assert_eq!(table.horizontal_scroll_handle.max_offset().x, px(0.));
+            });
+            let view_all = cx.debug_bounds("view-all-artist-albums").unwrap();
+            assert!(
+                (last.right() - view_all.right() - px(8.)).abs() <= px(1.),
+                "view-all button must be inset from the album row at width {width}: {last:?}, {view_all:?}"
+            );
+            assert_eq!(
+                first.size.width,
+                cx.debug_bounds("artist-preview-album-9")
+                    .unwrap()
+                    .size
+                    .width
+            );
+        }
+        cx.simulate_resize(size(px(1000.), px(1900.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let song_resource = browser.update(cx, |browser, _| {
+            let playlist = browser.artist.selected.clone().unwrap().into_playlist();
+            let songs = lock_resource(&resource)
+                .songs
+                .as_ref()
+                .unwrap()
+                .items
+                .clone();
+            let result = browser.page_resource_cache.playlist(
+                0,
+                playlist.clone(),
+                false,
+                PlaylistCachePolicy::Fresh,
+            );
+            lock_resource(&result).apply_page(playlist, songs, false, 20, 0);
+            result
+        });
+        let view_songs = cx.debug_bounds("view-all-artist-songs").unwrap();
+        cx.simulate_click(view_songs.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let song_header = cx.debug_bounds("artist-collection-header").unwrap();
+        assert_eq!(song_header.top(), search_header.top());
+        assert_eq!(song_header.size.height, search_header.size.height);
+        let table_header = cx.debug_bounds("track-table-header").unwrap();
+        assert_eq!(table_header.size.height, px(36.));
+        assert_eq!(
+            cx.debug_bounds("track-row-0").unwrap().top(),
+            table_header.bottom()
+        );
+        for selector in [
+            "track-table-heading-0",
+            "track-table-heading-1",
+            "track-table-heading-2",
+        ] {
+            let heading = cx.debug_bounds(selector).unwrap();
+            assert!(
+                heading.top() >= table_header.top() && heading.bottom() < table_header.bottom(),
+                "heading must fit above the header border: {heading:?}, {table_header:?}"
+            );
+        }
+        browser.read_with(cx, |browser, cx| {
+            assert!(browser.main_content == MainContent::Playlist);
+            assert!(Arc::ptr_eq(
+                browser.playlist.resource.as_ref().unwrap(),
+                &song_resource
+            ));
+            assert_eq!(browser.track_table.read(cx).delegate().tracks().len(), 20);
+        });
+        let mut previous_title_width = px(0.);
+        for width in [1440., 1920.] {
+            cx.simulate_resize(size(px(width), px(850.)));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let row = cx.debug_bounds("track-row-0").unwrap();
+            let duration = cx.debug_bounds("track-duration-0").unwrap();
+            assert!((row.right() - duration.right() - px(8.) - Scrollbar::width()).abs() <= px(1.));
+            let table_header = cx.debug_bounds("track-table-header").unwrap();
+            let album = cx.debug_bounds("track-table-heading-2").unwrap();
+            assert!(
+                (album.left() - table_header.left() - table_header.size.width * 0.45 - px(8.))
+                    .abs()
+                    <= px(1.)
+            );
+            let table_right = table_header.right();
+            assert!(
+                duration.right() <= table_right - Scrollbar::width(),
+                "duration must not overlap the vertical scrollbar: {duration:?}, {table_right:?}"
+            );
+            let title_width = cx.debug_bounds("track-title-0").unwrap().size.width;
+            assert!(title_width > previous_title_width);
+            previous_title_width = title_width;
+            browser.read_with(cx, |browser, cx| {
+                let table = browser.track_table.read(cx);
+                assert_eq!(table.horizontal_scroll_handle.max_offset().x, px(0.));
+                let scroll = table.vertical_scroll_handle.0.borrow();
+                assert!(scroll.base_handle.max_offset().y > px(0.));
+            });
+        }
+        cx.simulate_resize(size(px(1000.), px(1900.)));
+        cx.update(|window, cx| browser.update(cx, |browser, cx| browser.navigate_back(window, cx)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("track-row-4").is_some());
+        assert!(cx.debug_bounds("track-row-5").is_none());
+        let view_all = cx.debug_bounds("view-all-artist-albums").unwrap();
+        cx.simulate_click(view_all.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let grid = browser.read_with(cx, |browser, _| {
+            assert!(browser.main_content == MainContent::ArtistAlbums);
+            browser.artist_album_grid.clone()
+        });
+        let album_header = cx.debug_bounds("artist-collection-header").unwrap();
+        assert_eq!(album_header.top(), search_header.top());
+        assert_eq!(album_header.size.height, search_header.size.height);
+        for (width, row_end) in [
+            (850., "search-album-2"),
+            (1000., "search-album-3"),
+            (1250., "search-album-4"),
+            (1440., "search-album-5"),
+        ] {
+            cx.simulate_resize(size(px(width), px(1900.)));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let first = cx.debug_bounds("search-album-0").unwrap();
+            let last = cx.debug_bounds(row_end).unwrap();
+            assert_eq!(first.origin.y, last.origin.y);
+            let padding = super::super::page_horizontal_padding(width < 900.);
+            assert!((last.right() - (px(width) - padding)).abs() <= px(1.));
+        }
+        cx.simulate_resize(size(px(1000.), px(1900.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let rows_before = grid.read_with(cx, |list, cx| list.delegate().items_count(0, cx));
+        assert!(rows_before > 0);
+        lock_resource(&resource).apply_albums(40, Err(anyhow::anyhow!("offline")));
+        browser.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        grid.read_with(cx, |list, cx| {
+            assert_eq!(list.delegate().items_count(0, cx), rows_before);
+            assert!(!list.delegate().has_more(cx));
+        });
+        lock_resource(&resource).album_error = None;
+        lock_resource(&resource).apply_albums(
+            40,
+            Ok(SearchPage {
+                items: albums[40..].to_vec(),
+                has_more: false,
+                next_offset: 80,
+            }),
+        );
+        browser.update(cx, |browser, cx| {
+            browser.artist.pending_albums_sync = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(grid.read_with(cx, |list, cx| list.delegate().items_count(0, cx)) > rows_before);
+        grid.update(cx, |list, cx| {
+            list.scroll_handle().set_offset(point(px(0.), -px(300.)));
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| {
+            browser.update(cx, |browser, cx| {
+                let Some(NavigationPage::ArtistAlbums { scroll_offset, .. }) =
+                    browser.current_navigation_page(cx)
+                else {
+                    panic!("artist albums must have their own history entry");
+                };
+                assert_eq!(scroll_offset, -px(300.));
+                browser.open_home_playlist(albums[0].clone().into_playlist(), window, cx);
+                browser.navigate_back(window, cx);
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            grid.read_with(cx, |list, _| list.scroll_handle().offset().y),
+            -px(300.)
+        );
+        cx.update(|window, cx| browser.update(cx, |browser, cx| browser.navigate_back(window, cx)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        browser.read_with(cx, |browser, _| {
+            assert!(browser.main_content == MainContent::Artist);
+            assert!(Arc::ptr_eq(
+                browser.artist.resource.as_ref().unwrap(),
+                &resource
+            ));
+        });
+        assert!(cx.debug_bounds("artist-preview-album-9").is_some());
+        assert!(cx.debug_bounds("artist-preview-album-10").is_none());
+        cx.update(|window, cx| {
+            browser.update(cx, |browser, cx| browser.navigate_forward(window, cx))
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            grid.read_with(cx, |list, _| list.scroll_handle().offset().y),
+            -px(300.)
+        );
     }
 }

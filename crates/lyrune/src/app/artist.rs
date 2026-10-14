@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use gpui::{prelude::*, *};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    list::List,
     scroll::ScrollableElement as _,
     spinner::Spinner,
+    table::DataTable,
     v_flex,
 };
 use lyrune_api::{SearchAlbum, SearchArtist, Track};
@@ -18,15 +20,17 @@ use super::navigation::{MainContent, NavigationPage, SharedArtistResource, lock_
 use super::{ARTIST_ALBUM_PAGE_SIZE, ARTIST_PAGE_SIZE, page_horizontal_padding};
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
-use crate::library::format_duration;
+use crate::library::{SearchCard, card_grid_dimensions};
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 
 pub(super) struct ArtistPageState {
     pub(super) selected: Option<SearchArtist>,
     pub(super) resource: Option<SharedArtistResource>,
-    pub(super) visible_song_count: usize,
-    pub(super) visible_album_count: usize,
+    pub(super) album_scroll_offset: Pixels,
+    pub(super) pending_album_scroll: bool,
+    pub(super) pending_albums_sync: bool,
+    pending_songs_sync: bool,
 }
 
 impl Default for ArtistPageState {
@@ -34,8 +38,10 @@ impl Default for ArtistPageState {
         Self {
             selected: None,
             resource: None,
-            visible_song_count: ARTIST_PAGE_SIZE as usize,
-            visible_album_count: ARTIST_ALBUM_PAGE_SIZE as usize,
+            album_scroll_offset: px(0.),
+            pending_album_scroll: false,
+            pending_albums_sync: true,
+            pending_songs_sync: true,
         }
     }
 }
@@ -52,8 +58,6 @@ impl BrowserView {
             .artist(self.account.read(cx).id().unwrap_or(0), &artist.mid);
         let target = NavigationPage::Artist {
             artist,
-            visible_song_count: ARTIST_PAGE_SIZE as usize,
-            visible_album_count: ARTIST_ALBUM_PAGE_SIZE as usize,
             resource: Some(resource),
         };
         let current = self.current_navigation_page(cx);
@@ -69,6 +73,9 @@ impl BrowserView {
     ) {
         self.artist.selected = Some(artist);
         self.artist.resource = Some(resource.clone());
+        self.artist.pending_songs_sync = true;
+        self.artist_song_table
+            .update(cx, |table, cx| table.clear_selection(cx));
         self.main_content = MainContent::Artist;
         let (load_songs, load_albums) = {
             let state = lock_resource(&resource);
@@ -78,7 +85,7 @@ impl BrowserView {
             )
         };
         if load_songs {
-            self.load_artist_songs(false, cx);
+            self.load_artist_songs(cx);
         }
         if load_albums {
             self.load_artist_albums(false, cx);
@@ -86,7 +93,7 @@ impl BrowserView {
         cx.notify();
     }
 
-    fn load_artist_songs(&mut self, append: bool, cx: &mut Context<Self>) {
+    fn load_artist_songs(&mut self, cx: &mut Context<Self>) {
         let Some(resource) = self.artist.resource.clone() else {
             return;
         };
@@ -101,41 +108,20 @@ impl BrowserView {
             cx.notify();
             return;
         };
-        if append {
-            self.artist.visible_song_count = self
-                .artist
-                .visible_song_count
-                .saturating_add(ARTIST_PAGE_SIZE as usize);
-        }
-        let target_count = self.artist.visible_song_count;
-        let offset = {
+        {
             let mut state = lock_resource(&resource);
-            if state.songs_loading || state.songs_loading_more {
+            if state.songs_loading || state.songs.is_some() {
                 return;
             }
-            if let Some(page) = &state.songs {
-                if page.items.len() >= target_count || !page.has_more {
-                    cx.notify();
-                    return;
-                }
-            } else if append {
-                return;
-            }
-            let offset = state.songs.as_ref().map_or(0, |page| page.next_offset);
             state.song_error = None;
-            if append {
-                state.songs_loading_more = true;
-            } else {
-                state.songs_loading = true;
-            }
-            offset
-        };
+            state.songs_loading = true;
+        }
         let playlist = artist.into_playlist();
         cx.notify();
 
         let task = RUNTIME.spawn(async move {
             client
-                .playlist_page(&credential, &playlist, offset, ARTIST_PAGE_SIZE)
+                .playlist_page(&credential, &playlist, 0, ARTIST_PAGE_SIZE)
                 .await
         });
 
@@ -144,13 +130,14 @@ impl BrowserView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                lock_resource(&resource).apply_songs(offset, result);
+                lock_resource(&resource).apply_songs(result);
                 if this
                     .artist
                     .resource
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &resource))
                 {
+                    this.artist.pending_songs_sync = true;
                     cx.notify();
                 }
             });
@@ -158,7 +145,7 @@ impl BrowserView {
         .detach();
     }
 
-    fn load_artist_albums(&mut self, append: bool, cx: &mut Context<Self>) {
+    pub(super) fn load_artist_albums(&mut self, append: bool, cx: &mut Context<Self>) {
         let Some(resource) = self.artist.resource.clone() else {
             return;
         };
@@ -173,21 +160,13 @@ impl BrowserView {
             cx.notify();
             return;
         };
-        if append {
-            self.artist.visible_album_count = self
-                .artist
-                .visible_album_count
-                .saturating_add(ARTIST_ALBUM_PAGE_SIZE as usize);
-        }
-        let target_count = self.artist.visible_album_count;
         let offset = {
             let mut state = lock_resource(&resource);
             if state.albums_loading || state.albums_loading_more {
                 return;
             }
             if let Some(page) = &state.albums {
-                if page.items.len() >= target_count || !page.has_more {
-                    cx.notify();
+                if !append || !page.has_more {
                     return;
                 }
             } else if append {
@@ -222,6 +201,7 @@ impl BrowserView {
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &resource))
                 {
+                    this.artist.pending_albums_sync = true;
                     cx.notify();
                 }
             });
@@ -229,7 +209,21 @@ impl BrowserView {
         .detach();
     }
 
-    fn select_artist_track(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn open_artist_albums(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(artist) = self.artist.selected.clone() else {
+            return;
+        };
+        let target = NavigationPage::ArtistAlbums {
+            artist,
+            scroll_offset: px(0.),
+            resource: self.artist.resource.clone(),
+        };
+        let current = self.current_navigation_page(cx);
+        self.record_navigation(current, &target, window, cx);
+        self.apply_navigation_page(target, window, cx);
+    }
+
+    pub(super) fn select_artist_track(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(artist) = self.artist.selected.clone() else {
             return;
         };
@@ -407,37 +401,31 @@ impl BrowserView {
         compact: bool,
         narrow: bool,
         scale_factor: f32,
+        content_width: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let (
-            songs,
-            songs_loading,
-            songs_loading_more,
-            song_error,
-            albums,
-            albums_loading,
-            albums_loading_more,
-            album_error,
-        ) = self.artist.resource.as_ref().map_or_else(
-            || (None, false, false, None, None, false, false, None),
-            |resource| {
-                let state = lock_resource(resource);
-                (
-                    state.songs.clone(),
-                    state.songs_loading,
-                    state.songs_loading_more,
-                    state.song_error.clone(),
-                    state.albums.clone(),
-                    state.albums_loading,
-                    state.albums_loading_more,
-                    state.album_error.clone(),
-                )
-            },
-        );
-        let song_has_more = songs
-            .as_ref()
-            .is_some_and(|page| page.items.len() > self.artist.visible_song_count || page.has_more);
+        let (songs, songs_loading, song_error, albums, albums_loading, album_error) =
+            self.artist.resource.as_ref().map_or_else(
+                || (None, false, None, None, false, None),
+                |resource| {
+                    let state = lock_resource(resource);
+                    (
+                        state.songs.clone(),
+                        state.songs_loading,
+                        state.song_error.clone(),
+                        state.albums.as_ref().map(|page| {
+                            page.items
+                                .iter()
+                                .take(ARTIST_ALBUM_PAGE_SIZE as usize)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        }),
+                        state.albums_loading,
+                        state.album_error.clone(),
+                    )
+                },
+            );
         let song_body = if songs_loading && songs.is_none() {
             h_flex()
                 .h(px(92.))
@@ -462,12 +450,12 @@ impl BrowserView {
                         .h(px(40.))
                         .px_4()
                         .label("重新加载")
-                        .on_click(cx.listener(|this, _, _, cx| this.load_artist_songs(false, cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.load_artist_songs(cx))),
                 )
                 .into_any_element()
         } else if let Some(songs) = songs.filter(|page| !page.items.is_empty()) {
-            let visible = self.artist.visible_song_count.min(songs.items.len());
-            self.render_artist_song_rows(songs.items[..visible].to_vec(), narrow, scale_factor, cx)
+            let visible = (ARTIST_PAGE_SIZE as usize).min(songs.items.len());
+            self.render_artist_song_table(songs.items[..visible].to_vec(), cx)
         } else {
             h_flex()
                 .h(px(72.))
@@ -477,9 +465,6 @@ impl BrowserView {
                 .into_any_element()
         };
 
-        let album_has_more = albums.as_ref().is_some_and(|page| {
-            page.items.len() > self.artist.visible_album_count || page.has_more
-        });
         let album_body = if albums_loading && albums.is_none() {
             h_flex()
                 .h(px(120.))
@@ -490,7 +475,7 @@ impl BrowserView {
                 .child(Spinner::new().with_size(px(22.)).color(theme.primary))
                 .child("正在加载专辑…")
                 .into_any_element()
-        } else if let Some(error) = album_error {
+        } else if let Some(error) = album_error.filter(|_| albums.is_none()) {
             h_flex()
                 .h(px(120.))
                 .items_center()
@@ -507,9 +492,9 @@ impl BrowserView {
                         .on_click(cx.listener(|this, _, _, cx| this.load_artist_albums(false, cx))),
                 )
                 .into_any_element()
-        } else if let Some(albums) = albums.filter(|page| !page.items.is_empty()) {
-            let visible = self.artist.visible_album_count.min(albums.items.len());
-            self.render_artist_albums(albums.items[..visible].to_vec(), compact, scale_factor, cx)
+        } else if let Some(albums) = albums.filter(|albums| !albums.is_empty()) {
+            let available_width = content_width - page_horizontal_padding(narrow) * 2.;
+            self.render_artist_albums(albums, available_width, compact, scale_factor, cx)
         } else {
             h_flex()
                 .h(px(72.))
@@ -540,62 +525,251 @@ impl BrowserView {
                                         .w_full()
                                         .gap_3()
                                         .child(
-                                            div().text_size(px(24.)).font_semibold().child("歌曲"),
-                                        )
-                                        .child(song_body)
-                                        .when(song_has_more, |this| {
-                                            this.child(
-                                                h_flex().child(
-                                                    Button::new("load-more-artist-songs")
-                                                        .outline()
-                                                        .h(px(40.))
-                                                        .px_4()
-                                                        .loading(songs_loading_more)
-                                                        .disabled(songs_loading_more)
-                                                        .label(if songs_loading_more {
-                                                            "正在加载…"
-                                                        } else {
-                                                            "查看更多"
+                                            h_flex()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(24.))
+                                                        .font_semibold()
+                                                        .child("歌曲"),
+                                                )
+                                                .child(
+                                                    Button::new("view-all-artist-songs")
+                                                        .debug_selector(|| {
+                                                            "view-all-artist-songs".into()
                                                         })
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.load_artist_songs(true, cx)
-                                                        })),
+                                                        .ghost()
+                                                        .size(px(32.))
+                                                        .p_0()
+                                                        .mr(px(8.))
+                                                        .tooltip("查看全部歌曲")
+                                                        .child(media_icon_hsla(
+                                                            MediaIcon::Forward,
+                                                            theme.foreground,
+                                                            px(20.),
+                                                        ))
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                if let Some(artist) =
+                                                                    this.artist.selected.clone()
+                                                                {
+                                                                    this.open_home_playlist(
+                                                                        artist.into_playlist(),
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                }
+                                                            },
+                                                        )),
                                                 ),
-                                            )
-                                        }),
+                                        )
+                                        .child(song_body),
                                 )
                                 .child(
                                     v_flex()
                                         .w_full()
                                         .gap_4()
                                         .child(
-                                            div().text_size(px(24.)).font_semibold().child("专辑"),
-                                        )
-                                        .child(album_body)
-                                        .when(album_has_more, |this| {
-                                            this.child(
-                                                h_flex().child(
-                                                    Button::new("load-more-artist-albums")
-                                                        .outline()
-                                                        .h(px(40.))
-                                                        .px_4()
-                                                        .loading(albums_loading_more)
-                                                        .disabled(albums_loading_more)
-                                                        .label(if albums_loading_more {
-                                                            "正在加载…"
-                                                        } else {
-                                                            "查看更多"
+                                            h_flex()
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(24.))
+                                                        .font_semibold()
+                                                        .child("专辑"),
+                                                )
+                                                .child(
+                                                    Button::new("view-all-artist-albums")
+                                                        .debug_selector(|| {
+                                                            "view-all-artist-albums".into()
                                                         })
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.load_artist_albums(true, cx)
-                                                        })),
+                                                        .ghost()
+                                                        .size(px(32.))
+                                                        .p_0()
+                                                        .mr(px(8.))
+                                                        .tooltip("查看全部专辑")
+                                                        .child(media_icon_hsla(
+                                                            MediaIcon::Forward,
+                                                            theme.foreground,
+                                                            px(20.),
+                                                        ))
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.open_artist_albums(window, cx)
+                                                            },
+                                                        )),
                                                 ),
-                                            )
-                                        }),
+                                        )
+                                        .child(album_body),
                                 ),
                         ),
                 ),
             )
+            .into_any_element()
+    }
+
+    pub(super) fn render_artist_album_page(
+        &mut self,
+        narrow: bool,
+        content_width: Pixels,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let sync_results = std::mem::take(&mut self.artist.pending_albums_sync);
+        let (cards, has_results, is_empty, has_more, loading, loading_more, error) =
+            self.artist.resource.as_ref().map_or_else(
+                || (None, false, true, false, false, false, None),
+                |resource| {
+                    let state = lock_resource(resource);
+                    let albums = state.albums.as_ref();
+                    (
+                        sync_results.then(|| {
+                            albums.map_or_else(Vec::new, |page| {
+                                page.items.iter().cloned().map(SearchCard::Album).collect()
+                            })
+                        }),
+                        albums.is_some(),
+                        albums.is_none_or(|page| page.items.is_empty()),
+                        albums.is_some_and(|page| page.has_more),
+                        state.albums_loading,
+                        state.albums_loading_more,
+                        state.album_error.clone(),
+                    )
+                },
+            );
+        self.artist_album_grid.update(cx, |list, cx| {
+            if list.delegate_mut().set_cards(
+                cards,
+                content_width - page_horizontal_padding(narrow) * 2.,
+                px(74.),
+                has_more && error.is_none(),
+                loading_more,
+                window,
+            ) {
+                cx.notify();
+            }
+            if has_results && !is_empty && self.artist.pending_album_scroll {
+                list.scroll_handle()
+                    .set_offset(point(px(0.), self.artist.album_scroll_offset));
+                self.artist.pending_album_scroll = false;
+                cx.notify();
+            }
+        });
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .px(page_horizontal_padding(narrow))
+            .child(
+                self.render_artist_collection_header(
+                    self.artist
+                        .selected
+                        .as_ref()
+                        .map(|artist| artist.name.as_str()),
+                    self.artist
+                        .selected
+                        .as_ref()
+                        .and_then(|artist| artist.cover_url.clone()),
+                    "专辑",
+                    window.scale_factor(),
+                    cx,
+                ),
+            )
+            .when(loading && !has_results, |this| {
+                this.child(
+                    h_flex()
+                        .h(px(260.))
+                        .justify_center()
+                        .gap_3()
+                        .text_color(theme.muted_foreground)
+                        .child(Spinner::new().with_size(px(24.)).color(theme.primary))
+                        .child("正在加载专辑…"),
+                )
+            })
+            .when(!loading && is_empty && error.is_none(), |this| {
+                this.child(
+                    h_flex()
+                        .h(px(220.))
+                        .justify_center()
+                        .text_color(theme.muted_foreground)
+                        .child("暂无专辑"),
+                )
+            })
+            .when(has_results && !is_empty, |this| {
+                this.child(
+                    div().flex_1().min_h_0().child(
+                        List::new(&self.artist_album_grid)
+                            .size_full()
+                            .scrollbar_visible(false),
+                    ),
+                )
+            })
+            .when_some(error, |this, error| {
+                this.child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .py_2()
+                        .gap_3()
+                        .text_color(theme.danger)
+                        .child(error)
+                        .child(
+                            Button::new("retry-all-artist-albums")
+                                .outline()
+                                .label("重新加载")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.load_artist_albums(has_results, cx);
+                                })),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn render_artist_collection_header(
+        &self,
+        name: Option<&str>,
+        cover_url: Option<String>,
+        kind: &'static str,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let mut title = h_flex().h(px(36.)).min_w_0().gap_3().text_size(px(24.));
+        if let Some(name) = name {
+            title = title
+                .child(self.render_artist_cover(
+                    cover_url,
+                    MediaIcon::Artist,
+                    px(32.),
+                    px(999.),
+                    scale_factor,
+                    cx,
+                ))
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .gap_2()
+                        .child(div().truncate().font_semibold().child(name.to_owned()))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(theme.secondary_foreground)
+                                .child(format!("的{kind}")),
+                        ),
+                );
+        } else {
+            title = title.child(kind);
+        }
+        div()
+            .debug_selector(|| "artist-collection-header".into())
+            .pt_2()
+            .pb_3()
+            .flex_shrink_0()
+            .child(title)
             .into_any_element()
     }
 
@@ -628,171 +802,66 @@ impl BrowserView {
         }
     }
 
-    fn render_artist_song_rows(
+    fn render_artist_song_table(
         &mut self,
         songs: Vec<Arc<Track>>,
-        narrow: bool,
-        scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme().clone();
-        let monospace_font = self.preferences.read(cx).fonts.monospace.clone();
-        let current_mid = self
-            .playback
-            .read(cx)
-            .state
-            .track()
-            .map(|track| track.mid.clone());
-        let loading_mid = self
-            .playback
-            .read(cx)
-            .state
-            .load
-            .track
-            .and_then(|index| {
-                self.playback
-                    .read(cx)
-                    .state
-                    .queue
-                    .as_ref()?
-                    .tracks
-                    .get(index)
-            })
-            .map(|track| track.mid.clone());
-        let is_playing = self
-            .playback
-            .read(cx)
+        let height = px(64.) * songs.len() as f32;
+        let sync_results = std::mem::take(&mut self.artist.pending_songs_sync);
+        let playback = self.playback.read(cx);
+        let playback_active = playback
             .state
             .audio
             .as_deref()
             .is_some_and(AudioPlayer::is_playing);
-        let rows = songs
-            .into_iter()
-            .enumerate()
-            .map(|(index, track)| {
-                let is_current = current_mid.as_deref() == Some(track.mid.as_str());
-                let is_loading = loading_mid.as_deref() == Some(track.mid.as_str());
-                let title = track.title.clone();
-                let artists = track.artists.clone();
-                let album = track.album.clone();
-                let duration = format_duration(track.duration_seconds);
-                let cover = self.render_artist_cover(
-                    track.cover_url.clone(),
-                    MediaIcon::Music,
-                    px(48.),
-                    px(9.),
-                    scale_factor,
-                    cx,
-                );
-                Button::new(format!("artist-song-{}-{}", track.mid, index))
-                    .ghost()
-                    .w_full()
-                    .h(px(68.))
-                    .px_3()
-                    .rounded(px(10.))
-                    .selected(is_current)
-                    .child(
-                        h_flex()
-                            .size_full()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .w(px(28.))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .when_else(
-                                        is_loading,
-                                        |this| {
-                                            this.child(
-                                                Spinner::new()
-                                                    .with_size(px(17.))
-                                                    .color(theme.primary),
-                                            )
-                                        },
-                                        |this| {
-                                            this.child(media_icon_hsla(
-                                                if is_current && is_playing {
-                                                    MediaIcon::Pause
-                                                } else {
-                                                    MediaIcon::Play
-                                                },
-                                                if is_current {
-                                                    theme.primary
-                                                } else {
-                                                    theme.muted_foreground
-                                                },
-                                                px(17.),
-                                            ))
-                                        },
-                                    ),
-                            )
-                            .child(cover)
-                            .child(
-                                v_flex()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .font_medium()
-                                            .text_color(if is_current {
-                                                theme.primary
-                                            } else {
-                                                theme.foreground
-                                            })
-                                            .child(title),
-                                    )
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(artists),
-                                    ),
-                            )
-                            .when(!narrow, |row| {
-                                row.child(
-                                    div()
-                                        .w(px(300.))
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(theme.secondary_foreground)
-                                        .child(album),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .w(px(52.))
-                                    .flex_shrink_0()
-                                    .text_right()
-                                    .font(monospace_font.clone())
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(duration),
-                            ),
-                    )
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.select_artist_track(index, cx)),
-                    )
-            })
-            .collect::<Vec<_>>();
-        v_flex().w_full().gap_1().children(rows).into_any_element()
+        let (playing_index, loading_index) =
+            playback.state.queue.as_ref().map_or((None, None), |queue| {
+                queue.playback_indices_in(
+                    &songs,
+                    playback.state.current_track,
+                    playback.state.load.track,
+                )
+            });
+        self.artist_song_table.update(cx, |table, cx| {
+            if sync_results {
+                table.delegate_mut().set_tracks(songs, false, false);
+            }
+            let playback_changed = table.delegate_mut().set_playback_state(
+                playing_index,
+                loading_index,
+                playback_active,
+            );
+            if sync_results || playback_changed {
+                cx.notify();
+            }
+        });
+        div()
+            .w_full()
+            .h(height)
+            .flex_shrink_0()
+            .child(
+                DataTable::new(&self.artist_song_table)
+                    .bordered(false)
+                    .stripe(false)
+                    .header_row_height(px(0.))
+                    .scrollbar_visible(false, false)
+                    .with_size(px(64.)),
+            )
+            .into_any_element()
     }
 
     fn render_artist_albums(
         &mut self,
         albums: Vec<Arc<SearchAlbum>>,
+        available_width: Pixels,
         compact: bool,
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let cover_size = if compact { px(132.) } else { px(148.) };
-        let card_width = cover_size + px(16.);
+        let (columns, card_width) = card_grid_dimensions(available_width, compact);
+        let cover_size = card_width - px(16.);
         let cards = albums
             .into_iter()
             .enumerate()
@@ -809,6 +878,7 @@ impl BrowserView {
                 );
                 let playlist = album.as_ref().clone().into_playlist();
                 Button::new(format!("search-album-{index}"))
+                    .debug_selector(move || format!("artist-preview-album-{index}"))
                     .ghost()
                     .w(card_width)
                     .h(cover_size + px(74.))
@@ -844,10 +914,10 @@ impl BrowserView {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
-        h_flex()
+        div()
+            .grid()
+            .grid_cols(columns as u16)
             .w_full()
-            .items_start()
-            .flex_wrap()
             .gap_4()
             .children(cards)
             .into_any_element()

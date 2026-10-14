@@ -84,7 +84,7 @@ struct ThumbnailSource {
 }
 
 pub struct CachedImageCache {
-    items: LruCache<u64, ImageCacheItem>,
+    items: LruCache<u64, Entity<ImageCacheItem>>,
 }
 
 pub struct BlurredCover {
@@ -156,49 +156,21 @@ impl Asset for CachedThumbnailFile {
 impl CachedImageCache {
     pub fn new(capacity: usize, cx: &mut App) -> Entity<Self> {
         let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
-        let cache = cx.new(|_| Self {
+        cx.new(|_| Self {
             items: LruCache::new(capacity),
-        });
-        cx.observe_release(&cache, |cache, cx| {
-            while let Some((_, item)) = cache.items.pop_lru() {
-                if let Some(Ok(image)) = item.get() {
-                    cx.drop_image(image, None);
-                }
-            }
         })
-        .detach();
-        cache
     }
 
-    pub fn set_capacity(&mut self, capacity: usize, window: &mut Window, cx: &mut App) {
+    pub fn set_capacity(&mut self, capacity: usize) {
         let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
-        // resize 会直接丢弃超额条目；先显式淘汰，确保 GPUI 的图片资源一并释放。
-        while self.items.len() > capacity.get() {
-            self.evict_oldest(window, cx);
-        }
         self.items.resize(capacity);
     }
 
-    fn evict_oldest(&mut self, window: &mut Window, cx: &mut App) {
-        let (_, item) = self.items.pop_lru().expect("非空图片缓存应包含最旧条目");
-        if let Some(Ok(image)) = item.get() {
-            cx.drop_image(image, Some(window));
-        }
-    }
-}
-
-impl ImageCache for CachedImageCache {
-    fn load(
-        &mut self,
+    fn load_item(
         resource: &Resource,
         window: &mut Window,
         cx: &mut App,
-    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
-        let key = hash(resource);
-        if let Some(item) = self.items.get_mut(&key) {
-            return item.use_image(window);
-        }
-
+    ) -> Option<Result<Entity<ImageCacheItem>, ImageCacheError>> {
         let source = match resource {
             Resource::Uri(uri) => {
                 let (url, thumbnail_size) = split_thumbnail_resource(&uri.to_string());
@@ -223,14 +195,48 @@ impl ImageCache for CachedImageCache {
             }
             _ => resource.clone(),
         };
-        // 插入前释放旧图片，避免 put 自动淘汰时跳过 GPU 资源清理。
-        if self.items.len() >= self.items.cap().get() {
-            self.evict_oldest(window, cx);
-        }
-        let item = ImageCacheItem::new(&source, cx);
-        let image = item.use_image(window);
-        self.items.put(key, item);
-        image
+        let item = cx.new(|cx| ImageCacheItem::new(&source, cx));
+        cx.observe_release(&item, |item, cx| {
+            if let Some(Ok(image)) = item.get() {
+                cx.drop_image(image, None);
+            }
+        })
+        .detach();
+        Some(Ok(item))
+    }
+}
+
+impl ImageCache for CachedImageCache {
+    fn load(
+        &mut self,
+        resource: &Resource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        let key = hash(resource);
+        // cached 视图重放绘制指令时不访问 LRU，但会保留 element state。
+        // 让视图与 LRU 共同持有图片，最后一个引用释放后才能回收 GPU 区域。
+        window.with_global_id(("cached-image", key).into(), |id, window| {
+            window.with_element_state(
+                id,
+                |retained: Option<Option<Entity<ImageCacheItem>>>, window| {
+                    let item = self.items.get(&key).cloned().or_else(|| retained.flatten());
+                    let item = match item
+                        .map(Ok)
+                        .or_else(|| Self::load_item(resource, window, cx))
+                    {
+                        Some(Ok(item)) => item,
+                        Some(Err(error)) => return (Some(Err(error)), None),
+                        None => return (None, None),
+                    };
+                    if !self.items.contains(&key) {
+                        self.items.put(key, item.clone());
+                    }
+                    let image = item.read(cx).use_image(window);
+                    (image, Some(item))
+                },
+            )
+        })
     }
 }
 
@@ -624,7 +630,124 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use gpui::{
+        Context, IntoElement, Render, StyleRefinement, TestAppContext, div, img, prelude::*, px,
+    };
+
     use super::*;
+
+    struct CachedCover {
+        source: Resource,
+        renders: usize,
+    }
+
+    impl Render for CachedCover {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.renders += 1;
+            img(ImageSource::Resource(self.source.clone())).size(px(64.))
+        }
+    }
+
+    struct ImageCacheTestView {
+        cache: Entity<CachedImageCache>,
+        sidebar: Entity<CachedCover>,
+        show_sidebar: bool,
+        cover: Resource,
+    }
+
+    impl Render for ImageCacheTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .image_cache(self.cache.clone())
+                .flex()
+                .when(self.show_sidebar, |view| {
+                    view.child(
+                        self.sidebar
+                            .clone()
+                            .cached(StyleRefinement::default().size(px(64.))),
+                    )
+                })
+                .child(img(ImageSource::Resource(self.cover.clone())).size(px(64.)))
+        }
+    }
+
+    #[gpui::test]
+    fn test_cached_cover_survives_eviction(cx: &mut TestAppContext) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lyrune-image-lifetime-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let sources = (0..6)
+            .map(|index| {
+                let path = root.join(format!("{index}.png"));
+                image::RgbaImage::from_pixel(64, 64, image::Rgba([index * 40, 80, 200, 255]))
+                    .save(&path)
+                    .unwrap();
+                Resource::from(path)
+            })
+            .collect::<Vec<_>>();
+        let cache = cx.update(|cx| CachedImageCache::new(2, cx));
+        let sidebar = cx.new(|_| CachedCover {
+            source: sources[0].clone(),
+            renders: 0,
+        });
+        let (view, cx) = cx.add_window_view(|_, _| ImageCacheTestView {
+            cache: cache.clone(),
+            sidebar: sidebar.clone(),
+            show_sidebar: true,
+            cover: sources[1].clone(),
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let key = hash(&sources[0]);
+        let image = cache.read_with(cx, |cache, cx| {
+            cache
+                .items
+                .peek(&key)
+                .unwrap()
+                .read(cx)
+                .get()
+                .unwrap()
+                .unwrap()
+        });
+        let renders = sidebar.read_with(cx, |view, _| view.renders);
+        assert!(cx.update(|window, _| window.has_image_atlas_entry(&image)));
+
+        for source in &sources[2..] {
+            view.update(cx, |view, cx| {
+                view.cover = source.clone();
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(sidebar.read_with(cx, |view, _| view.renders), renders);
+        assert!(!cache.read_with(cx, |cache, _| cache.items.contains(&key)));
+        assert!(
+            cx.update(|window, _| window.has_image_atlas_entry(&image)),
+            "cached view still uses the evicted image"
+        );
+
+        cache.update(cx, |cache, _| cache.set_capacity(1));
+        sidebar.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.update(|window, _| window.has_image_atlas_entry(&image)));
+
+        view.update(cx, |view, cx| {
+            view.show_sidebar = false;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        assert!(!cx.update(|window, _| window.has_image_atlas_entry(&image)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     struct MockHttpClient {
         calls: Arc<AtomicUsize>,

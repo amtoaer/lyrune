@@ -838,7 +838,7 @@ impl Render for SettingsPage {
                                         ))
                                         .child(number_setting(
                                             "图片内存缓存",
-                                            "图片最大缓存数，缩小该数值可以减少内存占用，但同屏显示图片超过该数值会出现渲染问题",
+                                            "限制近期图片缓存数量；当前界面使用中的图片会保留至不再使用",
                                             &self.settings_inputs.image_cache_capacity,
                                             "张",
                                             true,
@@ -966,9 +966,7 @@ impl LyruneView {
             }
             SettingsAction::ScrollRate(rate) => self.set_lyric_scroll_frame_rate(*rate, window, cx),
             SettingsAction::AudioCacheLimit(value) => self.set_audio_cache_limit(*value, cx),
-            SettingsAction::ImageCacheCapacity(value) => {
-                self.set_image_cache_capacity(*value, window, cx)
-            }
+            SettingsAction::ImageCacheCapacity(value) => self.set_image_cache_capacity(*value, cx),
             SettingsAction::HistoryLimit(value) => self.set_navigation_history_limit(*value, cx),
             SettingsAction::Scale { lyric, spacing } => {
                 self.set_scale_settings(*lyric, *spacing, cx)
@@ -1110,12 +1108,7 @@ impl LyruneView {
         cx.notify();
     }
 
-    fn set_image_cache_capacity(
-        &mut self,
-        value: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_image_cache_capacity(&mut self, value: usize, cx: &mut Context<Self>) {
         let current = self.preferences.read(cx).settings.image_cache_capacity;
         if value == current {
             return;
@@ -1126,7 +1119,7 @@ impl LyruneView {
             cx.notify();
         });
         self.image_cache
-            .update(cx, |cache, cx| cache.set_capacity(value, window, cx));
+            .update(cx, |cache, _| cache.set_capacity(value));
         self.preferences.read(cx).save();
         cx.notify();
     }

@@ -738,6 +738,7 @@ impl LyruneView {
                         .search(self.account.id().unwrap_or(0), &query)
                 });
                 self.search.resource = Some(resource.clone());
+                self.search.pending_results_sync = true;
                 self.start_search(resource, query, cx);
             }
             NavigationPage::Artist {

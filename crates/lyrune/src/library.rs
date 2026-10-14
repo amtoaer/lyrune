@@ -68,7 +68,7 @@ impl SearchCardGridDelegate {
 
     pub fn set_cards(
         &mut self,
-        cards: Vec<SearchCard>,
+        cards: Option<Vec<SearchCard>>,
         columns: usize,
         card_width: Pixels,
         card_height: Pixels,
@@ -77,23 +77,26 @@ impl SearchCardGridDelegate {
         has_more: bool,
         loading_more: bool,
     ) -> bool {
-        let cards_changed = self.cards.len() != cards.len()
-            || self
-                .cards
-                .iter()
-                .zip(&cards)
-                .any(|(current, next)| match (current, next) {
-                    (SearchCard::Artist(current), SearchCard::Artist(next)) => {
-                        !Arc::ptr_eq(current, next)
-                    }
-                    (SearchCard::Album(current), SearchCard::Album(next)) => {
-                        !Arc::ptr_eq(current, next)
-                    }
-                    (SearchCard::Playlist(current), SearchCard::Playlist(next)) => {
-                        !Arc::ptr_eq(current, next)
-                    }
-                    _ => true,
-                });
+        // None 保留已同步的数据，布局与分页状态仍可独立更新。
+        let cards_changed = cards.as_ref().is_some_and(|cards| {
+            self.cards.len() != cards.len()
+                || self
+                    .cards
+                    .iter()
+                    .zip(cards)
+                    .any(|(current, next)| match (current, next) {
+                        (SearchCard::Artist(current), SearchCard::Artist(next)) => {
+                            !Arc::ptr_eq(current, next)
+                        }
+                        (SearchCard::Album(current), SearchCard::Album(next)) => {
+                            !Arc::ptr_eq(current, next)
+                        }
+                        (SearchCard::Playlist(current), SearchCard::Playlist(next)) => {
+                            !Arc::ptr_eq(current, next)
+                        }
+                        _ => true,
+                    })
+        });
         let changed = cards_changed
             || self.columns != columns
             || self.card_width != card_width
@@ -102,7 +105,9 @@ impl SearchCardGridDelegate {
             || self.scale_factor != scale_factor
             || self.has_more != has_more
             || self.loading_more != loading_more;
-        self.cards = cards;
+        if let Some(cards) = cards {
+            self.cards = cards;
+        }
         self.columns = columns.max(1);
         self.card_width = card_width;
         self.card_height = card_height;
@@ -678,8 +683,10 @@ impl TrackTableDelegate {
         self.has_more = has_more;
     }
 
-    pub fn set_loading(&mut self, loading: bool) {
+    pub fn set_loading(&mut self, loading: bool) -> bool {
+        let changed = self.loading != loading;
         self.loading = loading;
+        changed
     }
 
     pub fn set_playback_state(
@@ -687,10 +694,14 @@ impl TrackTableDelegate {
         playing_index: Option<usize>,
         loading_index: Option<usize>,
         playback_active: bool,
-    ) {
+    ) -> bool {
+        let changed = self.playing_index != playing_index
+            || self.loading_index != loading_index
+            || self.playback_active != playback_active;
         self.playing_index = playing_index;
         self.loading_index = loading_index;
         self.playback_active = playback_active;
+        changed
     }
 
     pub fn set_compact(&mut self, compact: bool) -> bool {

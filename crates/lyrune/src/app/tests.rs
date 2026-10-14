@@ -5,10 +5,11 @@ use std::{
 
 use gpui::{Pixels, Rgba, black, px, rgb};
 use lyrune_api::{
-    PlaylistPage, Quality, SearchAlbum, SearchPage, SearchResults, Track, UserPlaylist,
-    UserPlaylistId,
+    PlaylistPage, Quality, RecommendationKind, SearchAlbum, SearchPage, SearchResults, Track,
+    UserPlaylist, UserPlaylistId,
 };
 
+use super::home::HomePageState;
 use super::lyrics::parse_lyrics;
 use super::lyrics_view::{
     LYRIC_MINIMUM_CONTRAST, adjacent_lyric_timing, combined_lyric_frame_interval, contrast_ratio,
@@ -57,6 +58,23 @@ fn track(mid: &str) -> Track {
 
 fn mids(tracks: &[Arc<Track>]) -> Vec<&str> {
     tracks.iter().map(|track| track.mid.as_str()).collect()
+}
+
+#[test]
+fn test_home_recommendation_request() {
+    let mut home = HomePageState::default();
+    let kind = RecommendationKind::Radar;
+    let old = home.begin_recommendation(kind);
+
+    // 退出账号、换歌单或搜索选曲都通过清空加载状态使首批推荐失效。
+    home.recommendation_loading = None;
+    assert!(!home.finish_recommendation(old, kind));
+
+    let current = home.begin_recommendation(kind);
+    assert!(!home.finish_recommendation(old, kind));
+    assert_eq!(home.recommendation_loading, Some(kind));
+    assert!(home.finish_recommendation(current, kind));
+    assert_eq!(home.recommendation_loading, None);
 }
 
 #[test]

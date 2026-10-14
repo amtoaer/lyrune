@@ -190,7 +190,7 @@ impl LyruneView {
             cx.notify();
             return;
         };
-        self.home.recommendation_loading = Some(kind);
+        let generation = self.home.begin_recommendation(kind);
         cx.notify();
 
         let task = RUNTIME.spawn(async move {
@@ -222,10 +222,9 @@ impl LyruneView {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if this.home.recommendation_loading != Some(kind) {
+                if !this.home.finish_recommendation(generation, kind) {
                     return;
                 }
-                this.home.recommendation_loading = None;
                 match result {
                     Ok((tracks, continuation)) if !tracks.is_empty() => {
                         this.playback.pending_restore = None;

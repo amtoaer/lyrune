@@ -27,6 +27,29 @@ pub(super) struct HomePageState {
     pub(super) error: Option<String>,
     pub(super) generation: u64,
     pub(super) recommendation_loading: Option<RecommendationKind>,
+    // 与首页歌单请求独立；清空加载状态时保留版本，避免旧结果匹配下一次同类别请求。
+    recommendation_generation: u64,
+}
+
+impl HomePageState {
+    pub(super) fn begin_recommendation(&mut self, kind: RecommendationKind) -> u64 {
+        self.recommendation_generation = self.recommendation_generation.wrapping_add(1);
+        self.recommendation_loading = Some(kind);
+        self.recommendation_generation
+    }
+
+    pub(super) fn finish_recommendation(
+        &mut self,
+        generation: u64,
+        kind: RecommendationKind,
+    ) -> bool {
+        if self.recommendation_generation != generation || self.recommendation_loading != Some(kind)
+        {
+            return false;
+        }
+        self.recommendation_loading = None;
+        true
+    }
 }
 
 impl LyruneView {

@@ -1032,6 +1032,7 @@ impl BrowserView {
                                 DataTable::new(&self.track_table)
                                     .bordered(false)
                                     .stripe(false)
+                                    .header_row_height(px(36.))
                                     .with_size(px(64.)),
                             ),
                     ),

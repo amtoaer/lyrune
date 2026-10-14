@@ -1046,10 +1046,10 @@ impl TableDelegate for TrackTableDelegate {
 fn track_columns(available_width: Pixels) -> Vec<Column> {
     let compact = available_width < px(792.);
     let flexible_width = available_width - px(48. + 84.) - Scrollbar::width();
-    let album_width = if compact {
-        px(0.)
+    let title_width = if compact {
+        flexible_width
     } else {
-        flexible_width * 2. / 5.
+        available_width * 0.45 - px(48.)
     };
     let mut columns = vec![
         Column::new("number", "#")
@@ -1057,14 +1057,14 @@ fn track_columns(available_width: Pixels) -> Vec<Column> {
             .resizable(false)
             .movable(false),
         Column::new("title", "标题")
-            .width(flexible_width - album_width)
+            .width(title_width)
             .min_width(px(240.))
             .resizable(false),
     ];
     if !compact {
         columns.push(
             Column::new("album", "专辑")
-                .width(album_width)
+                .width(flexible_width - title_width)
                 .min_width(px(136.))
                 .resizable(false),
         );

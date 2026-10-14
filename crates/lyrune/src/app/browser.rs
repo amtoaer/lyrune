@@ -880,7 +880,14 @@ mod tests {
             let row = cx.debug_bounds("track-row-0").unwrap();
             let duration = cx.debug_bounds("track-duration-0").unwrap();
             assert!((row.right() - duration.right() - px(8.) - Scrollbar::width()).abs() <= px(1.));
-            let table_right = cx.debug_bounds("track-table-header").unwrap().right();
+            let table_header = cx.debug_bounds("track-table-header").unwrap();
+            let album = cx.debug_bounds("track-table-heading-2").unwrap();
+            assert!(
+                (album.left() - table_header.left() - table_header.size.width * 0.45 - px(8.))
+                    .abs()
+                    <= px(1.)
+            );
+            let table_right = table_header.right();
             assert!(
                 duration.right() <= table_right - Scrollbar::width(),
                 "duration must not overlap the vertical scrollbar: {duration:?}, {table_right:?}"

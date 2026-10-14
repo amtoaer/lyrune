@@ -1048,7 +1048,7 @@ fn track_columns(available_width: Pixels) -> Vec<Column> {
     let album_width = if compact {
         px(0.)
     } else {
-        flexible_width * 4. / 11.
+        flexible_width * 2. / 5.
     };
     let mut columns = vec![
         Column::new("number", "#")

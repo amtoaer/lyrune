@@ -539,7 +539,14 @@ impl BrowserView {
                                                             "view-all-artist-songs".into()
                                                         })
                                                         .ghost()
-                                                        .label("查看全部")
+                                                        .size(px(32.))
+                                                        .p_0()
+                                                        .tooltip("查看全部歌曲")
+                                                        .child(media_icon_hsla(
+                                                            MediaIcon::Forward,
+                                                            theme.foreground,
+                                                            px(20.),
+                                                        ))
                                                         .on_click(cx.listener(
                                                             |this, _, window, cx| {
                                                                 if let Some(artist) =
@@ -576,7 +583,14 @@ impl BrowserView {
                                                             "view-all-artist-albums".into()
                                                         })
                                                         .ghost()
-                                                        .label("查看全部")
+                                                        .size(px(32.))
+                                                        .p_0()
+                                                        .tooltip("查看全部专辑")
+                                                        .child(media_icon_hsla(
+                                                            MediaIcon::Forward,
+                                                            theme.foreground,
+                                                            px(20.),
+                                                        ))
                                                         .on_click(cx.listener(
                                                             |this, _, window, cx| {
                                                                 this.open_artist_albums(window, cx)

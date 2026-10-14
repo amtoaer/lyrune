@@ -455,7 +455,7 @@ impl BrowserView {
                 .into_any_element()
         } else if let Some(songs) = songs.filter(|page| !page.items.is_empty()) {
             let visible = (ARTIST_PAGE_SIZE as usize).min(songs.items.len());
-            self.render_artist_song_table(songs.items[..visible].to_vec(), compact, cx)
+            self.render_artist_song_table(songs.items[..visible].to_vec(), cx)
         } else {
             h_flex()
                 .h(px(72.))
@@ -805,7 +805,6 @@ impl BrowserView {
     fn render_artist_song_table(
         &mut self,
         songs: Vec<Arc<Track>>,
-        compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let height = px(64.) * songs.len() as f32;
@@ -825,7 +824,6 @@ impl BrowserView {
                 )
             });
         self.artist_song_table.update(cx, |table, cx| {
-            let compact_changed = table.delegate_mut().set_compact(compact);
             if sync_results {
                 table.delegate_mut().set_tracks(songs, false, false);
             }
@@ -834,9 +832,7 @@ impl BrowserView {
                 loading_index,
                 playback_active,
             );
-            if compact_changed {
-                table.refresh(cx);
-            } else if sync_results || playback_changed {
+            if sync_results || playback_changed {
                 cx.notify();
             }
         });

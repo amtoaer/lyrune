@@ -449,11 +449,21 @@ impl Render for BrowserView {
         let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);
         let scale_factor = window.scale_factor();
-        self.track_table.update(cx, |table, cx| {
-            if table.delegate_mut().set_compact(compact) {
-                table.refresh(cx);
-            }
-        });
+        let track_table = match self.main_content {
+            MainContent::Playlist => Some(&self.track_table),
+            MainContent::Search => Some(&self.search_track_table),
+            MainContent::Artist => Some(&self.artist_song_table),
+            _ => None,
+        };
+        if let Some(track_table) = track_table {
+            let available_width = self.content_width - super::page_horizontal_padding(narrow) * 2.;
+            track_table.update(cx, |table, cx| {
+                if table.delegate_mut().set_width(available_width) {
+                    table.refresh(cx);
+                    cx.notify();
+                }
+            });
+        }
         let page = match self.main_content {
             MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
             MainContent::Search => self.render_search(narrow, self.content_width, window, cx),
@@ -791,6 +801,12 @@ mod tests {
             let first = cx.debug_bounds("artist-preview-album-0").unwrap();
             let last = cx.debug_bounds(row_end).unwrap();
             assert_eq!(first.origin.y, last.origin.y);
+            let row = cx.debug_bounds("track-row-0").unwrap();
+            let duration = cx.debug_bounds("track-duration-0").unwrap();
+            assert!(
+                (row.right() - duration.right() - px(8.)).abs() <= px(1.),
+                "duration must align with the row at width {width}: {row:?}, {duration:?}"
+            );
             let view_all = cx.debug_bounds("view-all-artist-albums").unwrap();
             assert!(
                 (last.right() - view_all.right() - px(8.)).abs() <= px(1.),
@@ -854,6 +870,18 @@ mod tests {
             ));
             assert_eq!(browser.track_table.read(cx).delegate().tracks().len(), 20);
         });
+        let mut previous_title_width = px(0.);
+        for width in [1440., 1920.] {
+            cx.simulate_resize(size(px(width), px(1900.)));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let row = cx.debug_bounds("track-row-0").unwrap();
+            let duration = cx.debug_bounds("track-duration-0").unwrap();
+            assert!((row.right() - duration.right() - px(8.)).abs() <= px(1.));
+            let title_width = cx.debug_bounds("track-title-0").unwrap().size.width;
+            assert!(title_width > previous_title_width);
+            previous_title_width = title_width;
+        }
+        cx.simulate_resize(size(px(1000.), px(1900.)));
         cx.update(|window, cx| browser.update(cx, |browser, cx| browser.navigate_back(window, cx)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("track-row-4").is_some());

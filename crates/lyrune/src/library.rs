@@ -600,7 +600,7 @@ pub struct TrackTableDelegate {
     playback_active: bool,
     show_liked_actions: bool,
     show_covers: bool,
-    compact: bool,
+    available_width: Pixels,
     load_more_sender: mpsc::Sender<()>,
     event_sender: mpsc::UnboundedSender<TrackTableEvent>,
 }
@@ -611,7 +611,7 @@ impl TrackTableDelegate {
         event_sender: mpsc::UnboundedSender<TrackTableEvent>,
     ) -> Self {
         Self {
-            columns: track_columns(false),
+            columns: track_columns(px(792.)),
             header_height: px(36.),
             tracks: Vec::new(),
             loading: false,
@@ -621,7 +621,7 @@ impl TrackTableDelegate {
             playback_active: false,
             show_liked_actions: false,
             show_covers: true,
-            compact: false,
+            available_width: px(792.),
             load_more_sender,
             event_sender,
         }
@@ -687,7 +687,7 @@ impl TrackTableDelegate {
         self.playback_active = false;
         self.show_liked_actions = *playlist_id == UserPlaylistId::Liked;
         self.show_covers = !matches!(playlist_id, UserPlaylistId::Album { .. });
-        self.columns = track_columns(self.compact);
+        self.columns = track_columns(self.available_width);
     }
 
     pub fn set_tracks(&mut self, tracks: Vec<Arc<Track>>, has_more: bool, loading: bool) {
@@ -717,12 +717,12 @@ impl TrackTableDelegate {
         changed
     }
 
-    pub fn set_compact(&mut self, compact: bool) -> bool {
-        if self.compact == compact {
+    pub fn set_width(&mut self, available_width: Pixels) -> bool {
+        if self.available_width == available_width {
             return false;
         }
-        self.compact = compact;
-        self.columns = track_columns(compact);
+        self.available_width = available_width;
+        self.columns = track_columns(available_width);
         true
     }
 
@@ -748,7 +748,7 @@ impl TrackTableDelegate {
         self.playback_active = false;
         self.show_liked_actions = false;
         self.show_covers = true;
-        self.columns = track_columns(self.compact);
+        self.columns = track_columns(self.available_width);
     }
 }
 
@@ -911,6 +911,7 @@ impl TableDelegate for TrackTableDelegate {
                         .into_any_element(),
                 });
                 h_flex()
+                    .debug_selector(move || format!("track-title-{row_ix}"))
                     .w_full()
                     .h_full()
                     .min_w_0()
@@ -976,6 +977,7 @@ impl TableDelegate for TrackTableDelegate {
                 let hover_background = cx.theme().muted;
                 let duration = format_duration(track.duration_seconds);
                 h_flex()
+                    .debug_selector(move || format!("track-duration-{row_ix}"))
                     .w_full()
                     .h_full()
                     .justify_end()
@@ -1031,21 +1033,26 @@ impl TableDelegate for TrackTableDelegate {
     }
 }
 
-fn track_columns(compact: bool) -> Vec<Column> {
+fn track_columns(available_width: Pixels) -> Vec<Column> {
+    let compact = available_width < px(792.);
+    let flexible_width = available_width - px(48. + 84.);
+    let album_width = if compact { px(0.) } else { flexible_width / 3. };
     let mut columns = vec![
         Column::new("number", "#")
             .width(px(48.))
             .resizable(false)
             .movable(false),
         Column::new("title", "标题")
-            .width(px(420.))
-            .min_width(px(240.)),
+            .width(flexible_width - album_width)
+            .min_width(px(240.))
+            .resizable(false),
     ];
     if !compact {
         columns.push(
             Column::new("album", "专辑")
-                .width(px(240.))
-                .min_width(px(136.)),
+                .width(album_width)
+                .min_width(px(136.))
+                .resizable(false),
         );
     }
     columns.push(

@@ -14,7 +14,10 @@ use super::animation::frame_is_due;
 #[cfg(test)]
 use super::lyrics;
 use super::lyrics::{LyricLine, ParsedLyrics};
-use crate::http::{BLURRED_COVER_SIZE, blurred_cover, blurred_image_source, cached_image_source};
+use crate::http::{
+    BLURRED_COVER_SIZE, LYRIC_TARGET_CONTRAST, blurred_cover, blurred_image_source,
+    cached_image_source, relative_luminance,
+};
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::player::AudioPlayer;
 use crate::settings::FrameRate;
@@ -26,21 +29,8 @@ const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
 pub(super) const LYRIC_EXPANSION_DURATION: Duration = Duration::from_millis(480);
 const LYRIC_TRACK_SWITCH_DURATION: Duration = Duration::from_millis(420);
-const LYRIC_BACKGROUND_OVERLAY_OPACITY: f32 = 0.4;
-pub(super) const LYRIC_TARGET_CONTRAST: f32 = 4.5;
 const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
 const LYRIC_HORIZONTAL_STEP: f32 = 0.5;
-
-fn relative_luminance(color: Rgba) -> f32 {
-    let linearize = |channel: f32| {
-        if channel <= 0.04045 {
-            channel / 12.92
-        } else {
-            ((channel + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * linearize(color.r) + 0.7152 * linearize(color.g) + 0.0722 * linearize(color.b)
-}
 
 #[cfg(test)]
 pub(super) fn contrast_ratio(first: Rgba, second: Rgba) -> f32 {
@@ -63,7 +53,7 @@ pub(super) fn lyric_background_overlay(
     } else {
         (foreground_luminance + 0.05) * LYRIC_TARGET_CONTRAST - 0.05
     };
-    // 明暗方向由主题决定；只增强主题遮罩，并检查最不利的背景而非平均色。
+    // 封面已在后台调色，遮罩仅补足切歌时图层混合可能损失的对比度。
     let readable = |opacity: f32| {
         let luminance = relative_luminance(Rgba {
             r: sampled_rgb[0] * (1. - opacity) + overlay.r * opacity,
@@ -77,7 +67,7 @@ pub(super) fn lyric_background_overlay(
             luminance >= luminance_limit
         }
     };
-    let mut lower = LYRIC_BACKGROUND_OVERLAY_OPACITY;
+    let mut lower = 0.;
     let mut upper = 1.;
     if readable(lower) {
         return background.opacity(lower);
@@ -1465,9 +1455,11 @@ impl LyricsView {
                     Some(current_backdrop_url.as_str()),
                 ]
                 .map(|url| {
-                    url.and_then(|url| blurred_cover(url, window, cx))
-                        .and_then(Result::ok)
-                        .map_or([background_rgb; 2], |cover| cover.rgb_bounds)
+                    url.and_then(|url| {
+                        blurred_cover(url, theme.background, theme.foreground, window, cx)
+                    })
+                    .and_then(Result::ok)
+                    .map_or([background_rgb; 2], |cover| cover.rgb_bounds)
                 });
                 // 与下方图层一致：先画旧封面，再画新封面，余下部分露出主题背景。
                 let rgb_bounds = std::array::from_fn(|bound| {
@@ -1557,9 +1549,13 @@ impl LyricsView {
                                 .left(-backdrop_padding)
                                 .opacity(previous_backdrop_opacity)
                                 .child(
-                                    img(blurred_image_source(previous_url))
-                                        .size_full()
-                                        .object_fit(ObjectFit::Cover),
+                                    img(blurred_image_source(
+                                        previous_url,
+                                        theme.background,
+                                        theme.foreground,
+                                    ))
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover),
                                 ),
                         )
                     })
@@ -1572,9 +1568,13 @@ impl LyricsView {
                             .left(-backdrop_padding)
                             .opacity(current_backdrop_opacity)
                             .child(
-                                img(blurred_image_source(current_backdrop_url))
-                                    .size_full()
-                                    .object_fit(ObjectFit::Cover),
+                                img(blurred_image_source(
+                                    current_backdrop_url,
+                                    theme.background,
+                                    theme.foreground,
+                                ))
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
                             ),
                     );
                 let content = h_flex()

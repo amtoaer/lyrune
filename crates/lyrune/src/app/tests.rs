@@ -13,9 +13,8 @@ use super::animation::frame_is_due;
 use super::home::HomePageState;
 use super::lyrics::parse_lyrics;
 use super::lyrics_view::{
-    LYRIC_TARGET_CONTRAST, adjacent_lyric_timing, combined_lyric_frame_interval, contrast_ratio,
-    lyric_background_overlay, lyric_edge_opacity, lyric_horizontal_scroll_offset,
-    lyric_position_for_frame_rate,
+    adjacent_lyric_timing, combined_lyric_frame_interval, contrast_ratio, lyric_background_overlay,
+    lyric_edge_opacity, lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
 };
 use super::navigation::NavigationHistory;
 use super::navigation::{
@@ -198,7 +197,7 @@ fn lyric_overlay_preserves_readable_backgrounds() {
     {
         let background: Hsla = rgb(background).into();
         let result = lyric_background_overlay([[sample; 3]; 2], background, rgb(foreground).into());
-        assert_eq!(result, background.opacity(0.4));
+        assert_eq!(result, background.opacity(0.));
     }
 }
 
@@ -214,11 +213,11 @@ fn lyric_overlay_keeps_theme_contrast_across_cover_colors() {
             (overlay.h, overlay.s, overlay.l),
             (background.h, background.s, background.l)
         );
-        assert!(overlay.a >= 0.4 && overlay.a < 1.);
+        assert!(overlay.a > 0. && overlay.a < 1.);
         for sample in [0x000000, 0xffffff, 0xff80b0, 0x80b0ff] {
             let displayed = rgb(sample).blend(overlay.to_rgb());
             assert!(
-                contrast_ratio(foreground, displayed) >= LYRIC_TARGET_CONTRAST,
+                contrast_ratio(foreground, displayed) >= crate::http::LYRIC_TARGET_CONTRAST,
                 "{}",
                 theme.id()
             );

@@ -39,6 +39,7 @@ lru = "0.18.5"
 lyrune-api = { path = "crates/lyrune-api" }
 lyrune-decrypt = { path = "crates/lyrune-decrypt" }
 mpris-server = { version = "0.10.0", default-features = false, features = ["tokio"] }
+palette = { version = "0.7.6", default-features = false, features = ["std"] }
 quick-xml = "0.41"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = [

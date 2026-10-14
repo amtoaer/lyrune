@@ -5,7 +5,11 @@ Lyrune 内部使用的 QQ 音乐协议库，不独立发布。
 - `lib.rs`：应用入口及选择性导出。
 - `account.rs`：凭据会话、扫码事件及刷新编排。
 - `models.rs`：应用使用的曲库、搜索、播放和持久化数据类型。
-- `client.rs`：QQ 曲库、搜索、歌单、歌词、音源与 CDN 请求。
+- `client.rs`：HTTP 客户端、签名网关请求及错误检查。
+- `client/library.rs` / `search.rs`：曲库、推荐、资料、搜索与分页。
+- `client/playback.rs` / `cdn.rs`：音源解析、CDN 调度与候选地址。
+- `client/lyrics.rs` / `lyrics/qrc_des.rs`：歌词请求、解码和 QRC 算法。
+- `client/response.rs`：现有字段兼容及递归查找规则。
 - `login.rs` / `login/`：登录请求、响应校验和 MQTT 扫码状态机。
 - `request.rs`：请求签名、哈希和协议标识算法。
 

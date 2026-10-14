@@ -215,7 +215,7 @@ impl ProtocolClient {
                 },
             },
         });
-        let response = self
+        let mut response = self
             .client
             .post(MOBILE_SEARCH_API_URL)
             .header(COOKIE, current.cookie())
@@ -242,7 +242,7 @@ impl ProtocolClient {
             bail!("QQ 音乐移动端搜索返回错误码 {global_code}");
         }
         let request = response
-            .get("req_0")
+            .get_mut("req_0")
             .context("QQ 音乐移动端搜索响应缺少 req_0")?;
         let request_code = integer_field(request, &["code"]).unwrap_or_default();
         if request_code != 0 {
@@ -253,8 +253,8 @@ impl ProtocolClient {
             bail!("QQ 音乐移动端搜索返回错误码 {request_code}");
         }
         request
-            .get("data")
-            .cloned()
+            .get_mut("data")
+            .map(Value::take)
             .context("QQ 音乐移动端搜索响应缺少 data")
     }
 }

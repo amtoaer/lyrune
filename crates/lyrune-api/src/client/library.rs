@@ -165,7 +165,7 @@ impl ProtocolClient {
             .await
             .context("无法加载用户创建的 QQ 音乐歌单")?;
         let created = find_array_recursively(&created_data, &["v_playlist", "playlist"])
-            .cloned()
+            .map(Vec::as_slice)
             .unwrap_or_default()
             .iter()
             .filter_map(parse_created_playlist)
@@ -190,7 +190,7 @@ impl ProtocolClient {
                 .await
                 .context("无法加载用户收藏的 QQ 音乐歌单")?;
             let page = find_array_recursively(&data, &["v_list", "playlist"])
-                .cloned()
+                .map(Vec::as_slice)
                 .unwrap_or_default();
             favorites.extend(page.iter().filter_map(parse_favorite_playlist));
             let has_more = bool_field(&data, &["hasmore", "has_more"]).unwrap_or(false);
@@ -344,7 +344,7 @@ impl ProtocolClient {
         }
         .with_context(|| format!("无法加载 QQ 音乐媒体集合“{}”", playlist.title))?;
         let songs = find_array_recursively(&data, &["songlist", "song_list"])
-            .cloned()
+            .map(Vec::as_slice)
             .unwrap_or_default();
         let tracks = songs
             .iter()

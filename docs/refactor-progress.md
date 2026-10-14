@@ -227,3 +227,5 @@
 
 
 阶段 2c：request.rs 收窄并改名为 signing.rs；单独使用的登录 GUID、搜索 ID 算法及其原测试移动到 login.rs / client/search.rs，随机范围与常量不变。补充签名索引 40 必须跳过的协议原因。导入统一按标准库、外部库、项目模块分组。一次编译发现残留的 get_search_id 导入，已移除；重新运行 API 测试 42 passed / 1 ignored、应用 all-targets 编译及格式/diff 检查通过。
+
+阶段 3：网关和移动搜索在原有错误检查之后用 take 移出 data，替代深拷贝；歌单列表解析借用已持有的 JSON 数组。缺失 data 仍报原错误，显式 null 仍成功返回；请求、检查顺序和凭据撤销规则未变。网关解包成为可直接验证错误优先级的边界，新增 1 项测试覆盖无成功数据的拒绝响应及缺失/null 区别。API 43 passed / 1 ignored、应用 all-targets 编译、格式及 diff 检查通过。

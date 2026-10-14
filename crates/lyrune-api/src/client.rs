@@ -160,30 +160,35 @@ impl ProtocolClient {
             .json::<Value>()
             .await
             .context("QQ 音乐网关返回了无效 JSON")?;
-        let global_code = integer_field(&response, &["code"]).unwrap_or_default();
-        if global_code != 0 {
-            if is_credential_rejection_code(global_code) {
-                return Err(CredentialError::Rejected { code: global_code }.into());
-            }
-            bail!("QQ 音乐网关返回错误码 {global_code}");
-        }
-
-        let result = response
-            .get("result")
-            .context("QQ 音乐网关响应缺少 result")?;
-        let result_code = integer_field(result, &["code"]).unwrap_or_default();
-        if result_code != 0 {
-            if is_credential_rejection_code(result_code) {
-                return Err(CredentialError::Rejected { code: result_code }.into());
-            }
-            bail!("QQ 音乐业务接口返回错误码 {result_code}");
-        }
-
-        result
-            .get("data")
-            .cloned()
-            .context("QQ 音乐网关响应缺少 data")
+        response_data(response)
     }
+}
+
+// 先识别凭据拒绝，再解释成功数据；错误响应不保证包含 result/data。
+fn response_data(mut response: Value) -> Result<Value> {
+    let global_code = integer_field(&response, &["code"]).unwrap_or_default();
+    if global_code != 0 {
+        if is_credential_rejection_code(global_code) {
+            return Err(CredentialError::Rejected { code: global_code }.into());
+        }
+        bail!("QQ 音乐网关返回错误码 {global_code}");
+    }
+
+    let result = response
+        .get_mut("result")
+        .context("QQ 音乐网关响应缺少 result")?;
+    let result_code = integer_field(result, &["code"]).unwrap_or_default();
+    if result_code != 0 {
+        if is_credential_rejection_code(result_code) {
+            return Err(CredentialError::Rejected { code: result_code }.into());
+        }
+        bail!("QQ 音乐业务接口返回错误码 {result_code}");
+    }
+
+    result
+        .get_mut("data")
+        .map(Value::take)
+        .context("QQ 音乐网关响应缺少 data")
 }
 
 fn is_credential_rejection_code(code: u64) -> bool {
@@ -193,6 +198,24 @@ fn is_credential_rejection_code(code: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_response_error_precedence() {
+        for response in [json!({"code": "1000"}), json!({"result": {"code": 104401}})] {
+            let error = response_data(response).unwrap_err();
+            assert!(crate::account::is_credential_rejected(&error));
+        }
+        assert_eq!(
+            response_data(json!({"result": {"data": null}})).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            response_data(json!({"result": {}}))
+                .unwrap_err()
+                .to_string(),
+            "QQ 音乐网关响应缺少 data"
+        );
+    }
 
     #[test]
     fn classifies_only_confirmed_credential_rejection_codes() {

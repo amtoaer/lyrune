@@ -159,24 +159,23 @@ impl BrowserView {
                             this.select_track(0, cx);
                         }
                     }
-                    PlaybackEvent::PlaylistLoaded(resource) => {
+                    PlaybackEvent::PlaylistLoaded(resource)
                         if this
                             .playlist
                             .resource
                             .as_ref()
-                            .is_some_and(|current| Arc::ptr_eq(current, resource))
-                        {
-                            let state = navigation::lock_resource(resource);
-                            let tracks = state.tracks.clone();
-                            let has_more = state.has_more;
-                            drop(state);
-                            this.track_table.update(cx, |table, cx| {
-                                table.delegate_mut().set_tracks(tracks, has_more, false);
-                                cx.notify();
-                            });
-                            this.restore_pending_playlist_scroll(cx);
-                            this.sync_table_playback_state(cx);
-                        }
+                            .is_some_and(|current| Arc::ptr_eq(current, resource)) =>
+                    {
+                        let state = navigation::lock_resource(resource);
+                        let tracks = state.tracks.clone();
+                        let has_more = state.has_more;
+                        drop(state);
+                        this.track_table.update(cx, |table, cx| {
+                            table.delegate_mut().set_tracks(tracks, has_more, false);
+                            cx.notify();
+                        });
+                        this.restore_pending_playlist_scroll(cx);
+                        this.sync_table_playback_state(cx);
                     }
                     _ => {}
                 },

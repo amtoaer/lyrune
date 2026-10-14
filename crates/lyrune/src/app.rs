@@ -843,17 +843,18 @@ impl LyruneView {
 
 impl Render for LyruneView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.cover_backdrop_visible && self.playback.read(cx).state.is_advancing() {
-            if self.progress.read(cx).seek_preview.is_none() {
-                self.playback.update(cx, |playback, _| {
-                    playback.state.position = playback
-                        .state
-                        .audio
-                        .as_deref()
-                        .map(AudioPlayer::position)
-                        .unwrap_or_default();
-                });
-            }
+        if self.cover_backdrop_visible
+            && self.playback.read(cx).state.is_advancing()
+            && self.progress.read(cx).seek_preview.is_none()
+        {
+            self.playback.update(cx, |playback, _| {
+                playback.state.position = playback
+                    .state
+                    .audio
+                    .as_deref()
+                    .map(AudioPlayer::position)
+                    .unwrap_or_default();
+            });
         }
 
         let expansion_progress = self.lyrics_expansion_progress(window, cx);

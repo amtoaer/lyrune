@@ -28,6 +28,8 @@
 
 [preferences](../crates/lyrune/src/app/preferences.rs) 的 `Preferences` 实体持有已提交的 `AppSettings`、字体、主题和唯一的设置写入队列。窗口大小、播放快照等仅供保存的数据变化不会通知所有偏好读取者。
 
+数字设置的手动输入在回车或失焦时提交，左右步进按钮则立即提交。步进通过 `NumberInputEvent::Step` 由设置页处理，避免将输入框的普通 `Change` 草稿事件误当作保存请求。
+
 底层模块中，`player.rs` 管音频设备与解码，`cache.rs` 管音频缓存与流，`http.rs` 管图片缓存，`settings.rs` 管设置和持久化数据格式，`credentials.rs` 管系统钥匙串，`library.rs` 管列表/表格 Delegate。
 
 ### GPUI 依赖

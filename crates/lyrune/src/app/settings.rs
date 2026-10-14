@@ -5,7 +5,7 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, Selectable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState, MaskPattern, NumberInput},
+    input::{Input, InputEvent, InputState, MaskPattern, NumberInput, NumberInputEvent},
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     v_flex,
@@ -60,7 +60,6 @@ impl SettingsInputs {
                 })
                 .validate(|value, _| value.parse::<u64>().is_ok_and(|value| value > 0))
                 .min(1.)
-                .step(1.)
         });
         let image_cache_capacity_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -71,7 +70,6 @@ impl SettingsInputs {
                 })
                 .validate(|value, _| value.parse::<usize>().is_ok_and(|value| value > 0))
                 .min(1.)
-                .step(1.)
         });
         let navigation_history_limit_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -82,7 +80,6 @@ impl SettingsInputs {
                 })
                 .validate(|value, _| value.parse::<usize>().is_ok_and(|value| value > 0))
                 .min(1.)
-                .step(1.)
         });
         let scale_input = |value: u32, window: &mut Window, cx: &mut App| {
             cx.new(|cx| {
@@ -94,7 +91,6 @@ impl SettingsInputs {
                     })
                     .validate(|value, _| value.parse::<u32>().is_ok())
                     .min(MIN_SCALE_PERCENT as f64)
-                    .step(10.)
             })
         };
         let lyric_font_scale_input = scale_input(settings.lyric_font_scale, window, cx);
@@ -196,53 +192,70 @@ impl SettingsPage {
 
     pub(super) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // 窗口重开后替换窗口绑定；输入内容和滚动位置仍由同一个页面实体持有。
-        self._input_subscriptions = vec![
-            cx.subscribe_in(
+        self._input_subscriptions.clear();
+        type ApplyNumberSetting = fn(&mut SettingsPage, &mut Window, &mut Context<SettingsPage>);
+        let numeric_inputs: [(_, _, _, ApplyNumberSetting); 5] = [
+            (
                 &self.settings_inputs.audio_cache_limit,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.apply_audio_cache_limit(window, cx);
-                    }
-                },
+                1.,
+                1.,
+                Self::apply_audio_cache_limit,
             ),
-            cx.subscribe_in(
+            (
                 &self.settings_inputs.image_cache_capacity,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.apply_image_cache_capacity(window, cx);
-                    }
-                },
+                1.,
+                1.,
+                Self::apply_image_cache_capacity,
             ),
-            cx.subscribe_in(
+            (
                 &self.settings_inputs.navigation_history_limit,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.apply_navigation_history_limit(window, cx);
-                    }
-                },
+                1.,
+                1.,
+                Self::apply_navigation_history_limit,
             ),
-            cx.subscribe_in(
+            (
                 &self.settings_inputs.lyric_font_scale,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.apply_scale_settings(window, cx);
-                    }
-                },
+                10.,
+                MIN_SCALE_PERCENT as f64,
+                Self::apply_scale_settings,
             ),
-            cx.subscribe_in(
+            (
                 &self.settings_inputs.lyric_line_spacing,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.apply_scale_settings(window, cx);
-                    }
-                },
+                10.,
+                MIN_SCALE_PERCENT as f64,
+                Self::apply_scale_settings,
             ),
         ];
+        for (input, step, min, apply) in numeric_inputs {
+            // 内建 step 只发 Change，无法区别于输入草稿；接管 Step 后立即提交。
+            input.update(cx, |input, cx| input.set_step(None, window, cx));
+            self._input_subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                move |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        apply(this, window, cx);
+                    }
+                },
+            ));
+            self._input_subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                move |this, input, event: &NumberInputEvent, window, cx| {
+                    let NumberInputEvent::Step(action) = event;
+                    if let Some(value) = gpui_base::step_value(
+                        input.read(cx).value().as_ref(),
+                        *action,
+                        step,
+                        Some(min),
+                        None,
+                    ) {
+                        input.update(cx, |input, cx| input.set_value(value, window, cx));
+                        apply(this, window, cx);
+                    }
+                },
+            ));
+        }
     }
 
     fn apply_audio_cache_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1280,6 +1293,83 @@ mod tests {
                 )
                 .child(div().h(px(112.)).flex_shrink_0())
         }
+    }
+
+    #[gpui::test]
+    fn test_number_settings_commit_on_step(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let preferences = cx.new(|_| Preferences {
+            settings: AppSettings::default(),
+            fonts: AppFonts {
+                ui: font(".SystemUIFont"),
+                monospace: font(".SystemUIFont"),
+                lyrics: font(".SystemUIFont"),
+            },
+            color_theme: ColorTheme::default(),
+            writer: None,
+        });
+        let (page, cx) = cx.add_window_view(|window, cx| {
+            let mut page = SettingsPage::new(preferences, window, cx);
+            page.attach_window(window, cx);
+            page
+        });
+        cx.simulate_resize(gpui::size(px(1080.), px(2400.)));
+        let actions = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let received = actions.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&page, move |_, event: &SettingsAction, _| {
+                let value = match event {
+                    SettingsAction::AudioCacheLimit(value) => *value,
+                    SettingsAction::ImageCacheCapacity(value)
+                    | SettingsAction::HistoryLimit(value) => *value as u64,
+                    SettingsAction::Scale { lyric, spacing } => u64::from((*lyric).max(*spacing)),
+                    _ => return,
+                };
+                received.borrow_mut().push(value);
+            })
+        });
+        let inputs = page.read_with(cx, |page, _| {
+            vec![
+                (page.settings_inputs.audio_cache_limit.clone(), 1),
+                (page.settings_inputs.image_cache_capacity.clone(), 1),
+                (page.settings_inputs.navigation_history_limit.clone(), 1),
+                (page.settings_inputs.lyric_font_scale.clone(), 10),
+                (page.settings_inputs.lyric_line_spacing.clone(), 10),
+            ]
+        });
+        for (input, step) in inputs {
+            let initial = if step == 10 { 100 } else { 90 };
+            cx.update(|window, cx| {
+                input.update(cx, |input, cx| {
+                    input.set_value(initial.to_string(), window, cx)
+                })
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            actions.borrow_mut().clear();
+            let bounds = input.read_with(cx, |input, _| input.input_bounds());
+            let increment = gpui::point(bounds.origin.x + px(92.), bounds.center().y);
+            cx.simulate_click(increment, gpui::Modifiers::none());
+            cx.run_until_parked();
+            assert_eq!(
+                input.read_with(cx, |input, _| input.value().to_string()),
+                (initial + step).to_string()
+            );
+            assert_eq!(*actions.borrow(), vec![initial + step]);
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.simulate_click(
+                gpui::point(bounds.origin.x - px(16.), bounds.center().y),
+                gpui::Modifiers::none(),
+            );
+            cx.run_until_parked();
+            assert_eq!(*actions.borrow(), vec![initial + step, initial]);
+        }
+        actions.borrow_mut().clear();
+        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_input("150");
+        assert!(actions.borrow().is_empty());
+        cx.simulate_keystrokes("enter");
+        assert_eq!(*actions.borrow(), vec![150]);
     }
 
     #[gpui::test]

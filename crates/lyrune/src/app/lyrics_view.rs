@@ -14,10 +14,12 @@ use super::animation::frame_is_due;
 #[cfg(test)]
 use super::lyrics;
 use super::lyrics::{LyricLine, ParsedLyrics};
-use crate::http::{BlurredCover, blurred_cover, blurred_image_source, cached_image_source};
+use crate::http::{BLURRED_COVER_SIZE, blurred_image_source, cached_image_source};
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::player::AudioPlayer;
-use crate::settings::FrameRate;
+use crate::settings::{
+    DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT, FrameRate,
+};
 
 const LYRIC_ROW_HEIGHT: f32 = 104.;
 const LYRIC_ANCHOR_OFFSET: f32 = 38.;
@@ -26,101 +28,8 @@ const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
 pub(super) const LYRIC_EXPANSION_DURATION: Duration = Duration::from_millis(480);
 const LYRIC_TRACK_SWITCH_DURATION: Duration = Duration::from_millis(420);
-pub(super) const LYRIC_BACKGROUND_OVERLAY_OPACITY: f32 = 0.4;
-pub(super) const LYRIC_MINIMUM_CONTRAST: f32 = 3.5;
-const LYRIC_DARK_TEXT_LUMINANCE: f32 = 0.25;
 const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
 const LYRIC_HORIZONTAL_STEP: f32 = 0.5;
-
-fn relative_luminance(color: Rgba) -> f32 {
-    let linearize = |channel: f32| {
-        if channel <= 0.04045 {
-            channel / 12.92
-        } else {
-            ((channel + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * linearize(color.r) + 0.7152 * linearize(color.g) + 0.0722 * linearize(color.b)
-}
-
-pub(super) fn contrast_ratio(first: Rgba, second: Rgba) -> f32 {
-    let first = relative_luminance(first);
-    let second = relative_luminance(second);
-    (first.max(second) + 0.05) / (first.min(second) + 0.05)
-}
-
-pub(super) fn interpolate_color(from: Hsla, to: Hsla, progress: f32) -> Hsla {
-    let from = from.to_rgb();
-    let to = to.to_rgb();
-    let progress = progress.clamp(0., 1.);
-    Rgba {
-        r: from.r + (to.r - from.r) * progress,
-        g: from.g + (to.g - from.g) * progress,
-        b: from.b + (to.b - from.b) * progress,
-        a: from.a + (to.a - from.a) * progress,
-    }
-    .into()
-}
-
-pub(super) fn readable_lyric_color(sampled_rgb: [f32; 3], overlay: Hsla, preferred: Hsla) -> Hsla {
-    let overlay = overlay.to_rgb();
-    let background = Rgba {
-        r: sampled_rgb[0] * (1. - overlay.a) + overlay.r * overlay.a,
-        g: sampled_rgb[1] * (1. - overlay.a) + overlay.g * overlay.a,
-        b: sampled_rgb[2] * (1. - overlay.a) + overlay.b * overlay.a,
-        a: 1.,
-    };
-    let mut preferred = preferred.to_rgb();
-    preferred.a = 1.;
-    if contrast_ratio(preferred, background) >= LYRIC_MINIMUM_CONTRAST {
-        return preferred.into();
-    }
-
-    let black = black().to_rgb();
-    let white = white().to_rgb();
-    let neutral = if relative_luminance(background) >= LYRIC_DARK_TEXT_LUMINANCE {
-        black
-    } else {
-        white
-    };
-    let mut lower = 0.;
-    let mut upper = 1.;
-    for _ in 0..12 {
-        let amount = (lower + upper) / 2.;
-        let candidate = Rgba {
-            r: preferred.r + (neutral.r - preferred.r) * amount,
-            g: preferred.g + (neutral.g - preferred.g) * amount,
-            b: preferred.b + (neutral.b - preferred.b) * amount,
-            a: 1.,
-        };
-        if contrast_ratio(candidate, background) >= LYRIC_MINIMUM_CONTRAST {
-            upper = amount;
-        } else {
-            lower = amount;
-        }
-    }
-
-    Rgba {
-        r: preferred.r + (neutral.r - preferred.r) * upper,
-        g: preferred.g + (neutral.g - preferred.g) * upper,
-        b: preferred.b + (neutral.b - preferred.b) * upper,
-        a: 1.,
-    }
-    .into()
-}
-
-fn foreground_for_cover(
-    url: &str,
-    overlay: Hsla,
-    preferred: Hsla,
-    sample: impl Fn(&BlurredCover) -> [f32; 3],
-    window: &mut Window,
-    cx: &mut App,
-) -> Option<Hsla> {
-    blurred_cover(url, window, cx)
-        .and_then(Result::ok)
-        .map(|cover| readable_lyric_color(sample(&cover), overlay, preferred))
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum LyricLayoutStyle {
@@ -981,12 +890,13 @@ pub(super) struct LyricsInput {
     pub(super) font: Font,
     pub(super) font_scale: u32,
     pub(super) line_spacing: u32,
+    pub(super) background_overlay_percent: u32,
+    pub(super) background_contrast: f32,
     pub(super) highlight_frame_rate: FrameRate,
     pub(super) scroll_frame_rate: FrameRate,
     pub(super) advancing: bool,
     pub(super) expanded: bool,
     pub(super) visible: bool,
-    pub(super) expansion_progress: f32,
 }
 
 pub(super) struct CollapseLyrics;
@@ -1025,12 +935,13 @@ impl LyricsView {
                 font,
                 font_scale: 100,
                 line_spacing: 100,
+                background_overlay_percent: DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT,
+                background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
                 highlight_frame_rate: FrameRate::Fps60,
                 scroll_frame_rate: FrameRate::Fps60,
                 advancing: false,
                 expanded: false,
                 visible: false,
-                expansion_progress: 0.,
             },
             audio,
             position: Duration::ZERO,
@@ -1235,48 +1146,6 @@ impl LyricsView {
             });
         }
         true
-    }
-
-    fn lyric_foreground_for_url(
-        &self,
-        url: &str,
-        narrow: bool,
-        overlay: Hsla,
-        preferred: Hsla,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Hsla> {
-        foreground_for_cover(
-            url,
-            overlay,
-            preferred,
-            |cover| cover.sampled_rgb(narrow),
-            window,
-            cx,
-        )
-    }
-
-    pub(super) fn foreground_target(
-        &self,
-        overlay: Hsla,
-        preferred: Hsla,
-        sample: impl Fn(&BlurredCover) -> [f32; 3],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Hsla> {
-        for url in [
-            self.backdrop_current_url.as_deref(),
-            self.backdrop_previous_url.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if let Some(color) = foreground_for_cover(url, overlay, preferred, &sample, window, cx)
-            {
-                return Some(color);
-            }
-        }
-        None
     }
 
     fn render_lyrics_panel(
@@ -1498,7 +1367,6 @@ impl LyricsView {
         let cover_size = px((viewport_width * if compact { 0.3 } else { 0.28 })
             .min(f32::from(available_height) * 0.58)
             .clamp(280., 520.));
-        let expansion_progress = self.input.expansion_progress;
         let theme = cx.theme().clone();
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
 
@@ -1532,56 +1400,15 @@ impl LyricsView {
                 };
                 let previous_backdrop_opacity = 1. - current_backdrop_opacity;
                 let cover_url = url.clone();
-                let overlay = theme.background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY);
-                let current_lyric_foreground = self.lyric_foreground_for_url(
-                    &current_backdrop_url,
-                    narrow,
-                    overlay,
-                    theme.foreground,
-                    window,
-                    cx,
-                );
-                let previous_lyric_foreground = previous_backdrop_url.as_deref().and_then(|url| {
-                    self.lyric_foreground_for_url(
-                        url,
-                        narrow,
-                        overlay,
-                        theme.foreground,
-                        window,
-                        cx,
-                    )
-                });
-                let lyric_foreground = match (previous_lyric_foreground, current_lyric_foreground) {
-                    (Some(previous), Some(current)) => {
-                        interpolate_color(previous, current, current_backdrop_opacity)
-                    }
-                    (Some(previous), None) => previous,
-                    (None, Some(current)) => current,
-                    (None, None) => theme.foreground,
-                };
-                let collapse_foreground_target = self
-                    .foreground_target(
-                        overlay,
-                        theme.foreground,
-                        |cover| cover.collapse_rgb(),
-                        window,
-                        cx,
-                    )
-                    .unwrap_or(theme.foreground);
-                let reveal_start = (1. - 54. / f32::from(available_height).max(54.)).clamp(0., 1.);
-                let control_color_progress =
-                    ((expansion_progress - reveal_start) / (1. - reveal_start)).clamp(0., 1.);
-                let collapse_foreground = interpolate_color(
-                    theme.foreground,
-                    collapse_foreground_target,
-                    control_color_progress,
-                );
+                let overlay = theme
+                    .background
+                    .opacity(self.input.background_overlay_percent as f32 / 100.);
                 let lyrics = if defer_new_lyrics {
                     div().into_any_element()
                 } else {
                     self.render_lyrics_panel(
                         &track_mid,
-                        lyric_foreground,
+                        theme.foreground,
                         compact,
                         narrow,
                         window,
@@ -1590,50 +1417,22 @@ impl LyricsView {
                 };
                 let collapse_button = if client_decorations {
                     div()
-                        .group("collapse-cover-backdrop")
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             Button::new("collapse-cover-backdrop")
                                 .custom(
                                     ButtonCustomVariant::new(cx)
-                                        .foreground(collapse_foreground)
+                                        .foreground(theme.foreground)
                                         .hover(theme.background.opacity(0.58))
                                         .active(theme.background.opacity(0.58)),
                                 )
                                 .size(px(36.))
                                 .p_0()
-                                .child(
-                                    div()
-                                        .relative()
-                                        .size(px(16.))
-                                        .child(
-                                            div()
-                                                .absolute()
-                                                .inset_0()
-                                                .group_hover("collapse-cover-backdrop", |style| {
-                                                    style.opacity(0.)
-                                                })
-                                                .child(media_icon_hsla(
-                                                    MediaIcon::ChevronDown,
-                                                    collapse_foreground,
-                                                    px(16.),
-                                                )),
-                                        )
-                                        .child(
-                                            div()
-                                                .absolute()
-                                                .inset_0()
-                                                .opacity(0.)
-                                                .group_hover("collapse-cover-backdrop", |style| {
-                                                    style.opacity(1.)
-                                                })
-                                                .child(media_icon_hsla(
-                                                    MediaIcon::ChevronDown,
-                                                    theme.foreground,
-                                                    px(16.),
-                                                )),
-                                        ),
-                                )
+                                .child(media_icon_hsla(
+                                    MediaIcon::ChevronDown,
+                                    theme.foreground,
+                                    px(16.),
+                                ))
                                 .on_click(cx.listener(|_, _, _, cx| {
                                     cx.emit(CollapseLyrics);
                                 })),
@@ -1663,6 +1462,10 @@ impl LyricsView {
                 };
                 let collapse_top = if client_decorations { px(18.) } else { px(24.) };
                 let collapse_left = if client_decorations { px(16.) } else { px(24.) };
+                // 放大后裁掉至少一个源像素，避免线性采样混入纹理外的透明像素。
+                // 外扩会同时增大图片宽度，分母扣除两侧各一个源像素。
+                let backdrop_padding =
+                    px((viewport_width / (BLURRED_COVER_SIZE - 2) as f32).ceil());
                 let backdrop_images = div()
                     .absolute()
                     .inset_0()
@@ -1671,30 +1474,42 @@ impl LyricsView {
                         images.child(
                             div()
                                 .absolute()
-                                .top(-px(3.))
-                                .right(-px(3.))
-                                .bottom(-px(3.))
-                                .left(-px(3.))
+                                .top(-backdrop_padding)
+                                .right(-backdrop_padding)
+                                .bottom(-backdrop_padding)
+                                .left(-backdrop_padding)
                                 .opacity(previous_backdrop_opacity)
                                 .child(
-                                    img(blurred_image_source(previous_url))
-                                        .size_full()
-                                        .object_fit(ObjectFit::Cover),
+                                    img(blurred_image_source(
+                                        previous_url,
+                                        theme.background,
+                                        theme.foreground,
+                                        self.input.background_overlay_percent,
+                                        self.input.background_contrast,
+                                    ))
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover),
                                 ),
                         )
                     })
                     .child(
                         div()
                             .absolute()
-                            .top(-px(3.))
-                            .right(-px(3.))
-                            .bottom(-px(3.))
-                            .left(-px(3.))
+                            .top(-backdrop_padding)
+                            .right(-backdrop_padding)
+                            .bottom(-backdrop_padding)
+                            .left(-backdrop_padding)
                             .opacity(current_backdrop_opacity)
                             .child(
-                                img(blurred_image_source(current_backdrop_url))
-                                    .size_full()
-                                    .object_fit(ObjectFit::Cover),
+                                img(blurred_image_source(
+                                    current_backdrop_url,
+                                    theme.background,
+                                    theme.foreground,
+                                    self.input.background_overlay_percent,
+                                    self.input.background_contrast,
+                                ))
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
                             ),
                     );
                 let content = h_flex()
@@ -1758,12 +1573,7 @@ impl LyricsView {
                     .h(available_height)
                     .bg(theme.background)
                     .child(backdrop_images)
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .bg(theme.background.opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY)),
-                    )
+                    .child(div().absolute().inset_0().bg(overlay))
                     .child(content)
                     .child(
                         div()
@@ -1818,7 +1628,9 @@ impl Render for LyricsView {
 #[cfg(test)]
 mod tests {
     use super::{LYRIC_ROW_HEIGHT, LyricsContent, LyricsInput, LyricsView, lyrics};
-    use crate::settings::FrameRate;
+    use crate::settings::{
+        DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT, FrameRate,
+    };
     use gpui::{TestAppContext, VisualTestContext, font, px, white};
     use std::sync::Arc;
     use std::time::Duration;
@@ -1902,12 +1714,13 @@ mod tests {
             font: font(".SystemUIFont"),
             font_scale: 100,
             line_spacing: 100,
+            background_overlay_percent: DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT,
+            background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
             highlight_frame_rate: FrameRate::Display,
             scroll_frame_rate: FrameRate::Display,
             advancing: false,
             expanded: true,
             visible: true,
-            expansion_progress: 1.,
         };
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {

@@ -22,6 +22,7 @@ keyring.workspace = true
 lru.workspace = true
 lyrune-api.workspace = true
 lyrune-decrypt.workspace = true
+palette.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true
 resvg.workspace = true

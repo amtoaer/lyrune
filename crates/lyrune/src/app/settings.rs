@@ -32,6 +32,8 @@ struct SettingsInputs {
     navigation_history_limit: Entity<InputState>,
     lyric_font_scale: Entity<InputState>,
     lyric_line_spacing: Entity<InputState>,
+    lyric_background_overlay: Entity<InputState>,
+    lyric_background_contrast: Entity<InputState>,
 }
 
 impl SettingsInputs {
@@ -95,6 +97,28 @@ impl SettingsInputs {
         };
         let lyric_font_scale_input = scale_input(settings.lyric_font_scale, window, cx);
         let lyric_line_spacing_input = scale_input(settings.lyric_line_spacing, window, cx);
+        let lyric_background_overlay_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.lyric_background_overlay_percent.to_string())
+                .mask_pattern(MaskPattern::Number {
+                    separator: None,
+                    fraction: None,
+                })
+                .validate(|value, _| value.parse::<u32>().is_ok())
+                .min(0.)
+                .max(100.)
+        });
+        let lyric_background_contrast_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.lyric_background_contrast.to_string())
+                .mask_pattern(MaskPattern::Number {
+                    separator: None,
+                    fraction: Some(1),
+                })
+                .validate(|value, _| value.parse::<f32>().is_ok_and(f32::is_finite))
+                .min(1.)
+                .max(21.)
+        });
         Self {
             ui_font: ui_font_input,
             monospace_font: monospace_font_input,
@@ -104,6 +128,8 @@ impl SettingsInputs {
             navigation_history_limit: navigation_history_limit_input,
             lyric_font_scale: lyric_font_scale_input,
             lyric_line_spacing: lyric_line_spacing_input,
+            lyric_background_overlay: lyric_background_overlay_input,
+            lyric_background_contrast: lyric_background_contrast_input,
         }
     }
 
@@ -146,6 +172,10 @@ pub(super) enum SettingsAction {
     Scale {
         lyric: u32,
         spacing: u32,
+    },
+    LyricBackground {
+        overlay_percent: u32,
+        contrast: f32,
     },
     Fonts {
         ui: Vec<String>,
@@ -194,7 +224,7 @@ impl SettingsPage {
         // 窗口重开后替换窗口绑定；输入内容和滚动位置仍由同一个页面实体持有。
         self._input_subscriptions.clear();
         type ApplyNumberSetting = fn(&mut SettingsPage, &mut Window, &mut Context<SettingsPage>);
-        let numeric_inputs: [(_, _, _, ApplyNumberSetting); 5] = [
+        let numeric_inputs: [(_, _, _, ApplyNumberSetting); 7] = [
             (
                 &self.settings_inputs.audio_cache_limit,
                 1.,
@@ -224,6 +254,18 @@ impl SettingsPage {
                 10.,
                 MIN_SCALE_PERCENT as f64,
                 Self::apply_scale_settings,
+            ),
+            (
+                &self.settings_inputs.lyric_background_overlay,
+                5.,
+                0.,
+                Self::apply_lyric_background_settings,
+            ),
+            (
+                &self.settings_inputs.lyric_background_contrast,
+                0.1,
+                1.,
+                Self::apply_lyric_background_settings,
             ),
         ];
         for (input, step, min, apply) in numeric_inputs {
@@ -346,6 +388,44 @@ impl SettingsPage {
             });
         }
         cx.emit(SettingsAction::Scale { lyric, spacing });
+    }
+
+    fn apply_lyric_background_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = &self.preferences.read(cx).settings;
+        let overlay_percent = self
+            .settings_inputs
+            .lyric_background_overlay
+            .read(cx)
+            .value()
+            .parse::<u32>()
+            .unwrap_or(settings.lyric_background_overlay_percent)
+            .min(100);
+        let contrast = self
+            .settings_inputs
+            .lyric_background_contrast
+            .read(cx)
+            .value()
+            .parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .unwrap_or(settings.lyric_background_contrast)
+            .clamp(1., 21.);
+        for (input, value) in [
+            (
+                &self.settings_inputs.lyric_background_overlay,
+                overlay_percent.to_string(),
+            ),
+            (
+                &self.settings_inputs.lyric_background_contrast,
+                contrast.to_string(),
+            ),
+        ] {
+            input.update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+        cx.emit(SettingsAction::LyricBackground {
+            overlay_percent,
+            contrast,
+        });
     }
 
     fn apply_font_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -853,7 +933,7 @@ impl Render for SettingsPage {
                                         .pt_4()
                                         .border_t_1()
                                         .border_color(theme.border)
-                                        .child(div().font_medium().child("歌词字号与间距"))
+                                        .child(div().font_medium().child("歌词页样式"))
                                         .child(number_setting(
                                             "歌词字号缩放",
                                             "缩放主歌词、翻译与注音的文字大小，行高随之等比例调整",
@@ -866,6 +946,20 @@ impl Render for SettingsPage {
                                             "调整歌词页相邻两行之间的距离",
                                             &self.settings_inputs.lyric_line_spacing,
                                             "%",
+                                            true,
+                                        ))
+                                        .child(number_setting(
+                                            "主题背景混合比例",
+                                            "调整封面背景中主题背景色的占比，越高越接近主题背景色",
+                                            &self.settings_inputs.lyric_background_overlay,
+                                            "%",
+                                            true,
+                                        ))
+                                        .child(number_setting(
+                                            "目标对比度",
+                                            "调整歌词与背景的对比度，实际可达范围受主题色和混合比例限制",
+                                            &self.settings_inputs.lyric_background_contrast,
+                                            "∶1",
                                             true,
                                         )),
                                 )
@@ -959,6 +1053,23 @@ impl LyruneView {
             SettingsAction::HistoryLimit(value) => self.set_navigation_history_limit(*value, cx),
             SettingsAction::Scale { lyric, spacing } => {
                 self.set_scale_settings(*lyric, *spacing, cx)
+            }
+            SettingsAction::LyricBackground {
+                overlay_percent,
+                contrast,
+            } => {
+                let settings = &self.preferences.read(cx).settings;
+                if settings.lyric_background_overlay_percent == *overlay_percent
+                    && settings.lyric_background_contrast == *contrast
+                {
+                    return;
+                }
+                self.preferences.update(cx, |preferences, cx| {
+                    preferences.settings.lyric_background_overlay_percent = *overlay_percent;
+                    preferences.settings.lyric_background_contrast = *contrast;
+                    cx.notify();
+                });
+                self.preferences.read(cx).save();
             }
             SettingsAction::Fonts {
                 ui,
@@ -1352,6 +1463,87 @@ mod tests {
         assert!(actions.borrow().is_empty());
         cx.simulate_keystrokes("enter");
         assert_eq!(*actions.borrow(), vec![150]);
+    }
+
+    #[gpui::test]
+    fn test_lyric_background_settings(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let preferences = cx.new(|_| Preferences {
+            settings: AppSettings::default(),
+            fonts: AppFonts {
+                ui: font(".SystemUIFont"),
+                monospace: font(".SystemUIFont"),
+                lyrics: font(".SystemUIFont"),
+            },
+            color_theme: ColorTheme::default(),
+            writer: None,
+        });
+        let (page, cx) = cx.add_window_view(|window, cx| {
+            let mut page = SettingsPage::new(preferences, window, cx);
+            page.attach_window(window, cx);
+            page
+        });
+        cx.simulate_resize(gpui::size(px(1080.), px(3000.)));
+        cx.update(|window, _| window.activate_window());
+        let actions = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let received = actions.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&page, move |_, event: &SettingsAction, _| {
+                if let SettingsAction::LyricBackground {
+                    overlay_percent,
+                    contrast,
+                } = event
+                {
+                    received.borrow_mut().push((*overlay_percent, *contrast));
+                }
+            })
+        });
+        let inputs = page.read_with(cx, |page, _| {
+            [
+                (
+                    page.settings_inputs.lyric_background_overlay.clone(),
+                    (45, 4.5),
+                ),
+                (
+                    page.settings_inputs.lyric_background_contrast.clone(),
+                    (45, 4.6),
+                ),
+            ]
+        });
+        for (input, expected) in inputs {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let bounds = input.read_with(cx, |input, _| input.input_bounds());
+            cx.simulate_click(
+                gpui::point(bounds.origin.x + px(92.), bounds.center().y),
+                gpui::Modifiers::none(),
+            );
+            cx.run_until_parked();
+            assert_eq!(actions.borrow().last(), Some(&expected));
+        }
+        actions.borrow_mut().clear();
+        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_input("3.2");
+        assert!(actions.borrow().is_empty());
+        cx.simulate_keystrokes("enter");
+        assert_eq!(actions.borrow().last(), Some(&(45, 3.2)));
+        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_input("6.5");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let overlay = page.read_with(cx, |page, cx| {
+            assert_eq!(
+                page.settings_inputs
+                    .lyric_background_contrast
+                    .read(cx)
+                    .value(),
+                "6.5"
+            );
+            page.settings_inputs.lyric_background_overlay.clone()
+        });
+        cx.update(|window, cx| overlay.update(cx, |input, cx| input.focus(window, cx)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        assert_eq!(actions.borrow().last(), Some(&(45, 6.5)));
     }
 
     #[gpui::test]

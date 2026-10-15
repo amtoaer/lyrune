@@ -8,7 +8,7 @@
   <strong>使用 Rust 和 GPUI / GPUI Component 构建的 Linux QQ 音乐桌面客户端</strong>
 </p>
 
-![Lyrune](docs/screenshots/lyrune.webp)
+![Lyrune](docs/screenshots/lyrune.png)
 
 ## 背景
 
@@ -46,23 +46,23 @@
 
 ### 主页
 
-![主页](docs/screenshots/home.webp)
+![主页](docs/screenshots/home.png)
 
 ### 歌单
 
-![歌单](docs/screenshots/playlist.webp)
+![歌单](docs/screenshots/playlist.png)
 
 ### 搜索
 
-![搜索](docs/screenshots/search.webp)
+![搜索](docs/screenshots/search.png)
 
 ### 歌词
 
-![歌词](docs/screenshots/lyrics.webp)
+![歌词](docs/screenshots/lyrics.png)
 
 ### 设置
 
-![设置](docs/screenshots/settings.webp)
+![设置](docs/screenshots/settings.png)
 
 ## 平台支持
 
@@ -73,10 +73,6 @@
 这是因为该项目使用的 GPUI 框架缺失 Damage Tracking，在高强度重绘的歌词页占用不甚理想。我目前通过自行 fork GPUI 合并上游 [针对 Linux 的 Damage Tracking](https://github.com/zed-industries/zed/pull/62455) 与 [Wayland 渲染改进](https://github.com/zed-industries/zed/pull/60690) 在 Linux 上基本解决了该性能问题，但由于Windows / Mac 没有对应的 Damage Tracking 实现，预期性能较 Linux 差不少。
 
 当然如果非常想用，设置里也提供了歌词页的动画帧率限制，可以以牺牲流畅度为代价大幅改善体验。
-
-## 开发与维护
-
-从 [代码结构与维护约束](docs/architecture.md) 开始阅读，其中记录了模块职责、状态归属、异步任务的生命周期和验证方法。
 
 ## 参考与致谢
 

@@ -998,8 +998,8 @@ impl Render for SettingsPage {
                                             true,
                                         ))
                                         .child(number_setting(
-                                            "文字对比度下限",
-                                            "混色后若文字对比度低于此值则调整背景明度；实际可达值受主题颜色限制",
+                                            "歌词文字对比度下限",
+                                            "混色后若歌词文字对比度低于此值则调整背景明度；实际可达值受主题颜色限制",
                                             &self.settings_inputs.lyric_background_contrast,
                                             "∶1",
                                             true,

@@ -21,8 +21,7 @@ use crate::settings::{
     DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT, FrameRate,
 };
 
-const LYRIC_ROW_HEIGHT: f32 = 104.;
-const LYRIC_ANCHOR_OFFSET: f32 = 38.;
+const LYRIC_ANCHOR_SPACING_EM: f32 = 3.;
 const LYRIC_EDGE_FADE_DISTANCE: f32 = 48.;
 const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
@@ -67,10 +66,14 @@ struct LyricLayoutCacheSource {
     compact: bool,
     narrow: bool,
     scale: u32,
+    spacing: u32,
     font: Font,
 }
 
 struct CachedLyricRow {
+    top: Pixels,
+    height: Pixels,
+    anchor: Pixels,
     normal: Option<Arc<PreparedLyricLine>>,
     active: Option<Arc<PreparedLyricLine>>,
     translation: Option<Arc<PreparedLyricTranslation>>,
@@ -85,6 +88,8 @@ pub(super) struct LyricLayoutCache {
 
 #[derive(Clone)]
 struct PreparedLyricRow {
+    top: Pixels,
+    height: Pixels,
     normal: Arc<PreparedLyricLine>,
     active: Arc<PreparedLyricLine>,
     translation: Option<Arc<PreparedLyricTranslation>>,
@@ -95,19 +100,12 @@ struct PreparedLyricRow {
 }
 
 pub(super) struct CachedLyricsPanel {
-    lyrics: usize,
-    mid: String,
-    compact: bool,
-    narrow: bool,
-    scale: u32,
-    row_height: Pixels,
-    font: Font,
-    render_radius: usize,
-    render_start: usize,
+    render_distance: Pixels,
+    render_offset: Pixels,
+    scroll_anchor: f32,
     scroll_offset: Pixels,
     style_anchor: f32,
     highlight_position: Duration,
-    translation_line_height: Pixels,
     rows: Vec<PreparedLyricRow>,
 }
 
@@ -115,8 +113,6 @@ struct PreparedLyricsElement {
     rows: Vec<PreparedLyricRow>,
     foreground: Hsla,
     position: Duration,
-    translation_line_height: Pixels,
-    row_height: Pixels,
 }
 
 pub(super) struct LyricMotionState {
@@ -223,6 +219,24 @@ fn translation_line_height(narrow: bool, scale: f32) -> Pixels {
     (if narrow { px(18.) } else { px(20.) }) * scale
 }
 
+fn lyric_font_size(style: LyricLayoutStyle, compact: bool, scale: f32) -> Pixels {
+    scale
+        * match (style, compact) {
+            (LyricLayoutStyle::Active, true) => px(24.),
+            (LyricLayoutStyle::Active, false) => px(28.),
+            (LyricLayoutStyle::Normal, true) => px(17.),
+            (LyricLayoutStyle::Normal, false) => px(19.),
+        }
+}
+
+fn ruby_line_height(line: &LyricLine, narrow: bool, scale: f32) -> Pixels {
+    if line.words.iter().any(|word| word.ruby.is_some()) {
+        (if narrow { px(13.) } else { px(15.) }) * scale
+    } else {
+        px(0.)
+    }
+}
+
 fn lyric_line_opacity(anchor: usize, index: usize) -> f32 {
     match index.abs_diff(anchor) {
         0 => 1.,
@@ -265,15 +279,9 @@ impl PreparedLyricLine {
         window: &Window,
     ) -> Self {
         let active = style == LyricLayoutStyle::Active;
-        let font_size = scale
-            * match (active, compact) {
-                (true, true) => px(24.),
-                (true, false) => px(28.),
-                (false, true) => px(17.),
-                (false, false) => px(19.),
-            };
+        let font_size = lyric_font_size(style, compact, scale);
         let ruby_font_size = (if narrow { px(11.) } else { px(12.) }) * scale;
-        let ruby_line_height = (if narrow { px(13.) } else { px(15.) }) * scale;
+        let ruby_line_height = ruby_line_height(line, narrow, scale);
         let mut font = configured_font.clone();
         font.weight = if active {
             FontWeight::BOLD
@@ -281,7 +289,7 @@ impl PreparedLyricLine {
             FontWeight::MEDIUM
         };
         let has_word_timing = !line.words.is_empty();
-        let has_ruby = line.words.iter().any(|word| word.ruby.is_some());
+        let has_ruby = ruby_line_height > px(0.);
         let split_fragments = (active && has_word_timing) || has_ruby;
         let mut fragments = Vec::with_capacity(if split_fragments {
             line.words.len() * 2 + 1
@@ -439,6 +447,7 @@ impl PreparedLyricTranslation {
 }
 
 impl LyricLayoutCache {
+    #[allow(clippy::too_many_arguments)]
     fn reset_if_needed(
         &mut self,
         lyrics: &Arc<ParsedLyrics>,
@@ -446,8 +455,9 @@ impl LyricLayoutCache {
         compact: bool,
         narrow: bool,
         scale: u32,
+        spacing: u32,
         font: &Font,
-    ) {
+    ) -> bool {
         let lyrics_identity = Arc::as_ptr(lyrics) as usize;
         let matches = self.source.as_ref().is_some_and(|source| {
             source.lyrics == lyrics_identity
@@ -455,10 +465,11 @@ impl LyricLayoutCache {
                 && source.compact == compact
                 && source.narrow == narrow
                 && source.scale == scale
+                && source.spacing == spacing
                 && source.font == *font
         });
         if matches {
-            return;
+            return false;
         }
 
         self.source = Some(LyricLayoutCacheSource {
@@ -467,16 +478,40 @@ impl LyricLayoutCache {
             compact,
             narrow,
             scale,
+            spacing,
             font: font.clone(),
         });
-        self.rows = (0..lyrics.lines.len())
-            .map(|_| CachedLyricRow {
+        let scale = scale as f32 / 100.;
+        let spacing = spacing as f32 / 100.;
+        let font_size = lyric_font_size(LyricLayoutStyle::Active, compact, scale);
+        let line_height = font_size * 1.3;
+        let gap = font_size * spacing;
+        let anchor_spacing =
+            line_height + (font_size * LYRIC_ANCHOR_SPACING_EM - line_height) * spacing;
+        self.rows = Vec::with_capacity(lyrics.lines.len());
+        for line in &lyrics.lines {
+            let ruby_height = ruby_line_height(line, narrow, scale);
+            let translation_height = line
+                .translation
+                .as_ref()
+                .map_or(px(0.), |_| px(4.) + translation_line_height(narrow, scale));
+            let height = ruby_height + line_height + translation_height;
+            let anchor_offset = ruby_height + line_height / 2.;
+            let top = self.rows.last().map_or(px(0.), |previous| {
+                (previous.anchor + anchor_spacing - anchor_offset)
+                    .max(previous.top + previous.height + gap)
+            });
+            self.rows.push(CachedLyricRow {
+                top,
+                height,
+                anchor: top + anchor_offset,
                 normal: None,
                 active: None,
                 translation: None,
                 translation_prepared: false,
-            })
-            .collect();
+            });
+        }
+        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -739,7 +774,11 @@ impl Element for PreparedLyricsElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = (self.row_height * self.rows.len() as f32).into();
+        style.size.height = self
+            .rows
+            .last()
+            .map_or(px(0.), |row| row.top + row.height)
+            .into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -770,7 +809,7 @@ impl Element for PreparedLyricsElement {
             return;
         }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            for (index, row) in self.rows.iter().enumerate() {
+            for row in &self.rows {
                 let emphasis = row.emphasis.clamp(0., 1.);
                 let target_font_size =
                     row.normal.font_size + (row.active.font_size - row.normal.font_size) * emphasis;
@@ -791,11 +830,8 @@ impl Element for PreparedLyricsElement {
                     px(0.)
                 };
                 let row_bounds = Bounds::new(
-                    point(
-                        bounds.origin.x,
-                        bounds.origin.y + self.row_height * index as f32,
-                    ),
-                    size(bounds.size.width, self.row_height),
+                    point(bounds.origin.x, bounds.origin.y + row.top),
+                    size(bounds.size.width, row.height),
                 );
                 if !row_bounds.intersects(&visible_bounds) {
                     continue;
@@ -811,14 +847,8 @@ impl Element for PreparedLyricsElement {
                 }
                 let opacity = row.opacity * edge_opacity;
                 let lyric_height = row.normal.height().max(row.active.height());
-                let content_height = lyric_height + px(4.) + self.translation_line_height;
-                let lyric_bounds = Bounds::new(
-                    point(
-                        row_bounds.origin.x,
-                        row_bounds.origin.y + (row_bounds.size.height - content_height) / 2.,
-                    ),
-                    size(row_bounds.size.width, lyric_height),
-                );
+                let lyric_bounds =
+                    Bounds::new(row_bounds.origin, size(row_bounds.size.width, lyric_height));
                 let _ = Self::paint_line(
                     &row.normal,
                     point(
@@ -1026,8 +1056,7 @@ impl LyricsView {
         };
         // 动画时间结束后仍需采样最终位置，不能丢掉下一个限帧截止点的末帧。
         self.cached_lyrics_panel.as_ref().is_none_or(|cache| {
-            cache.scroll_offset != cache.row_height * state.target
-                || cache.style_anchor != state.target
+            cache.scroll_anchor != state.target || cache.style_anchor != state.target
         })
     }
 
@@ -1196,31 +1225,28 @@ impl LyricsView {
         let lyric_font = self.input.font.clone();
         let scale_percent = self.input.font_scale;
         let scale = scale_percent as f32 / 100.;
-        let row_height = px(LYRIC_ROW_HEIGHT * scale * self.input.line_spacing as f32 / 100.);
-        self.lyric_layout_cache.reset_if_needed(
+        let layout_changed = self.lyric_layout_cache.reset_if_needed(
             &lyrics,
             mid,
             compact,
             narrow,
             scale_percent,
+            self.input.line_spacing,
             &lyric_font,
         );
+        if layout_changed {
+            self.lyric_motion_state = None;
+        }
 
-        let render_radius =
-            ((window.viewport_size().height * 0.65 / row_height).ceil() as usize) + 2;
+        let render_distance = window.viewport_size().height * 0.65;
         let anchor = lyrics.active_index(self.position).unwrap_or(0);
         // 排版缓存复用字形；面板缓存则固定本帧的行、滚动位置和高亮时间，
         // 避免其他控件触发重绘时绕过用户设置的歌词帧率。
-        let cache_invalid = self.cached_lyrics_panel.as_ref().is_none_or(|cache| {
-            cache.lyrics != Arc::as_ptr(&lyrics) as usize
-                || cache.mid != mid
-                || cache.compact != compact
-                || cache.narrow != narrow
-                || cache.scale != scale_percent
-                || cache.row_height != row_height
-                || cache.font != lyric_font
-                || cache.render_radius != render_radius
-        });
+        let cache_invalid = layout_changed
+            || self
+                .cached_lyrics_panel
+                .as_ref()
+                .is_none_or(|cache| cache.render_distance != render_distance);
         if cache_invalid || self.lyric_highlight_frame_pending || self.lyric_scroll_frame_pending {
             let active = Some(anchor);
             let now = cx.background_executor().now();
@@ -1228,16 +1254,28 @@ impl LyricsView {
             let (scroll_anchor, style_anchor) =
                 self.lyric_motion_anchors(mid, anchor, motion_enabled, now);
             // 一个通道到期只更新自己的采样；不能因另一通道更快而越过其帧率上限。
-            let (scroll_offset, style_anchor) =
+            let (scroll_anchor, style_anchor) =
                 if let Some(cache) = self.cached_lyrics_panel.as_ref().filter(|_| {
                     !cache_invalid && !self.lyric_scroll_frame_pending && motion_enabled
                 }) {
-                    (cache.scroll_offset, cache.style_anchor)
+                    (cache.scroll_anchor, cache.style_anchor)
                 } else {
-                    (row_height * scroll_anchor, style_anchor)
+                    (scroll_anchor, style_anchor)
                 };
-            let render_start = anchor.saturating_sub(render_radius);
-            let render_end = (anchor + render_radius + 1).min(lyrics.lines.len());
+            let previous_anchor =
+                self.lyric_layout_cache.rows[scroll_anchor.floor() as usize].anchor;
+            let next_anchor = self.lyric_layout_cache.rows[scroll_anchor.ceil() as usize].anchor;
+            let scroll_offset =
+                previous_anchor + (next_anchor - previous_anchor) * scroll_anchor.fract();
+            let render_start = self
+                .lyric_layout_cache
+                .rows
+                .partition_point(|row| row.top + row.height < scroll_offset - render_distance);
+            let render_end = self
+                .lyric_layout_cache
+                .rows
+                .partition_point(|row| row.top <= scroll_offset + render_distance);
+            let render_offset = self.lyric_layout_cache.rows[render_start].top;
             let highlight_position = if let Some(cache) = self
                 .cached_lyrics_panel
                 .as_ref()
@@ -1301,6 +1339,8 @@ impl LyricsView {
                         window,
                     );
                     PreparedLyricRow {
+                        top: self.lyric_layout_cache.rows[index].top - render_offset,
+                        height: self.lyric_layout_cache.rows[index].height,
                         normal,
                         active: active_layout,
                         translation,
@@ -1312,19 +1352,12 @@ impl LyricsView {
                 })
                 .collect::<Vec<_>>();
             self.cached_lyrics_panel = Some(CachedLyricsPanel {
-                lyrics: Arc::as_ptr(&lyrics) as usize,
-                mid: mid.to_owned(),
-                compact,
-                narrow,
-                scale: scale_percent,
-                row_height,
-                font: lyric_font.clone(),
-                render_radius,
-                render_start,
+                render_distance,
+                render_offset,
+                scroll_anchor,
                 scroll_offset,
                 style_anchor,
                 highlight_position,
-                translation_line_height: translation_line_height(narrow, scale),
                 rows,
             });
             self.lyric_highlight_frame_pending = false;
@@ -1340,15 +1373,11 @@ impl LyricsView {
             .top(relative(0.44))
             .left_0()
             .right_0()
-            .mt(cached.row_height * cached.render_start as f32
-                - cached.scroll_offset
-                - cached.row_height * (LYRIC_ANCHOR_OFFSET / LYRIC_ROW_HEIGHT))
+            .mt(cached.render_offset - cached.scroll_offset)
             .child(PreparedLyricsElement {
                 rows: cached.rows.clone(),
                 foreground,
                 position: cached.highlight_position,
-                translation_line_height: cached.translation_line_height,
-                row_height: cached.row_height,
             })
             .into_any_element()
     }
@@ -1627,7 +1656,7 @@ impl Render for LyricsView {
 
 #[cfg(test)]
 mod tests {
-    use super::{LYRIC_ROW_HEIGHT, LyricsContent, LyricsInput, LyricsView, lyrics};
+    use super::{LyricsContent, LyricsInput, LyricsView, lyrics};
     use crate::settings::{
         DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT, FrameRate,
     };
@@ -1648,7 +1677,7 @@ mod tests {
                 view.input.mid = "test".into();
                 view.input.content = LyricsContent::Ready(Arc::new(lyrics::parse_lyrics(
                     "[00:00.00]first\n[00:01.00]second",
-                    None,
+                    Some("[00:01.00]第二行"),
                     None,
                 )));
                 view.input.duration = Some(Duration::from_secs(10));
@@ -1692,7 +1721,10 @@ mod tests {
             assert!(next.2 > after.2);
             cx.cx.executor().advance_clock(Duration::from_millis(400));
             let settled = sample(Duration::from_millis(1550), cx);
-            assert_eq!(settled.0, px(LYRIC_ROW_HEIGHT));
+            view.update(cx, |view, _| {
+                assert_eq!(settled.0, view.lyric_layout_cache.rows[1].anchor);
+                assert!(!view.lyric_motion_is_active(false));
+            });
             assert_eq!(settled.1, 1.);
         }
     }
@@ -1730,14 +1762,112 @@ mod tests {
                 let _ = view.render_lyrics_panel("test", white(), true, false, window, cx);
                 let cache = view.cached_lyrics_panel.as_ref().unwrap();
                 assert_eq!(cache.highlight_position, Duration::from_millis(1500));
-                assert_eq!(cache.scroll_offset, cache.row_height);
-                let old_height = cache.row_height;
+                assert_eq!(cache.scroll_offset, view.lyric_layout_cache.rows[1].anchor);
+                let old_offset = cache.scroll_offset;
                 let mut next = input();
                 next.line_spacing = 120;
                 view.set_input(next, Duration::from_millis(1500), cx);
                 let _ = view.render_lyrics_panel("test", white(), true, false, window, cx);
-                assert!(view.cached_lyrics_panel.as_ref().unwrap().row_height > old_height);
+                let cache = view.cached_lyrics_panel.as_ref().unwrap();
+                assert!(cache.scroll_offset > old_offset);
+                assert_eq!(cache.scroll_offset, view.lyric_layout_cache.rows[1].anchor);
             })
+        });
+    }
+
+    #[gpui::test]
+    fn test_lyric_content_spacing(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, _| LyricsView::new(None, font(".SystemUIFont")));
+        let lyrics = Arc::new(lyrics::ParsedLyrics {
+            lines: (0..100)
+                .map(|index| lyrics::LyricLine {
+                    start: Duration::from_secs(index),
+                    text: "歌".into(),
+                    words: if index / 2 % 4 >= 2 {
+                        vec![lyrics::LyricWord {
+                            range: 0.."歌".len(),
+                            start: Duration::from_secs(index),
+                            end: Duration::from_secs(index + 1),
+                            ruby: Some("うた".into()),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    translation: matches!(index / 2 % 4, 1 | 2).then(|| "歌曲".into()),
+                })
+                .collect(),
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.input.content = LyricsContent::Ready(lyrics.clone());
+                for (spacing, distances) in [
+                    (100, [84., 88.4, 103.4, 84.]),
+                    (50, [60.2, 74.4, 89.4, 65.4]),
+                ] {
+                    view.input.line_spacing = spacing;
+                    let _ = view.render_lyrics_panel("test", white(), false, false, window, cx);
+                    for (rows, expected) in view.lyric_layout_cache.rows[..8]
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .zip(distances)
+                    {
+                        assert!(
+                            (f32::from(rows[1].anchor - rows[0].anchor) - expected).abs() < 0.01
+                        );
+                    }
+                    for rows in view.lyric_layout_cache.rows.windows(2) {
+                        let gap = rows[1].top - rows[0].top - rows[0].height;
+                        assert!(f32::from(gap) >= 28. * spacing as f32 / 100. - 0.01);
+                    }
+                    let cache = view.cached_lyrics_panel.as_ref().unwrap();
+                    assert_eq!(cache.rows[0].active.ruby_line_height, px(0.));
+                    assert!(cache.rows[0].translation.is_none());
+                    for row in &cache.rows {
+                        let content_height = row.active.height()
+                            + row
+                                .translation
+                                .as_ref()
+                                .map_or(px(0.), |translation| px(4.) + translation.line_height);
+                        assert!((f32::from(row.height - content_height)).abs() < 0.01);
+                    }
+                }
+
+                view.position = Duration::from_secs(50);
+                view.input.visible = true;
+                view.input.advancing = true;
+                view.reset_lyric_animation_frames();
+                let _ = view.render_lyrics_panel("test", white(), false, false, window, cx);
+                let cache = view.cached_lyrics_panel.as_ref().unwrap();
+                assert_eq!(cache.scroll_offset, view.lyric_layout_cache.rows[50].anchor);
+                assert!(cache.rows.len() < lyrics.lines.len());
+                let visible = view
+                    .lyric_layout_cache
+                    .rows
+                    .iter()
+                    .filter(|row| {
+                        row.top + row.height >= cache.scroll_offset - cache.render_distance
+                            && row.top <= cache.scroll_offset + cache.render_distance
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(cache.rows.len(), visible.len());
+                assert_eq!(cache.render_offset, visible[0].top);
+                assert_eq!(cache.rows[0].top, px(0.));
+                for (row, visible) in cache.rows.iter().zip(visible) {
+                    assert!((f32::from(cache.render_offset + row.top - visible.top)).abs() < 0.01);
+                }
+
+                view.input.content = LyricsContent::Ready(Arc::new(lyrics::parse_lyrics(
+                    "[00:00.00]更新后的歌词",
+                    None,
+                    None,
+                )));
+                let _ = view.render_lyrics_panel("test", white(), false, false, window, cx);
+                let cache = view.cached_lyrics_panel.as_ref().unwrap();
+                assert_eq!(cache.rows.len(), 1);
+                assert_eq!(cache.scroll_anchor, 0.);
+            });
         });
     }
 }

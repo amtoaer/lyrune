@@ -943,7 +943,7 @@ impl Render for SettingsPage {
                                         ))
                                         .child(number_setting(
                                             "歌词行间距",
-                                            "调整歌词页相邻两行之间的距离",
+                                            "调整相邻歌词之间的留白",
                                             &self.settings_inputs.lyric_line_spacing,
                                             "%",
                                             true,

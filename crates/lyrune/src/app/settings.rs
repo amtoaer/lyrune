@@ -984,22 +984,22 @@ impl Render for SettingsPage {
                                             true,
                                         ))
                                         .child(number_setting(
-                                            "主题底色混合下限",
-                                            "先按此比例混入主题底色；若仍超过彩度上限，会继续增加混合比例",
+                                            "封面背景混色下限",
+                                            "为封面背景引入主题色调，封面背景至少会混入该比例的主题背景色",
                                             &self.settings_inputs.lyric_background_min_overlay,
                                             "%",
                                             true,
                                         ))
                                         .child(number_setting(
-                                            "背景彩度上限",
-                                            "限制混色后的鲜艳程度，越低通常需要混入越多主题底色；实际下限受主题底色限制",
+                                            "封面背景彩度上限",
+                                            "封面背景的最高彩度，如果混色后彩度不满足会继续增加混合比例",
                                             &self.settings_inputs.lyric_background_chroma,
                                             "",
                                             true,
                                         ))
                                         .child(number_setting(
                                             "文字对比度下限",
-                                            "完成混色后，若文字对比度仍低于此值，再调整背景明度；实际可达值受主题颜色限制",
+                                            "混色后若文字对比度低于此值则调整背景明度；实际可达值受主题颜色限制",
                                             &self.settings_inputs.lyric_background_contrast,
                                             "∶1",
                                             true,

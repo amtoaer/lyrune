@@ -21,7 +21,7 @@ use crate::settings::{
     DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT, FrameRate,
 };
 
-const LYRIC_ROW_GAP: f32 = 44.;
+const LYRIC_ANCHOR_SPACING_EM: f32 = 3.;
 const LYRIC_EDGE_FADE_DISTANCE: f32 = 48.;
 const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
@@ -482,32 +482,35 @@ impl LyricLayoutCache {
             font: font.clone(),
         });
         let scale = scale as f32 / 100.;
-        let gap = px(LYRIC_ROW_GAP * scale * spacing as f32 / 100.);
-        let line_height = lyric_font_size(LyricLayoutStyle::Active, compact, scale) * 1.3;
-        let mut top = px(0.);
-        self.rows = lyrics
-            .lines
-            .iter()
-            .map(|line| {
-                let ruby_height = ruby_line_height(line, narrow, scale);
-                let translation_height = line
-                    .translation
-                    .as_ref()
-                    .map_or(px(0.), |_| px(4.) + translation_line_height(narrow, scale));
-                let height = gap + ruby_height + line_height + translation_height;
-                let row = CachedLyricRow {
-                    top,
-                    height,
-                    anchor: top + gap / 2. + ruby_height + line_height / 2.,
-                    normal: None,
-                    active: None,
-                    translation: None,
-                    translation_prepared: false,
-                };
-                top += height;
-                row
-            })
-            .collect();
+        let spacing = spacing as f32 / 100.;
+        let font_size = lyric_font_size(LyricLayoutStyle::Active, compact, scale);
+        let line_height = font_size * 1.3;
+        let gap = font_size * spacing;
+        let anchor_spacing =
+            line_height + (font_size * LYRIC_ANCHOR_SPACING_EM - line_height) * spacing;
+        self.rows = Vec::with_capacity(lyrics.lines.len());
+        for line in &lyrics.lines {
+            let ruby_height = ruby_line_height(line, narrow, scale);
+            let translation_height = line
+                .translation
+                .as_ref()
+                .map_or(px(0.), |_| px(4.) + translation_line_height(narrow, scale));
+            let height = ruby_height + line_height + translation_height;
+            let anchor_offset = ruby_height + line_height / 2.;
+            let top = self.rows.last().map_or(px(0.), |previous| {
+                (previous.anchor + anchor_spacing - anchor_offset)
+                    .max(previous.top + previous.height + gap)
+            });
+            self.rows.push(CachedLyricRow {
+                top,
+                height,
+                anchor: top + anchor_offset,
+                normal: None,
+                active: None,
+                translation: None,
+                translation_prepared: false,
+            });
+        }
         true
     }
 
@@ -844,18 +847,8 @@ impl Element for PreparedLyricsElement {
                 }
                 let opacity = row.opacity * edge_opacity;
                 let lyric_height = row.normal.height().max(row.active.height());
-                let content_height = lyric_height
-                    + row
-                        .translation
-                        .as_ref()
-                        .map_or(px(0.), |translation| px(4.) + translation.line_height);
-                let lyric_bounds = Bounds::new(
-                    point(
-                        row_bounds.origin.x,
-                        row_bounds.origin.y + (row_bounds.size.height - content_height) / 2.,
-                    ),
-                    size(row_bounds.size.width, lyric_height),
-                );
+                let lyric_bounds =
+                    Bounds::new(row_bounds.origin, size(row_bounds.size.width, lyric_height));
                 let _ = Self::paint_line(
                     &row.normal,
                     point(
@@ -1770,13 +1763,13 @@ mod tests {
                 let cache = view.cached_lyrics_panel.as_ref().unwrap();
                 assert_eq!(cache.highlight_position, Duration::from_millis(1500));
                 assert_eq!(cache.scroll_offset, view.lyric_layout_cache.rows[1].anchor);
-                let old_height = cache.rows[0].height;
+                let old_offset = cache.scroll_offset;
                 let mut next = input();
                 next.line_spacing = 120;
                 view.set_input(next, Duration::from_millis(1500), cx);
                 let _ = view.render_lyrics_panel("test", white(), true, false, window, cx);
                 let cache = view.cached_lyrics_panel.as_ref().unwrap();
-                assert!(cache.rows[0].height > old_height);
+                assert!(cache.scroll_offset > old_offset);
                 assert_eq!(cache.scroll_offset, view.lyric_layout_cache.rows[1].anchor);
             })
         });
@@ -1791,7 +1784,7 @@ mod tests {
                 .map(|index| lyrics::LyricLine {
                     start: Duration::from_secs(index),
                     text: "歌".into(),
-                    words: if index % 4 >= 2 {
+                    words: if index / 2 % 4 >= 2 {
                         vec![lyrics::LyricWord {
                             range: 0.."歌".len(),
                             start: Duration::from_secs(index),
@@ -1801,34 +1794,44 @@ mod tests {
                     } else {
                         Vec::new()
                     },
-                    translation: matches!(index % 4, 1 | 2).then(|| "歌曲".into()),
+                    translation: matches!(index / 2 % 4, 1 | 2).then(|| "歌曲".into()),
                 })
                 .collect(),
         });
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.input.content = LyricsContent::Ready(lyrics.clone());
-                let _ = view.render_lyrics_panel("test", white(), false, false, window, cx);
-                let heights = [80.4, 104.4, 119.4, 95.4];
-                let cache = view.cached_lyrics_panel.as_ref().unwrap();
-                assert!(cache.rows.len() >= heights.len());
-                for (row, expected) in cache.rows.iter().zip(heights) {
-                    assert!((f32::from(row.height) - expected).abs() < 0.01);
-                }
-                assert_eq!(cache.rows[0].active.ruby_line_height, px(0.));
-                assert!(cache.rows[0].translation.is_none());
-
-                view.input.line_spacing = 50;
-                let _ = view.render_lyrics_panel("test", white(), false, false, window, cx);
-                let cache = view.cached_lyrics_panel.as_ref().unwrap();
-                for (row, expected) in cache.rows.iter().zip(heights) {
-                    assert!((f32::from(row.height) - (expected - 22.)).abs() < 0.01);
-                    let content_height = row.active.height()
-                        + row
-                            .translation
-                            .as_ref()
-                            .map_or(px(0.), |translation| px(4.) + translation.line_height);
-                    assert!((f32::from(row.height - content_height) - 22.).abs() < 0.01);
+                for (spacing, distances) in [
+                    (100, [84., 88.4, 103.4, 84.]),
+                    (50, [60.2, 74.4, 89.4, 65.4]),
+                ] {
+                    view.input.line_spacing = spacing;
+                    let _ = view.render_lyrics_panel("test", white(), false, false, window, cx);
+                    for (rows, expected) in view.lyric_layout_cache.rows[..8]
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .zip(distances)
+                    {
+                        assert!(
+                            (f32::from(rows[1].anchor - rows[0].anchor) - expected).abs() < 0.01
+                        );
+                    }
+                    for rows in view.lyric_layout_cache.rows.windows(2) {
+                        let gap = rows[1].top - rows[0].top - rows[0].height;
+                        assert!(f32::from(gap) >= 28. * spacing as f32 / 100. - 0.01);
+                    }
+                    let cache = view.cached_lyrics_panel.as_ref().unwrap();
+                    assert_eq!(cache.rows[0].active.ruby_line_height, px(0.));
+                    assert!(cache.rows[0].translation.is_none());
+                    for row in &cache.rows {
+                        let content_height = row.active.height()
+                            + row
+                                .translation
+                                .as_ref()
+                                .map_or(px(0.), |translation| px(4.) + translation.line_height);
+                        assert!((f32::from(row.height - content_height)).abs() < 0.01);
+                    }
                 }
 
                 view.position = Duration::from_secs(50);
@@ -1839,15 +1842,20 @@ mod tests {
                 let cache = view.cached_lyrics_panel.as_ref().unwrap();
                 assert_eq!(cache.scroll_offset, view.lyric_layout_cache.rows[50].anchor);
                 assert!(cache.rows.len() < lyrics.lines.len());
-                assert!(cache.render_offset <= cache.scroll_offset - cache.render_distance);
-                let last = cache.rows.last().unwrap();
-                assert!(
-                    cache.render_offset + last.top + last.height
-                        >= cache.scroll_offset + cache.render_distance
-                );
+                let visible = view
+                    .lyric_layout_cache
+                    .rows
+                    .iter()
+                    .filter(|row| {
+                        row.top + row.height >= cache.scroll_offset - cache.render_distance
+                            && row.top <= cache.scroll_offset + cache.render_distance
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(cache.rows.len(), visible.len());
+                assert_eq!(cache.render_offset, visible[0].top);
                 assert_eq!(cache.rows[0].top, px(0.));
-                for rows in cache.rows.windows(2) {
-                    assert!((f32::from(rows[0].top + rows[0].height - rows[1].top)).abs() < 0.01);
+                for (row, visible) in cache.rows.iter().zip(visible) {
+                    assert!((f32::from(cache.render_offset + row.top - visible.top)).abs() < 0.01);
                 }
 
                 view.input.content = LyricsContent::Ready(Arc::new(lyrics::parse_lyrics(

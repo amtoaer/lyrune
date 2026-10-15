@@ -2510,7 +2510,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2578,7 +2578,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-apple"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "anyhow",
  "async-task",
@@ -2619,7 +2619,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-collections"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "gpui-pre-util",
  "indexmap",
@@ -2629,7 +2629,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-derive-refineable"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2639,7 +2639,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-http-client"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2657,7 +2657,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-linux"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2701,7 +2701,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-macos"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -2740,7 +2740,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-macros"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "heck 0.5.0",
  "proc-macro-crate",
@@ -2752,7 +2752,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -2766,7 +2766,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-refineable"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "gpui-pre-derive-refineable",
 ]
@@ -2824,7 +2824,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-scheduler"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "async-task",
  "backtrace",
@@ -2840,7 +2840,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-shared-string"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "schemars",
  "serde",
@@ -2850,7 +2850,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-sum-tree"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "gpui-pre-ztracing",
  "heapless",
@@ -2861,7 +2861,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-util"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "anyhow",
  "log",
@@ -2871,7 +2871,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-web"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2900,7 +2900,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2926,7 +2926,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -2955,7 +2955,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-ztracing"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 dependencies = [
  "gpui-pre-ztracing-macro",
  "tracing",
@@ -2964,7 +2964,7 @@ dependencies = [
 [[package]]
 name = "gpui-pre-ztracing-macro"
 version = "0.3.9"
-source = "git+https://github.com/amtoaer/zed?rev=b53d2343e5b238ca090fa321187180d3e37f7d7c#b53d2343e5b238ca090fa321187180d3e37f7d7c"
+source = "git+https://github.com/amtoaer/zed?rev=a417dfbfbb89b5a90e69b22ee593456301c37fe9#a417dfbfbb89b5a90e69b22ee593456301c37fe9"
 
 [[package]]
 name = "granit-parser"

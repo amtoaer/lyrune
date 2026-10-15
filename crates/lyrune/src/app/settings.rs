@@ -1551,15 +1551,15 @@ mod tests {
             [
                 (
                     page.settings_inputs.lyric_background_min_overlay.clone(),
-                    (45, 0.14, 3.5),
+                    (45, 0.12, 4.),
                 ),
                 (
                     page.settings_inputs.lyric_background_chroma.clone(),
-                    (45, 0.15, 3.5),
+                    (45, 0.13, 4.),
                 ),
                 (
                     page.settings_inputs.lyric_background_contrast.clone(),
-                    (45, 0.15, 3.6),
+                    (45, 0.13, 4.1),
                 ),
             ]
         });
@@ -1579,7 +1579,7 @@ mod tests {
         cx.simulate_input("3.2");
         assert!(actions.borrow().is_empty());
         cx.simulate_keystrokes("enter");
-        assert_eq!(actions.borrow().last(), Some(&(45, 0.15, 3.2)));
+        assert_eq!(actions.borrow().last(), Some(&(45, 0.13, 3.2)));
         cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("6.5");
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1596,11 +1596,11 @@ mod tests {
         cx.update(|window, cx| min_overlay.update(cx, |input, cx| input.focus(window, cx)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.run_until_parked();
-        assert_eq!(actions.borrow().last(), Some(&(45, 0.15, 6.5)));
+        assert_eq!(actions.borrow().last(), Some(&(45, 0.13, 6.5)));
         cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("0");
         cx.simulate_keystrokes("enter");
-        assert_eq!(actions.borrow().last(), Some(&(0, 0.15, 6.5)));
+        assert_eq!(actions.borrow().last(), Some(&(0, 0.13, 6.5)));
     }
 
     #[gpui::test]

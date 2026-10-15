@@ -21,7 +21,7 @@ use crate::settings::{
     DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT, FrameRate,
 };
 
-const LYRIC_ROW_GAP: f32 = 28.;
+const LYRIC_ROW_GAP: f32 = 44.;
 const LYRIC_EDGE_FADE_DISTANCE: f32 = 48.;
 const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
@@ -1809,7 +1809,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.input.content = LyricsContent::Ready(lyrics.clone());
                 let _ = view.render_lyrics_panel("test", white(), false, false, window, cx);
-                let heights = [64.4, 88.4, 103.4, 79.4];
+                let heights = [80.4, 104.4, 119.4, 95.4];
                 let cache = view.cached_lyrics_panel.as_ref().unwrap();
                 assert!(cache.rows.len() >= heights.len());
                 for (row, expected) in cache.rows.iter().zip(heights) {
@@ -1822,13 +1822,13 @@ mod tests {
                 let _ = view.render_lyrics_panel("test", white(), false, false, window, cx);
                 let cache = view.cached_lyrics_panel.as_ref().unwrap();
                 for (row, expected) in cache.rows.iter().zip(heights) {
-                    assert!((f32::from(row.height) - (expected - 14.)).abs() < 0.01);
+                    assert!((f32::from(row.height) - (expected - 22.)).abs() < 0.01);
                     let content_height = row.active.height()
                         + row
                             .translation
                             .as_ref()
                             .map_or(px(0.), |translation| px(4.) + translation.line_height);
-                    assert!((f32::from(row.height - content_height) - 14.).abs() < 0.01);
+                    assert!((f32::from(row.height - content_height) - 22.).abs() < 0.01);
                 }
 
                 view.position = Duration::from_secs(50);

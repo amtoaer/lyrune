@@ -23,9 +23,9 @@ pub const MAX_NAVIGATION_HISTORY_LIMIT: usize = 100;
 pub const DEFAULT_SCALE_PERCENT: u32 = 100;
 pub const MIN_SCALE_PERCENT: u32 = 50;
 pub const MAX_LYRIC_SCALE_PERCENT: u32 = 300;
-pub const DEFAULT_LYRIC_BACKGROUND_CHROMA: f32 = 0.08;
+pub const DEFAULT_LYRIC_BACKGROUND_CHROMA: f32 = 0.14;
 pub const DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT: u32 = 40;
-pub const DEFAULT_LYRIC_BACKGROUND_CONTRAST: f32 = 4.5;
+pub const DEFAULT_LYRIC_BACKGROUND_CONTRAST: f32 = 3.5;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PersistedPlayback {
@@ -657,9 +657,9 @@ mod tests {
         assert_eq!(settings.lyric_font_families, [".SystemUIFont"]);
         assert_eq!(settings.lyric_font_scale, DEFAULT_SCALE_PERCENT);
         assert_eq!(settings.lyric_line_spacing, DEFAULT_SCALE_PERCENT);
-        assert_eq!(settings.lyric_background_chroma, 0.08);
+        assert_eq!(settings.lyric_background_chroma, 0.14);
         assert_eq!(settings.lyric_background_min_overlay_percent, 40);
-        assert_eq!(settings.lyric_background_contrast, 4.5);
+        assert_eq!(settings.lyric_background_contrast, 3.5);
         assert_eq!(settings.audio_cache_limit_gb, DEFAULT_AUDIO_CACHE_LIMIT_GB);
         assert_eq!(settings.image_cache_capacity, 80);
         assert_eq!(
@@ -787,14 +787,14 @@ mod tests {
     #[test]
     fn test_legacy_background_settings() {
         let settings: AppSettings = serde_json::from_str(
-            r#"{"lyric_background_overlay_percent": 65, "lyric_background_contrast": 3.5, "lyric_line_spacing": 80}"#,
+            r#"{"lyric_background_overlay_percent": 65, "lyric_background_contrast": 4.5, "lyric_line_spacing": 80}"#,
         )
         .unwrap();
         assert_eq!(
             settings.lyric_background_chroma,
             DEFAULT_LYRIC_BACKGROUND_CHROMA
         );
-        assert_eq!(settings.lyric_background_contrast, 3.5);
+        assert_eq!(settings.lyric_background_contrast, 4.5);
         assert_eq!(settings.lyric_background_min_overlay_percent, 40);
         assert_eq!(settings.lyric_line_spacing, 80);
     }
@@ -823,7 +823,7 @@ mod tests {
             lyric_line_spacing: 80,
             lyric_background_min_overlay_percent: 25,
             lyric_background_chroma: 0.12,
-            lyric_background_contrast: 3.5,
+            lyric_background_contrast: 4.5,
             audio_cache_limit_gb: 24,
             image_cache_capacity: 72,
             navigation_history_limit: 16,

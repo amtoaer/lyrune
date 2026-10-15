@@ -984,22 +984,22 @@ impl Render for SettingsPage {
                                             true,
                                         ))
                                         .child(number_setting(
-                                            "主题背景最小混合比例",
-                                            "至少混入此比例的主题背景色，彩度过高时自动增加",
+                                            "主题底色混合下限",
+                                            "背景至少混入此比例的主题底色，彩度过高时自动增加混合比例",
                                             &self.settings_inputs.lyric_background_min_overlay,
                                             "%",
                                             true,
                                         ))
                                         .child(number_setting(
                                             "背景彩度上限",
-                                            "自动混入主题背景色以降低鲜艳程度，实际下限受主题背景彩度限制",
+                                            "限制背景的鲜艳程度，数值越小越柔和；实际下限受主题底色限制",
                                             &self.settings_inputs.lyric_background_chroma,
                                             "",
                                             true,
                                         ))
                                         .child(number_setting(
-                                            "最低对比度",
-                                            "仅在对比度不足时调整背景明度，实际可达范围受主题颜色限制",
+                                            "文字对比度下限",
+                                            "仅在文字与背景的对比度不足时调整背景明度，实际可达值受主题颜色限制",
                                             &self.settings_inputs.lyric_background_contrast,
                                             "∶1",
                                             true,
@@ -1551,15 +1551,15 @@ mod tests {
             [
                 (
                     page.settings_inputs.lyric_background_min_overlay.clone(),
-                    (45, 0.08, 4.5),
+                    (45, 0.14, 3.5),
                 ),
                 (
                     page.settings_inputs.lyric_background_chroma.clone(),
-                    (45, 0.09, 4.5),
+                    (45, 0.15, 3.5),
                 ),
                 (
                     page.settings_inputs.lyric_background_contrast.clone(),
-                    (45, 0.09, 4.6),
+                    (45, 0.15, 3.6),
                 ),
             ]
         });
@@ -1579,7 +1579,7 @@ mod tests {
         cx.simulate_input("3.2");
         assert!(actions.borrow().is_empty());
         cx.simulate_keystrokes("enter");
-        assert_eq!(actions.borrow().last(), Some(&(45, 0.09, 3.2)));
+        assert_eq!(actions.borrow().last(), Some(&(45, 0.15, 3.2)));
         cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("6.5");
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1596,11 +1596,11 @@ mod tests {
         cx.update(|window, cx| min_overlay.update(cx, |input, cx| input.focus(window, cx)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.run_until_parked();
-        assert_eq!(actions.borrow().last(), Some(&(45, 0.09, 6.5)));
+        assert_eq!(actions.borrow().last(), Some(&(45, 0.15, 6.5)));
         cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("0");
         cx.simulate_keystrokes("enter");
-        assert_eq!(actions.borrow().last(), Some(&(0, 0.09, 6.5)));
+        assert_eq!(actions.borrow().last(), Some(&(0, 0.15, 6.5)));
     }
 
     #[gpui::test]

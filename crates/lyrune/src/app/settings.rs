@@ -992,7 +992,7 @@ impl Render for SettingsPage {
                                         ))
                                         .child(number_setting(
                                             "封面背景彩度上限",
-                                            "封面背景的最高彩度，如果混色后彩度不满足会继续增加混合比例",
+                                            "封面背景的最高彩度，如果最低混色后彩度高于上限会继续增加混合比例",
                                             &self.settings_inputs.lyric_background_chroma,
                                             "",
                                             true,

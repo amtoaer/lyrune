@@ -91,6 +91,7 @@ struct BlurredCoverSource {
     path: Arc<Path>,
     background: Hsla,
     foreground: Hsla,
+    min_overlay_percent: u32,
     chroma_bits: u32,
     contrast_bits: u32,
 }
@@ -242,6 +243,7 @@ impl Asset for BlurredCoverImage {
                         &source.path,
                         source.background,
                         source.foreground,
+                        source.min_overlay_percent,
                         f32::from_bits(source.chroma_bits),
                         f32::from_bits(source.contrast_bits),
                     )
@@ -266,13 +268,21 @@ pub fn blurred_image_source(
     url: String,
     background: Hsla,
     foreground: Hsla,
+    min_overlay_percent: u32,
     chroma: f32,
     contrast: f32,
 ) -> ImageSource {
     let source = url;
     (move |window: &mut Window, cx: &mut App| {
         let cover = match blurred_cover(
-            &source, background, foreground, chroma, contrast, window, cx,
+            &source,
+            background,
+            foreground,
+            min_overlay_percent,
+            chroma,
+            contrast,
+            window,
+            cx,
         )? {
             Ok(cover) => cover,
             Err(error) => return Some(Err(error)),
@@ -282,10 +292,12 @@ pub fn blurred_image_source(
     .into()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn blurred_cover(
     url: &str,
     background: Hsla,
     foreground: Hsla,
+    min_overlay_percent: u32,
     chroma: f32,
     contrast: f32,
     window: &mut Window,
@@ -300,6 +312,7 @@ fn blurred_cover(
             path,
             background,
             foreground,
+            min_overlay_percent,
             chroma_bits: chroma.to_bits(),
             contrast_bits: contrast.to_bits(),
         },
@@ -311,6 +324,7 @@ fn generate_blurred_cover(
     path: &Path,
     background: Hsla,
     foreground: Hsla,
+    min_overlay_percent: u32,
     chroma: f32,
     contrast: f32,
 ) -> anyhow::Result<Arc<Image>> {
@@ -323,7 +337,14 @@ fn generate_blurred_cover(
     let blurred = image
         .resize_to_fill(BLURRED_COVER_SIZE, BLURRED_COVER_SIZE, FilterType::Triangle)
         .blur(10.);
-    let blurred = tone_blurred_cover(blurred, background, foreground, chroma, contrast);
+    let blurred = tone_blurred_cover(
+        blurred,
+        background,
+        foreground,
+        min_overlay_percent,
+        chroma,
+        contrast,
+    );
     let mut bytes = Cursor::new(Vec::new());
     blurred
         .write_to(&mut bytes, image::ImageFormat::Png)
@@ -338,6 +359,7 @@ fn tone_blurred_cover(
     image: image::DynamicImage,
     background: Hsla,
     foreground: Hsla,
+    min_overlay_percent: u32,
     chroma: f32,
     contrast: f32,
 ) -> image::RgbImage {
@@ -369,9 +391,10 @@ fn tone_blurred_cover(
             })
             .collect::<Vec<Oklch>>()
     };
-    let mut colors = mix(0.);
+    let min_overlay = min_overlay_percent as f32 / 100.;
+    let mut colors = mix(min_overlay);
     if colors.iter().any(|color| color.chroma > chroma_limit) {
-        let mut lower = 0.;
+        let mut lower = min_overlay;
         let mut upper = 1.;
         colors = mix(1.);
         for _ in 0..12 {
@@ -698,7 +721,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::settings::{DEFAULT_LYRIC_BACKGROUND_CHROMA, DEFAULT_LYRIC_BACKGROUND_CONTRAST};
+    use crate::settings::{
+        DEFAULT_LYRIC_BACKGROUND_CHROMA, DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+        DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+    };
 
     const LYRIC_TARGET_CONTRAST: f32 = DEFAULT_LYRIC_BACKGROUND_CONTRAST;
 
@@ -961,6 +987,7 @@ mod tests {
             &source,
             background,
             foreground,
+            DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
             DEFAULT_LYRIC_BACKGROUND_CHROMA,
             DEFAULT_LYRIC_BACKGROUND_CONTRAST,
         )
@@ -993,6 +1020,7 @@ mod tests {
                 image::DynamicImage::ImageRgb8(original.clone()),
                 background.into(),
                 foreground.into(),
+                DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
                 DEFAULT_LYRIC_BACKGROUND_CHROMA,
                 DEFAULT_LYRIC_BACKGROUND_CONTRAST,
             );
@@ -1019,21 +1047,34 @@ mod tests {
     }
 
     #[test]
-    fn test_blurred_cover_preserves_muted_colors() {
+    fn test_blurred_cover_minimum_mix() {
         for (background, foreground, original) in [
             (0x1f1f28, 0xdcd7ba, [42, 40, 50]),
             (0xf2ecbc, 0x545464, [240, 235, 225]),
         ] {
             let background = gpui::rgb(background);
             let image = image::RgbImage::from_pixel(1, 1, image::Rgb(original));
-            let toned = tone_blurred_cover(
-                image.into(),
-                background.into(),
-                gpui::rgb(foreground).into(),
-                DEFAULT_LYRIC_BACKGROUND_CHROMA,
-                DEFAULT_LYRIC_BACKGROUND_CONTRAST,
-            );
-            assert_eq!(toned.get_pixel(0, 0).0, original);
+            for min_overlay_percent in [0, 40, 100] {
+                let toned = tone_blurred_cover(
+                    image.clone().into(),
+                    background.into(),
+                    gpui::rgb(foreground).into(),
+                    min_overlay_percent,
+                    DEFAULT_LYRIC_BACKGROUND_CHROMA,
+                    DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+                );
+                let [r, g, b] = original.map(|channel| f32::from(channel) / 255.);
+                let expected = Rgba { r, g, b, a: 1. }
+                    .blend(background.opacity(min_overlay_percent as f32 / 100.));
+                for (actual, expected) in toned
+                    .get_pixel(0, 0)
+                    .0
+                    .into_iter()
+                    .zip([expected.r, expected.g, expected.b])
+                {
+                    assert!((f32::from(actual) - expected * 255.).abs() <= 1.);
+                }
+            }
         }
     }
 
@@ -1048,6 +1089,7 @@ mod tests {
                     original.clone().into(),
                     background.into(),
                     foreground.into(),
+                    0,
                     chroma,
                     contrast,
                 );
@@ -1087,6 +1129,7 @@ mod tests {
                     image.into(),
                     background.into(),
                     Rgba::try_from(palette.foreground).unwrap().into(),
+                    DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
                     DEFAULT_LYRIC_BACKGROUND_CHROMA,
                     DEFAULT_LYRIC_BACKGROUND_CONTRAST,
                 );

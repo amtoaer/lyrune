@@ -24,8 +24,6 @@ use crate::runtime::RUNTIME;
 const IMAGE_CACHE_DIR: &str = "images-v1";
 const THUMBNAIL_CACHE_DIR: &str = "thumbnails-v1";
 pub(crate) const BLURRED_COVER_SIZE: u32 = 128;
-pub(crate) const LYRIC_BACKGROUND_OVERLAY_OPACITY: f32 = 0.4;
-const LYRIC_TARGET_CONTRAST: f32 = 4.5;
 
 #[derive(Clone)]
 enum CachedImageFile {}
@@ -93,6 +91,8 @@ struct BlurredCoverSource {
     path: Arc<Path>,
     background: Hsla,
     foreground: Hsla,
+    overlay_percent: u32,
+    contrast_bits: u32,
 }
 
 pub struct CachedImageCache {
@@ -238,7 +238,13 @@ impl Asset for BlurredCoverImage {
         async move {
             RUNTIME
                 .spawn_blocking(move || {
-                    generate_blurred_cover(&source.path, source.background, source.foreground)
+                    generate_blurred_cover(
+                        &source.path,
+                        source.background,
+                        source.foreground,
+                        source.overlay_percent,
+                        f32::from_bits(source.contrast_bits),
+                    )
                 })
                 .await
                 .context("等待模糊封面生成任务失败")?
@@ -256,10 +262,24 @@ pub fn cached_image_source(url: String, size: Pixels, scale_factor: f32) -> Imag
     }
 }
 
-pub fn blurred_image_source(url: String, background: Hsla, foreground: Hsla) -> ImageSource {
+pub fn blurred_image_source(
+    url: String,
+    background: Hsla,
+    foreground: Hsla,
+    overlay_percent: u32,
+    contrast: f32,
+) -> ImageSource {
     let source = url;
     (move |window: &mut Window, cx: &mut App| {
-        let cover = match blurred_cover(&source, background, foreground, window, cx)? {
+        let cover = match blurred_cover(
+            &source,
+            background,
+            foreground,
+            overlay_percent,
+            contrast,
+            window,
+            cx,
+        )? {
             Ok(cover) => cover,
             Err(error) => return Some(Err(error)),
         };
@@ -272,6 +292,8 @@ fn blurred_cover(
     url: &str,
     background: Hsla,
     foreground: Hsla,
+    overlay_percent: u32,
+    contrast: f32,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Result<Arc<Image>, ImageCacheError>> {
@@ -284,6 +306,8 @@ fn blurred_cover(
             path,
             background,
             foreground,
+            overlay_percent,
+            contrast_bits: contrast.to_bits(),
         },
         cx,
     )
@@ -293,6 +317,8 @@ fn generate_blurred_cover(
     path: &Path,
     background: Hsla,
     foreground: Hsla,
+    overlay_percent: u32,
+    contrast: f32,
 ) -> anyhow::Result<Arc<Image>> {
     let image = image::ImageReader::open(path)
         .context("无法打开待模糊的封面")?
@@ -303,7 +329,7 @@ fn generate_blurred_cover(
     let blurred = image
         .resize_to_fill(BLURRED_COVER_SIZE, BLURRED_COVER_SIZE, FilterType::Triangle)
         .blur(10.);
-    let blurred = tone_blurred_cover(blurred, background, foreground);
+    let blurred = tone_blurred_cover(blurred, background, foreground, overlay_percent, contrast);
     let mut bytes = Cursor::new(Vec::new());
     blurred
         .write_to(&mut bytes, image::ImageFormat::Png)
@@ -318,15 +344,15 @@ fn tone_blurred_cover(
     image: image::DynamicImage,
     background: Hsla,
     foreground: Hsla,
+    overlay_percent: u32,
+    contrast: f32,
 ) -> image::RgbImage {
-    let overlay = background
-        .opacity(LYRIC_BACKGROUND_OVERLAY_OPACITY)
-        .to_rgb();
+    let overlay = background.opacity(overlay_percent as f32 / 100.).to_rgb();
     let background = background.to_rgb();
     let foreground_luminance = relative_luminance(foreground.to_rgb());
     let light_foreground = foreground_luminance > relative_luminance(background);
     // 为纹理采样、切歌合成的舍入留少量余量；最终仍在 sRGB 中检查对比度。
-    let contrast = LYRIC_TARGET_CONTRAST + 0.1;
+    let contrast = contrast + 0.1;
     let luminance_limit = if light_foreground {
         (foreground_luminance + 0.05) / contrast - 0.05
     } else {
@@ -658,6 +684,13 @@ mod tests {
     };
 
     use super::*;
+    use crate::settings::{
+        DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT,
+    };
+
+    const LYRIC_BACKGROUND_OVERLAY_OPACITY: f32 =
+        DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT as f32 / 100.;
+    const LYRIC_TARGET_CONTRAST: f32 = DEFAULT_LYRIC_BACKGROUND_CONTRAST;
 
     struct CachedCover {
         source: Resource,
@@ -914,7 +947,14 @@ mod tests {
 
         let background = gpui::rgb(0x1f1f28).into();
         let foreground = gpui::rgb(0xdcd7ba).into();
-        let blurred = generate_blurred_cover(&source, background, foreground).unwrap();
+        let blurred = generate_blurred_cover(
+            &source,
+            background,
+            foreground,
+            DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT,
+            DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+        )
+        .unwrap();
         let decoded = image::load_from_memory(&blurred.bytes).unwrap();
 
         assert_eq!(blurred.format, ImageFormat::Png);
@@ -943,6 +983,8 @@ mod tests {
                 image::DynamicImage::ImageRgb8(original.clone()),
                 background.into(),
                 foreground.into(),
+                DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT,
+                DEFAULT_LYRIC_BACKGROUND_CONTRAST,
             );
             let foreground_luminance = relative_luminance(foreground);
             for (original, toned) in original.pixels().zip(toned.pixels()) {
@@ -1007,8 +1049,44 @@ mod tests {
                 image.into(),
                 background.into(),
                 gpui::rgb(foreground).into(),
+                DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT,
+                DEFAULT_LYRIC_BACKGROUND_CONTRAST,
             );
             assert_eq!(toned.get_pixel(0, 0).0, original);
+        }
+    }
+
+    #[test]
+    fn test_blurred_cover_custom_settings() {
+        for (background, foreground) in [(0x1f1f28, 0xdcd7ba), (0xf2ecbc, 0x545464)] {
+            let background = gpui::rgb(background);
+            let foreground = gpui::rgb(foreground);
+            let original = image::RgbImage::from_pixel(1, 1, image::Rgb([150, 140, 180]));
+            let results = [(0, 3.), (40, 3.), (40, 6.)].map(|(overlay_percent, contrast)| {
+                let toned = tone_blurred_cover(
+                    original.clone().into(),
+                    background.into(),
+                    foreground.into(),
+                    overlay_percent,
+                    contrast,
+                );
+                let [r, g, b] = toned
+                    .get_pixel(0, 0)
+                    .0
+                    .map(|channel| f32::from(channel) / 255.);
+                let displayed = Rgba { r, g, b, a: 1. }
+                    .blend(background.opacity(overlay_percent as f32 / 100.));
+                let foreground_luminance = relative_luminance(foreground);
+                let background_luminance = relative_luminance(displayed);
+                assert!(
+                    (foreground_luminance.max(background_luminance) + 0.05)
+                        / (foreground_luminance.min(background_luminance) + 0.05)
+                        >= contrast
+                );
+                toned
+            });
+            assert_ne!(results[0], results[1]);
+            assert_ne!(results[1], results[2]);
         }
     }
 
@@ -1025,6 +1103,8 @@ mod tests {
                     image.into(),
                     background.into(),
                     Rgba::try_from(palette.foreground).unwrap().into(),
+                    DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT,
+                    DEFAULT_LYRIC_BACKGROUND_CONTRAST,
                 );
                 let [r, g, b] = toned
                     .get_pixel(0, 0)

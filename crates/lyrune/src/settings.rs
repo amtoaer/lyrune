@@ -23,8 +23,9 @@ pub const MAX_NAVIGATION_HISTORY_LIMIT: usize = 100;
 pub const DEFAULT_SCALE_PERCENT: u32 = 100;
 pub const MIN_SCALE_PERCENT: u32 = 50;
 pub const MAX_LYRIC_SCALE_PERCENT: u32 = 300;
-pub const DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT: u32 = 40;
-pub const DEFAULT_LYRIC_BACKGROUND_CONTRAST: f32 = 4.5;
+pub const DEFAULT_LYRIC_BACKGROUND_CHROMA: f32 = 0.12;
+pub const DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT: u32 = 40;
+pub const DEFAULT_LYRIC_BACKGROUND_CONTRAST: f32 = 4.;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PersistedPlayback {
@@ -249,7 +250,8 @@ pub struct AppSettings {
     pub lyric_font_families: Vec<String>,
     pub lyric_font_scale: u32,
     pub lyric_line_spacing: u32,
-    pub lyric_background_overlay_percent: u32,
+    pub lyric_background_min_overlay_percent: u32,
+    pub lyric_background_chroma: f32,
     pub lyric_background_contrast: f32,
     pub audio_cache_limit_gb: u64,
     pub image_cache_capacity: usize,
@@ -282,7 +284,8 @@ impl Default for AppSettings {
             lyric_font_families: default_lyric_font_families(),
             lyric_font_scale: DEFAULT_SCALE_PERCENT,
             lyric_line_spacing: DEFAULT_SCALE_PERCENT,
-            lyric_background_overlay_percent: DEFAULT_LYRIC_BACKGROUND_OVERLAY_PERCENT,
+            lyric_background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+            lyric_background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
             lyric_background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
             audio_cache_limit_gb: DEFAULT_AUDIO_CACHE_LIMIT_GB,
             image_cache_capacity: DEFAULT_IMAGE_CACHE_CAPACITY,
@@ -322,7 +325,13 @@ impl AppSettings {
         self.lyric_line_spacing = self
             .lyric_line_spacing
             .clamp(MIN_SCALE_PERCENT, MAX_LYRIC_SCALE_PERCENT);
-        self.lyric_background_overlay_percent = self.lyric_background_overlay_percent.min(100);
+        self.lyric_background_min_overlay_percent =
+            self.lyric_background_min_overlay_percent.min(100);
+        self.lyric_background_chroma = if self.lyric_background_chroma.is_finite() {
+            self.lyric_background_chroma.clamp(0., 0.4)
+        } else {
+            DEFAULT_LYRIC_BACKGROUND_CHROMA
+        };
         self.lyric_background_contrast = if self.lyric_background_contrast.is_finite() {
             self.lyric_background_contrast.clamp(1., 21.)
         } else {
@@ -648,8 +657,9 @@ mod tests {
         assert_eq!(settings.lyric_font_families, [".SystemUIFont"]);
         assert_eq!(settings.lyric_font_scale, DEFAULT_SCALE_PERCENT);
         assert_eq!(settings.lyric_line_spacing, DEFAULT_SCALE_PERCENT);
-        assert_eq!(settings.lyric_background_overlay_percent, 40);
-        assert_eq!(settings.lyric_background_contrast, 4.5);
+        assert_eq!(settings.lyric_background_chroma, 0.12);
+        assert_eq!(settings.lyric_background_min_overlay_percent, 40);
+        assert_eq!(settings.lyric_background_contrast, 4.);
         assert_eq!(settings.audio_cache_limit_gb, DEFAULT_AUDIO_CACHE_LIMIT_GB);
         assert_eq!(settings.image_cache_capacity, 80);
         assert_eq!(
@@ -742,7 +752,8 @@ mod tests {
             lyric_font_families: default_lyric_font_families(),
             lyric_font_scale: 1000,
             lyric_line_spacing: 0,
-            lyric_background_overlay_percent: 120,
+            lyric_background_min_overlay_percent: 120,
+            lyric_background_chroma: 0.5,
             lyric_background_contrast: 30.,
             audio_cache_limit_gb: 0,
             image_cache_capacity: 0,
@@ -762,7 +773,8 @@ mod tests {
         assert_eq!(settings.last_nonzero_volume, 0.01);
         assert_eq!(settings.lyric_font_scale, MAX_LYRIC_SCALE_PERCENT);
         assert_eq!(settings.lyric_line_spacing, MIN_SCALE_PERCENT);
-        assert_eq!(settings.lyric_background_overlay_percent, 100);
+        assert_eq!(settings.lyric_background_chroma, 0.4);
+        assert_eq!(settings.lyric_background_min_overlay_percent, 100);
         assert_eq!(settings.lyric_background_contrast, 21.);
         assert_eq!(settings.audio_cache_limit_gb, 1);
         assert_eq!(settings.image_cache_capacity, 1);
@@ -770,6 +782,21 @@ mod tests {
             settings.navigation_history_limit,
             MAX_NAVIGATION_HISTORY_LIMIT
         );
+    }
+
+    #[test]
+    fn test_legacy_background_settings() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"lyric_background_overlay_percent": 65, "lyric_background_contrast": 4.5, "lyric_line_spacing": 80}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            settings.lyric_background_chroma,
+            DEFAULT_LYRIC_BACKGROUND_CHROMA
+        );
+        assert_eq!(settings.lyric_background_contrast, 4.5);
+        assert_eq!(settings.lyric_background_min_overlay_percent, 40);
+        assert_eq!(settings.lyric_line_spacing, 80);
     }
 
     #[test]
@@ -794,8 +821,9 @@ mod tests {
             lyric_font_families: vec!["LXGW WenKai".to_owned(), "Noto Sans JP".to_owned()],
             lyric_font_scale: 150,
             lyric_line_spacing: 80,
-            lyric_background_overlay_percent: 25,
-            lyric_background_contrast: 3.5,
+            lyric_background_min_overlay_percent: 25,
+            lyric_background_chroma: 0.16,
+            lyric_background_contrast: 4.5,
             audio_cache_limit_gb: 24,
             image_cache_capacity: 72,
             navigation_history_limit: 16,
@@ -852,8 +880,12 @@ mod tests {
         assert_eq!(restored.lyric_font_scale, expected.lyric_font_scale);
         assert_eq!(restored.lyric_line_spacing, expected.lyric_line_spacing);
         assert_eq!(
-            restored.lyric_background_overlay_percent,
-            expected.lyric_background_overlay_percent
+            restored.lyric_background_min_overlay_percent,
+            expected.lyric_background_min_overlay_percent
+        );
+        assert_eq!(
+            restored.lyric_background_chroma,
+            expected.lyric_background_chroma
         );
         assert_eq!(
             restored.lyric_background_contrast,

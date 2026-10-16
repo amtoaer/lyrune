@@ -1408,7 +1408,6 @@ impl LyricsView {
                     .backdrop_current_url
                     .clone()
                     .unwrap_or_else(|| url.clone());
-                let previous_backdrop_url = self.backdrop_previous_url.clone();
                 let track_transition_duration = if self.input.expanded {
                     LYRIC_TRACK_SWITCH_DURATION
                 } else {
@@ -1431,6 +1430,10 @@ impl LyricsView {
                     1. - crossfade
                 };
                 let previous_backdrop_opacity = 1. - current_backdrop_opacity;
+                if previous_backdrop_opacity == 0. {
+                    self.backdrop_previous_url = None;
+                }
+                let previous_backdrop_url = self.backdrop_previous_url.clone();
                 let cover_url = url.clone();
                 let lyrics = if defer_new_lyrics {
                     div().into_any_element()
@@ -1657,14 +1660,70 @@ impl Render for LyricsView {
 
 #[cfg(test)]
 mod tests {
-    use super::{LyricsContent, LyricsInput, LyricsView, lyrics};
+    use super::{LYRIC_TRACK_SWITCH_DURATION, LyricsContent, LyricsInput, LyricsView, lyrics};
     use crate::settings::{
         DEFAULT_LYRIC_BACKGROUND_CHROMA, DEFAULT_LYRIC_BACKGROUND_CONTRAST,
         DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, FrameRate,
     };
-    use gpui::{TestAppContext, VisualTestContext, font, px, white};
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext, font, px, white};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[gpui::test]
+    fn test_backdrop_crossfade(cx: &mut TestAppContext) {
+        struct BackdropHost(gpui::Entity<LyricsView>);
+        impl gpui::Render for BackdropHost {
+            fn render(
+                &mut self,
+                window: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                self.0.update(cx, |view, cx| {
+                    let _ = view.render_cover_backdrop(window, cx);
+                });
+                gpui::div()
+            }
+        }
+        cx.update(gpui_component::init);
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            BackdropHost(cx.new(|_| LyricsView::new(None, font(".SystemUIFont"))))
+        });
+        let view = cx.update(|_, cx| host.read(cx).0.clone());
+        let render = |url: &str, expanded, cx: &mut VisualTestContext| {
+            view.update(cx, |view, cx| {
+                view.set_input(
+                    LyricsInput {
+                        cover_url: Some(url.into()),
+                        expanded,
+                        ..LyricsView::new(None, font(".SystemUIFont")).input
+                    },
+                    Duration::ZERO,
+                    cx,
+                );
+            });
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            cx.update(|_, cx| view.read(cx).backdrop_previous_url.clone())
+        };
+        assert_eq!(render("first", true, cx), None);
+        for (previous, current) in [("first", "second"), ("second", "third")] {
+            assert_eq!(render(current, true, cx).as_deref(), Some(previous));
+            cx.cx
+                .executor()
+                .advance_clock(LYRIC_TRACK_SWITCH_DURATION / 2);
+            assert_eq!(render(current, true, cx).as_deref(), Some(previous));
+            cx.cx
+                .executor()
+                .advance_clock(LYRIC_TRACK_SWITCH_DURATION / 2);
+            assert_eq!(render(current, true, cx), None);
+        }
+        assert_eq!(render("fourth", true, cx).as_deref(), Some("third"));
+        cx.cx
+            .executor()
+            .advance_clock(LYRIC_TRACK_SWITCH_DURATION / 2);
+        assert_eq!(render("fourth", false, cx), None);
+        assert_eq!(render("fourth", true, cx), None);
+    }
 
     #[gpui::test]
     fn test_lyric_frame_rates_are_independent(cx: &mut TestAppContext) {

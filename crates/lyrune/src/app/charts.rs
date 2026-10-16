@@ -332,7 +332,8 @@ impl BrowserView {
         let Some(chart) = chart else {
             return div()
                 .text_sm()
-                .text_color(cx.theme().muted_foreground)
+                .font_normal()
+                .text_color(cx.theme().secondary_foreground)
                 .child(label)
                 .into_any_element();
         };
@@ -347,11 +348,13 @@ impl BrowserView {
             .trigger(
                 Button::new("chart-period")
                     .debug_selector(|| "chart-period".to_owned())
-                    .ghost()
+                    .text()
+                    .font_normal()
+                    .text_color(cx.theme().secondary_foreground)
                     .label(label)
                     .child(media_icon_hsla(
                         MediaIcon::ChevronDown,
-                        cx.theme().muted_foreground,
+                        cx.theme().secondary_foreground,
                         px(14.),
                     )),
             )

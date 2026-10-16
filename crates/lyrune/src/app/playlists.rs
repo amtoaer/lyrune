@@ -840,7 +840,6 @@ impl BrowserView {
                 .flatten()
         });
         let owner_identity = owner.zip(owner_avatar_url);
-        let has_owner = owner_identity.is_some();
         let has_tracks = !self.track_table.read(cx).delegate().tracks().is_empty();
         let long_title = playlist_title_is_long(&playlist.title);
         let title_size = if long_title {
@@ -875,6 +874,7 @@ impl BrowserView {
         };
         let chart_period = matches!(playlist.id, UserPlaylistId::Chart { .. })
             .then(|| self.render_chart_period(&playlist, cx));
+        let has_metadata = owner_identity.is_some() || chart_period.is_some();
         div()
             .min_h(if narrow {
                 px(182.)
@@ -937,7 +937,6 @@ impl BrowserView {
                                     .font_semibold()
                                     .child(playlist.title),
                             )
-                            .when_some(chart_period, |header, period| header.child(period))
                             .child(
                                 h_flex()
                                     .w_full()
@@ -960,13 +959,16 @@ impl BrowserView {
                                                 .child(owner),
                                         )
                                     })
+                                    .when_some(chart_period, |metadata, period| {
+                                        metadata.child(period)
+                                    })
                                     .child(
                                         div()
                                             .font_normal()
                                             .text_color(theme.secondary_foreground)
                                             .child(format!(
                                                 "{}{} 首歌曲",
-                                                if has_owner { "· " } else { "" },
+                                                if has_metadata { "· " } else { "" },
                                                 playlist.track_count
                                             )),
                                     ),

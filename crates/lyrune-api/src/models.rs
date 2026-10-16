@@ -29,6 +29,7 @@ pub enum UserPlaylistId {
     Recommended { diss_id: u64 },
     Artist { mid: String },
     Album { mid: String },
+    Chart { top_id: u64, period: String },
     Search { query: String },
     Recommendation { kind: RecommendationKind },
 }
@@ -79,6 +80,58 @@ pub struct PlaylistPage {
     pub total: u64,
     pub has_more: bool,
     pub next_offset: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartGroup {
+    pub group_id: u64,
+    pub group_name: String,
+    pub toplist: Vec<Chart>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Chart {
+    pub top_id: u64,
+    pub title: String,
+    pub period: String,
+    pub front_pic_url: String,
+    pub update_tips: String,
+    pub total_num: u64,
+    pub song: Vec<ChartPreviewTrack>,
+    pub history: ChartHistory,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartPreviewTrack {
+    pub title: String,
+    pub singer_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartHistory {
+    pub year: Vec<u32>,
+    pub sub_period: Vec<Vec<u32>>,
+}
+
+impl Chart {
+    pub fn playlist(&self, period: String) -> UserPlaylist {
+        UserPlaylist {
+            id: UserPlaylistId::Chart {
+                top_id: self.top_id,
+                period,
+            },
+            title: self.title.clone(),
+            cover_url: Some(self.front_pic_url.clone()),
+            description: self.update_tips.clone(),
+            owner: "QQ 音乐".to_owned(),
+            owner_avatar_url: None,
+            track_count: self.total_num,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

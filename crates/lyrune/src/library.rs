@@ -1088,6 +1088,7 @@ fn playlist_subtitle(playlist: &UserPlaylist) -> String {
         UserPlaylistId::Recommended { .. } => "推荐歌单",
         UserPlaylistId::Artist { .. } => "歌手",
         UserPlaylistId::Album { .. } => "专辑",
+        UserPlaylistId::Chart { .. } => "排行榜",
         UserPlaylistId::Search { .. } => "搜索结果",
         UserPlaylistId::Recommendation { .. } => "个性化推荐",
     };

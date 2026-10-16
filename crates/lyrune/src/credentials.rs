@@ -48,6 +48,43 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a system keyring entry and live QQ Music network access"]
+    async fn test_daily_songs() -> anyhow::Result<()> {
+        use anyhow::{Context as _, ensure};
+        use lyrune_api::UserPlaylistId;
+        use std::sync::Arc;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let stored = tokio::task::spawn_blocking(CredentialStore::load)
+            .await??
+            .context("no stored QQ Music credential")?;
+        let credential = CredentialSession::new(stored);
+        let original = credential.snapshot().unwrap();
+        let playlist = UserPlaylist {
+            id: UserPlaylistId::Daily,
+            title: "每日 30 首".to_owned(),
+            ..UserPlaylist::liked()
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(45),
+            ProtocolClient::new()?.playlist_page(&credential, &playlist, 0, 100),
+        )
+        .await;
+        if let Some(updated) = credential.snapshot()
+            && !Arc::ptr_eq(&original, &updated)
+        {
+            tokio::task::spawn_blocking(move || CredentialStore::save(&updated)).await??;
+        }
+        let page = result??;
+        ensure!(
+            !page.tracks.is_empty() && !page.has_more,
+            "daily songs should be a complete playlist"
+        );
+        eprintln!("loaded {} daily songs", page.tracks.len());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a system keyring entry and live QQ Music network access"]
     async fn stored_credential_loads_liked_tracks() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let Some(credential) = tokio::task::spawn_blocking(CredentialStore::load)

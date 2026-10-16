@@ -147,6 +147,26 @@ fn parse_status(body: &str) -> Result<(u16, &str)> {
 mod tests {
     use super::parse_status;
 
+    #[tokio::test]
+    #[ignore = "requires live WeChat network access; does not authorize a login"]
+    async fn test_wechat_qr() -> anyhow::Result<()> {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(super::run_wechat_login(sender, crate::new_client_guid()));
+        let event = tokio::time::timeout(std::time::Duration::from_secs(40), receiver.recv()).await;
+        task.abort();
+        match event? {
+            Some(crate::LoginEvent::QrReady(bytes)) => {
+                anyhow::ensure!(
+                    bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(b"\xff\xd8\xff"),
+                    "QR image must be PNG or JPEG"
+                );
+                Ok(())
+            }
+            Some(crate::LoginEvent::Failed(error)) => anyhow::bail!("{error}"),
+            _ => anyhow::bail!("QR login ended before receiving an image"),
+        }
+    }
+
     #[test]
     fn test_scan_status() {
         assert_eq!(

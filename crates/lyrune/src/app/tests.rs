@@ -912,7 +912,7 @@ fn queue_append_preserves_order_and_existing_tracks() {
     assert_eq!(queue.tracks[1].title, "B");
     assert_eq!(queue.tracks[2].title, "C");
     assert_eq!(
-        canonical_queue_track_index(&queue, &UserPlaylistId::Liked, "D"),
+        canonical_queue_track_index(&queue, &UserPlaylistId::Liked, &queue.tracks, "D"),
         Some(3)
     );
 
@@ -938,5 +938,27 @@ fn search_insertion_prevents_reusing_the_source_playlist_queue() {
     assert_eq!(inserted, 1);
     assert_eq!(mids(&queue.tracks), ["A", "search", "B"]);
     assert!(queue.modified);
-    assert_eq!(canonical_queue_track_index(&queue, &playlist_id, "B"), None);
+    assert_eq!(
+        canonical_queue_track_index(&queue, &playlist_id, &queue.tracks, "B"),
+        None
+    );
+}
+
+#[test]
+fn test_daily_queue_refresh() {
+    let queue = PlaybackQueue {
+        playlist_id: UserPlaylistId::Daily,
+        tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
+        modified: false,
+        continuation: None,
+    };
+    assert_eq!(
+        canonical_queue_track_index(&queue, &UserPlaylistId::Daily, &queue.tracks, "B"),
+        Some(1)
+    );
+    let today = vec![Arc::new(track("B")), Arc::new(track("C"))];
+    assert_eq!(
+        canonical_queue_track_index(&queue, &UserPlaylistId::Daily, &today, "B"),
+        None
+    );
 }

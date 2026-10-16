@@ -1083,6 +1083,7 @@ fn track_columns(available_width: Pixels) -> Vec<Column> {
 fn playlist_subtitle(playlist: &UserPlaylist) -> String {
     let kind = match playlist.id {
         UserPlaylistId::Liked => "已点赞的歌曲",
+        UserPlaylistId::Daily => "每日推荐",
         UserPlaylistId::Created { .. } => "创建的歌单",
         UserPlaylistId::Favorite { .. } => "收藏的歌单",
         UserPlaylistId::Recommended { .. } => "推荐歌单",

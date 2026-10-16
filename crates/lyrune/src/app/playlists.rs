@@ -298,10 +298,11 @@ impl BrowserView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let force_refresh = playlist.id == UserPlaylistId::Daily;
         let resource = self.page_resource_cache.playlist(
             self.account.read(cx).id().unwrap_or(0),
             playlist.clone(),
-            false,
+            force_refresh,
             PlaylistCachePolicy::Fresh,
         );
         let target = NavigationPage::Playlist {
@@ -318,7 +319,7 @@ impl BrowserView {
         self.open_playlist(
             playlist,
             None,
-            false,
+            force_refresh,
             PlaylistCachePolicy::Fresh,
             PlaylistScrollPosition::top(),
             Some(resource),

@@ -12,7 +12,7 @@ use gpui_component::{
     spinner::Spinner,
     v_flex,
 };
-use lyrune_api::{RecommendationKind, UserPlaylist};
+use lyrune_api::{RecommendationKind, UserPlaylist, UserPlaylistId};
 
 use super::browser::BrowserView;
 use super::{home_content_width, page_horizontal_padding};
@@ -125,14 +125,8 @@ impl BrowserView {
             px(168.)
         };
         let card_width = cover_size + px(16.);
-        let feature_width = if narrow {
-            px(304.)
-        } else if compact {
-            px(344.)
-        } else {
-            px(384.)
-        };
         let grid_width = home_content_width(compact, narrow);
+        let feature_width = (grid_width - px(32.)) / 3.;
         let cards = self
             .home
             .playlists
@@ -186,6 +180,70 @@ impl BrowserView {
         let radar_icon = media_icon_hsla(MediaIcon::Radar, theme.primary, px(25.));
         let guess_icon = media_icon_hsla(MediaIcon::Headphones, theme.primary, px(25.));
         let recommendation_cards = [
+            Button::new("home-daily")
+                .ghost()
+                .w(feature_width)
+                .h(px(92.))
+                .p_4()
+                .rounded(px(12.))
+                .bg(theme.muted.opacity(0.7))
+                .when(recommendation_loading, |button| {
+                    button
+                        .bg(theme.muted.opacity(0.7))
+                        .text_color(theme.secondary_foreground)
+                })
+                .disabled(recommendation_loading)
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap_4()
+                        .child(
+                            div()
+                                .size(px(48.))
+                                .flex_shrink_0()
+                                .rounded(px(10.))
+                                .bg(theme.background.opacity(0.55))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .text_xl()
+                                        .font_bold()
+                                        .text_color(theme.primary)
+                                        .child("30"),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_1()
+                                .child(div().font_semibold().child("每日 30 首"))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("为你每天更新"),
+                                ),
+                        ),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    let profile = this.account.read(cx).profile.as_ref();
+                    let playlist = UserPlaylist {
+                        id: UserPlaylistId::Daily,
+                        title: "每日 30 首".to_owned(),
+                        cover_url: None,
+                        description: "为你每天更新".to_owned(),
+                        owner: profile
+                            .map(|profile| profile.nickname.clone())
+                            .unwrap_or_default(),
+                        owner_avatar_url: profile.and_then(|profile| profile.avatar_url.clone()),
+                        track_count: 0,
+                    };
+                    this.open_home_playlist(playlist, window, cx);
+                })),
             Button::new("home-radar")
                 .ghost()
                 .w(feature_width)

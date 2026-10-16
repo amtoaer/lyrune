@@ -5,9 +5,13 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use gpui::{prelude::*, *};
-use gpui_component::{ActiveTheme as _, StyledExt as _, v_flex};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Selectable as _, StyledExt as _, h_flex, v_flex,
+};
 use lyrune_api::{
     CredentialSession, LoginEvent, ProtocolClient, QqCredential, UserProfile, run_qr_login,
+    run_wechat_login,
 };
 use tokio::sync::mpsc;
 
@@ -26,6 +30,12 @@ pub(super) enum AccountState {
     SignedIn,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoginMethod {
+    MusicApp,
+    Wechat,
+}
+
 // 实体随应用存活；关闭窗口不会中断凭据监听或把登录任务交给页面视图。
 pub(super) struct Account {
     pub(super) state: AccountState,
@@ -37,6 +47,8 @@ pub(super) struct Account {
     message: String,
     client: Option<ProtocolClient>,
     client_guid: String,
+    login_method: LoginMethod,
+    login_task: Option<tokio::task::AbortHandle>,
 }
 
 impl Default for Account {
@@ -50,6 +62,8 @@ impl Default for Account {
             message: "正在读取已保存的登录状态…".to_owned(),
             client: None,
             client_guid: String::new(),
+            login_method: LoginMethod::MusicApp,
+            login_task: None,
         }
     }
 }
@@ -71,6 +85,9 @@ impl Account {
     }
 
     fn invalidate_login(&mut self) -> u64 {
+        if let Some(task) = self.login_task.take() {
+            task.abort();
+        }
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
@@ -163,7 +180,15 @@ impl Account {
         cx.notify();
 
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        drop(RUNTIME.spawn(run_qr_login(sender, self.client_guid.clone())));
+        let guid = self.client_guid.clone();
+        let method = self.login_method;
+        let task = RUNTIME.spawn(async move {
+            match method {
+                LoginMethod::MusicApp => run_qr_login(sender, guid).await,
+                LoginMethod::Wechat => run_wechat_login(sender, guid).await,
+            }
+        });
+        self.login_task = Some(task.abort_handle());
         cx.spawn(async move |this, cx| {
             while let Some(event) = receiver.recv().await {
                 let completed = matches!(
@@ -185,15 +210,32 @@ impl Account {
 
     fn handle_login_event(&mut self, event: LoginEvent, cx: &mut Context<Self>) {
         match event {
-            LoginEvent::QrReady(png) => {
-                self.qr_image = Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)));
-                self.message = "请使用 QQ 音乐 App 扫描二维码".to_owned();
+            LoginEvent::QrReady(bytes) => {
+                let format = match image::guess_format(&bytes) {
+                    Ok(image::ImageFormat::Png) => ImageFormat::Png,
+                    Ok(image::ImageFormat::Jpeg) => ImageFormat::Jpeg,
+                    _ => {
+                        self.invalidate_login();
+                        self.handle_login_event(
+                            LoginEvent::Failed("无法识别登录二维码图像".to_owned()),
+                            cx,
+                        );
+                        return;
+                    }
+                };
+                self.qr_image = Some(Arc::new(Image::from_bytes(format, bytes)));
+                self.message = match self.login_method {
+                    LoginMethod::MusicApp => "请使用 QQ 音乐 App 扫描二维码",
+                    LoginMethod::Wechat => "请使用微信扫描二维码",
+                }
+                .to_owned();
             }
             LoginEvent::WaitingScan => self.message = "等待扫码…".to_owned(),
             LoginEvent::WaitingConfirm => {
                 self.message = "已扫码，请在手机上确认登录".to_owned();
             }
             LoginEvent::Succeeded(credential) => {
+                self.login_task = None;
                 self.state = AccountState::SignedIn;
                 self.qr_image = None;
                 self.install_credential_session(CredentialSession::new(credential), cx);
@@ -205,6 +247,7 @@ impl Account {
                 self.start_login(cx);
             }
             LoginEvent::Failed(error) => {
+                self.login_task = None;
                 self.state = AccountState::SignedOut;
                 self.qr_image = None;
                 self.message = "扫码登录失败，点击二维码区域重试".to_owned();
@@ -458,7 +501,7 @@ impl LyruneView {
                 .child(match self.account.read(cx).state {
                     AccountState::Restoring => "正在恢复登录…",
                     AccountState::SigningIn => "正在生成二维码…",
-                    _ => "使用 QQ 音乐 App 扫码登录",
+                    _ => "点击重试登录",
                 })
                 .into_any_element(),
         };
@@ -488,6 +531,33 @@ impl LyruneView {
                             .text_sm()
                             .text_color(theme.muted_foreground)
                             .child("登录 QQ 音乐以加载你的歌单"),
+                    )
+                    .child(
+                        h_flex().gap_2().children(
+                            [
+                                ("music-app-login", "QQ 音乐", LoginMethod::MusicApp),
+                                ("wechat-login", "微信", LoginMethod::Wechat),
+                            ]
+                            .map(|(id, label, method)| {
+                                Button::new(id)
+                                    .label(label)
+                                    .ghost()
+                                    .selected(self.account.read(cx).login_method == method)
+                                    .disabled(
+                                        self.account.read(cx).state == AccountState::Restoring,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.account.update(cx, |account, cx| {
+                                            if account.login_method != method {
+                                                account.invalidate_login();
+                                                account.state = AccountState::SignedOut;
+                                                account.login_method = method;
+                                                account.start_login(cx);
+                                            }
+                                        });
+                                    }))
+                            }),
+                        ),
                     )
                     .child(
                         div()
@@ -520,6 +590,18 @@ impl LyruneView {
 mod tests {
     use super::{Account, AccountState};
     use lyrune_api::{CredentialSession, QqCredential};
+
+    #[tokio::test]
+    async fn test_login_cancellation() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let mut account = Account {
+            login_task: Some(task.abort_handle()),
+            ..Account::default()
+        };
+        account.invalidate_login();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(account.login_task.is_none());
+    }
 
     #[test]
     fn test_login_attempts() {

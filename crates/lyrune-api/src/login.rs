@@ -2,6 +2,7 @@
 
 mod models;
 mod mqtt;
+pub(crate) mod wechat;
 
 pub(crate) use models::{LoginStatus, LoginToken};
 pub(crate) use mqtt::MqttLoginSession;
@@ -130,18 +131,25 @@ impl LoginClient {
     }
 
     pub(crate) async fn refresh_login_token(&self, token: &LoginToken) -> LoginResult<LoginToken> {
+        let mut param = json!({
+            "refresh_key": token.refresh_key,
+            "refresh_token": token.refresh_token,
+            "musickey": token.music_key,
+            "musicid": token.music_id,
+        });
+        if token.login_type == 1 {
+            param["openid"] = json!(token.open_id);
+            param["unionid"] = json!(token.union_id);
+            param["str_musicid"] = json!(token.music_id.to_string());
+            param["loginMode"] = json!(2);
+        }
         let response = self
             .post::<LoginInfoResponse>(
                 json!({
                     "result": {
                         "module": "music.login.LoginServer",
                         "method": "Login",
-                        "param": {
-                            "refresh_key": token.refresh_key,
-                            "refresh_token": token.refresh_token,
-                            "musickey": token.music_key,
-                            "musicid": token.music_id,
-                        }
+                        "param": param
                     },
                     "comm": {
                         "tmeLoginType": token.login_type

@@ -119,6 +119,7 @@ pub(super) struct LoginInfoResponse {
 struct TLoginInfoResult {
     #[serde(default)]
     code: i64,
+    #[serde(default)]
     data: TLoginInfoData,
 }
 
@@ -164,7 +165,13 @@ impl LoginInfoResponse {
         if response_code != 0 {
             return Err(login_server_error(response_code, &data));
         }
-        if data.musicid == 0 {
+        // 微信登录可能只返回 str_musicid，后续曲库请求仍需要统一的账号 ID。
+        let music_id = if data.musicid == 0 {
+            data.str_musicid.parse().unwrap_or(0)
+        } else {
+            data.musicid
+        };
+        if music_id == 0 {
             return Err(LoginError::InvalidLoginTokenField("musicid"));
         }
         if data.musickey.trim().is_empty() {
@@ -180,7 +187,7 @@ impl LoginInfoResponse {
         };
 
         Ok(LoginToken {
-            music_id: data.musicid,
+            music_id,
             music_key: data.musickey,
             open_id: data.openid,
             access_token: data.access_token,
@@ -239,6 +246,22 @@ mod tests {
     use serde_json::json;
 
     use super::LoginInfoResponse;
+
+    #[test]
+    fn test_wechat_identity() {
+        let response: LoginInfoResponse = serde_json::from_value(json!({
+            "result": {"data": {
+                "musicid": 0, "str_musicid": "1152921504606846977",
+                "musickey": "W_X_key", "openid": "wx-open-id", "unionid": "wx-union-id"
+            }}
+        }))
+        .unwrap();
+        let token = response.into_token().unwrap();
+        assert_eq!(token.music_id, 1152921504606846977);
+        assert_eq!(token.login_type, 1);
+        assert_eq!(token.open_id, "wx-open-id");
+        assert_eq!(token.union_id, "wx-union-id");
+    }
 
     #[test]
     fn login_response_preserves_encrypted_uin_without_debugging_secrets() {

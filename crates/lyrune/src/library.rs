@@ -5,7 +5,8 @@ use crate::icons::{MediaIcon, media_icon_hsla};
 use gpui::{
     AnyElement, App, Context, Image, ImageFormat, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
-    Styled as _, TextAlign, Window, div, img, prelude::FluentBuilder as _, px,
+    Styled as _, TextAlign, Window, div, img, linear_color_stop, linear_gradient,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, IndexPath, Sizable as _, StyledExt as _,
@@ -563,6 +564,36 @@ pub fn playlist_cover(
         .flex_shrink_0()
         .rounded(radius)
         .into_any_element();
+    }
+
+    if playlist.id == UserPlaylistId::Daily {
+        return div()
+            .relative()
+            .size(size)
+            .flex_shrink_0()
+            .rounded(radius)
+            .bg(linear_gradient(
+                110.,
+                linear_color_stop(cx.theme().primary.opacity(0.08), 0.),
+                linear_color_stop(cx.theme().primary.opacity(0.22), 1.),
+            ))
+            .text_size(size * 0.48)
+            .font_bold()
+            .text_color(cx.theme().primary.opacity(0.55))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("30")
+            .when_some(playlist.cover_url.clone(), |cover, url| {
+                cover.child(
+                    img(cached_image_source(url, size, scale_factor))
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .rounded(radius),
+                )
+            })
+            .into_any_element();
     }
 
     if let Some(url) = playlist.cover_url.clone() {

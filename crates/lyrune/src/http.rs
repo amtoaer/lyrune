@@ -9,8 +9,9 @@ use directories::ProjectDirs;
 use futures_util::{AsyncReadExt as _, future::BoxFuture};
 use gpui::http_client::{self, AsyncBody, HttpClient, Request, Response, Url};
 use gpui::{
-    App, AppContext as _, Asset, Entity, Hsla, Image, ImageCache, ImageCacheError, ImageCacheItem,
-    ImageFormat, ImageSource, Pixels, RenderImage, Resource, Rgba, Window, hash,
+    App, AppContext as _, Asset, Context, Entity, Hsla, Image, ImageCache, ImageCacheError,
+    ImageCacheItem, ImageFormat, ImageSource, Pixels, RenderImage, Resource, Rgba, Task, Window,
+    hash,
 };
 use image::imageops::FilterType;
 use lru::LruCache;
@@ -31,8 +32,10 @@ enum CachedImageFile {}
 #[derive(Clone)]
 enum CachedThumbnailFile {}
 
-#[derive(Clone)]
-enum BlurredCoverImage {}
+struct BlurredCoverImage {
+    image: Option<Result<Arc<RenderImage>, ImageCacheError>>,
+    _task: Task<()>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum CachedImageSize {
@@ -227,30 +230,36 @@ impl ImageCache for CachedImageCache {
     }
 }
 
-#[allow(clippy::manual_async_fn)]
-impl Asset for BlurredCoverImage {
-    type Source = BlurredCoverSource;
-    type Output = Result<Arc<Image>, ImageCacheError>;
-
-    fn load(
-        source: Self::Source,
-        _cx: &mut App,
-    ) -> impl Future<Output = Self::Output> + Send + 'static {
-        async move {
-            RUNTIME
-                .spawn_blocking(move || {
-                    generate_blurred_cover(
-                        &source.path,
-                        source.background,
-                        source.foreground,
-                        source.min_overlay_percent,
-                        f32::from_bits(source.chroma_bits),
-                        f32::from_bits(source.contrast_bits),
-                    )
-                })
-                .await
-                .context("等待模糊封面生成任务失败")?
-                .map_err(ImageCacheError::from)
+impl BlurredCoverImage {
+    fn new(source: BlurredCoverSource, cx: &mut Context<Self>) -> Self {
+        let svg_renderer = cx.svg_renderer();
+        let task = cx.background_executor().spawn(async move {
+            generate_blurred_cover(
+                &source.path,
+                source.background,
+                source.foreground,
+                source.min_overlay_percent,
+                f32::from_bits(source.chroma_bits),
+                f32::from_bits(source.contrast_bits),
+            )?
+            .to_image_data(svg_renderer)
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let image = task.await.map_err(ImageCacheError::from);
+            let _ = this.update(cx, |this, cx| {
+                this.image = Some(image);
+                cx.notify();
+            });
+        });
+        cx.on_release(|this, cx| {
+            if let Some(Ok(image)) = this.image.take() {
+                cx.drop_image(image, None);
+            }
+        })
+        .detach();
+        Self {
+            image: None,
+            _task: task,
         }
     }
 }
@@ -272,52 +281,36 @@ pub fn blurred_image_source(
     chroma: f32,
     contrast: f32,
 ) -> ImageSource {
-    let source = url;
     (move |window: &mut Window, cx: &mut App| {
-        let cover = match blurred_cover(
-            &source,
-            background,
-            foreground,
-            min_overlay_percent,
-            chroma,
-            contrast,
-            window,
-            cx,
-        )? {
-            Ok(cover) => cover,
+        let path = match window.use_asset::<CachedImageFile>(&url, cx)? {
+            Ok(path) => path,
             Err(error) => return Some(Err(error)),
         };
-        cover.use_render_image(window, cx).map(Ok)
+        blurred_cover(
+            BlurredCoverSource {
+                path,
+                background,
+                foreground,
+                min_overlay_percent,
+                chroma_bits: chroma.to_bits(),
+                contrast_bits: contrast.to_bits(),
+            },
+            window,
+            cx,
+        )
     })
     .into()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn blurred_cover(
-    url: &str,
-    background: Hsla,
-    foreground: Hsla,
-    min_overlay_percent: u32,
-    chroma: f32,
-    contrast: f32,
+    source: BlurredCoverSource,
     window: &mut Window,
     cx: &mut App,
-) -> Option<Result<Arc<Image>, ImageCacheError>> {
-    let path = match window.use_asset::<CachedImageFile>(&url.to_owned(), cx)? {
-        Ok(path) => path,
-        Err(error) => return Some(Err(error)),
-    };
-    window.use_asset::<BlurredCoverImage>(
-        &BlurredCoverSource {
-            path,
-            background,
-            foreground,
-            min_overlay_percent,
-            chroma_bits: chroma.to_bits(),
-            contrast_bits: contrast.to_bits(),
-        },
-        cx,
-    )
+) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+    let image = window.use_keyed_state(("blurred-cover", hash(&source)), cx, |_, cx| {
+        BlurredCoverImage::new(source, cx)
+    });
+    image.read(cx).image.clone()
 }
 
 fn generate_blurred_cover(
@@ -713,6 +706,9 @@ pub fn client() -> anyhow::Result<Arc<dyn HttpClient>> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Weak;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -727,6 +723,152 @@ mod tests {
     };
 
     const LYRIC_TARGET_CONTRAST: f32 = DEFAULT_LYRIC_BACKGROUND_CONTRAST;
+
+    struct BlurredCoverTestView {
+        sources: Vec<BlurredCoverSource>,
+        images: Rc<RefCell<hashbrown::HashMap<u64, Weak<RenderImage>>>>,
+    }
+
+    impl Render for BlurredCoverTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.images.borrow_mut().clear();
+            div().children(self.sources.iter().cloned().map(|source| {
+                let images = self.images.clone();
+                let key = hash(&source);
+                img(move |window: &mut Window, cx: &mut App| {
+                    let image = blurred_cover(source.clone(), window, cx);
+                    if let Some(Ok(image)) = &image {
+                        images.borrow_mut().insert(key, Arc::downgrade(image));
+                    }
+                    image
+                })
+                .size(px(64.))
+            }))
+        }
+    }
+
+    struct BlurredCoverTestRoot {
+        cover: Entity<BlurredCoverTestView>,
+        hidden: bool,
+    }
+
+    impl Render for BlurredCoverTestRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .h(px(if self.hidden { 0. } else { 128. }))
+                .overflow_hidden()
+                .child(
+                    self.cover
+                        .clone()
+                        .cached(StyleRefinement::default().size(px(128.))),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn test_blurred_cover_lifetime(cx: &mut TestAppContext) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("lyrune-background-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("cover.png");
+        image::RgbImage::from_pixel(16, 16, image::Rgb([120, 80, 200]))
+            .save(&path)
+            .unwrap();
+        let first = BlurredCoverSource {
+            path: Arc::from(path.as_path()),
+            background: gpui::rgb(0x1f1f28).into(),
+            foreground: gpui::rgb(0xdcd7ba).into(),
+            min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+            chroma_bits: DEFAULT_LYRIC_BACKGROUND_CHROMA.to_bits(),
+            contrast_bits: DEFAULT_LYRIC_BACKGROUND_CONTRAST.to_bits(),
+        };
+        let second_path = root.join("second.png");
+        std::fs::copy(&path, &second_path).unwrap();
+        let mut second = BlurredCoverSource {
+            path: Arc::from(second_path.as_path()),
+            ..first.clone()
+        };
+        let images = Rc::new(RefCell::new(hashbrown::HashMap::new()));
+        let cover = cx.new(|_| BlurredCoverTestView {
+            sources: vec![first.clone()],
+            images: images.clone(),
+        });
+        let (view, cx) = cx.add_window_view(|_, _| BlurredCoverTestRoot {
+            cover: cover.clone(),
+            hidden: false,
+        });
+        let draw_until_loaded = |count, cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(images.borrow().len(), count);
+        };
+        draw_until_loaded(1, cx);
+        let first_image = images.borrow()[&hash(&first)].upgrade().unwrap();
+        assert!(cx.update(|window, _| window.has_image_atlas_entry(&first_image)));
+
+        for hidden in [true, false] {
+            view.update(cx, |view, cx| {
+                view.hidden = hidden;
+                cx.notify();
+            });
+            draw_until_loaded(1, cx);
+            assert!(Arc::ptr_eq(
+                &first_image,
+                &images.borrow()[&hash(&first)].upgrade().unwrap()
+            ));
+        }
+
+        cover.update(cx, |cover, cx| {
+            cover.sources.push(second.clone());
+            cx.notify();
+        });
+        draw_until_loaded(2, cx);
+        let mut current = images.borrow()[&hash(&second)].upgrade().unwrap();
+        assert!(cx.update(|window, _| window.has_image_atlas_entry(&first_image)));
+        assert!(cx.update(|window, _| window.has_image_atlas_entry(&current)));
+
+        cover.update(cx, |cover, cx| {
+            cover.sources.remove(0);
+            cx.notify();
+        });
+        draw_until_loaded(1, cx);
+        assert!(!cx.update(|window, _| window.has_image_atlas_entry(&first_image)));
+        let released = Arc::downgrade(&first_image);
+        drop(first_image);
+        assert!(released.upgrade().is_none());
+        assert!(Arc::ptr_eq(
+            &current,
+            &images.borrow()[&hash(&second)].upgrade().unwrap()
+        ));
+
+        for overlay in [50, 60, 40] {
+            second.min_overlay_percent = overlay;
+            cover.update(cx, |cover, cx| {
+                cover.sources = vec![second.clone()];
+                cx.notify();
+            });
+            draw_until_loaded(1, cx);
+            assert!(!cx.update(|window, _| window.has_image_atlas_entry(&current)));
+            let released = Arc::downgrade(&current);
+            current = images.borrow()[&hash(&second)].upgrade().unwrap();
+            assert!(released.upgrade().is_none());
+        }
+        cover.update(cx, |cover, cx| {
+            cover.sources.clear();
+            cx.notify();
+        });
+        draw_until_loaded(0, cx);
+        assert!(!cx.update(|window, _| window.has_image_atlas_entry(&current)));
+        let released = Arc::downgrade(&current);
+        drop(current);
+        assert!(released.upgrade().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     struct CachedCover {
         source: Resource,

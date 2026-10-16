@@ -1,12 +1,12 @@
 use std::sync::LazyLock;
 
-use anyhow::{Context as _, anyhow, bail};
-use quick_xml::{Reader, XmlVersion, events::Event};
+use anyhow::{Context as _, bail, ensure};
 
-const LATEST_RELEASE_URL: &str = "https://github.com/amtoaer/lyrune/releases.atom";
+const LATEST_RELEASE_URL: &str = "https://github.com/amtoaer/lyrune/releases/latest";
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .user_agent(concat!("lyrune/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("create update check client")
 });
@@ -22,18 +22,26 @@ pub struct AvailableUpdate {
 }
 
 pub async fn check() -> anyhow::Result<Option<AvailableUpdate>> {
-    let feed = CLIENT
-        .get(LATEST_RELEASE_URL)
+    let response = CLIENT
+        .head(LATEST_RELEASE_URL)
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
         .context("request latest release")?
         .error_for_status()
-        .context("latest release response")?
-        .text()
-        .await
-        .context("decode latest release")?;
-    let release = parse_latest_release(&feed)?;
+        .context("latest release response")?;
+    ensure!(
+        response.status().is_redirection(),
+        "latest release did not redirect: {}",
+        response.status()
+    );
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .context("latest release response has no location")?
+        .to_str()
+        .context("decode latest release location")?;
+    let release = parse_latest_release(location)?;
     if !is_newer_version(&release.version)? {
         return Ok(None);
     }
@@ -42,65 +50,12 @@ pub async fn check() -> anyhow::Result<Option<AvailableUpdate>> {
     }))
 }
 
-fn parse_latest_release(feed: &str) -> anyhow::Result<Release> {
-    let mut reader = Reader::from_str(feed);
-    loop {
-        match reader.read_event().context("read release feed")? {
-            Event::Start(element) if element.local_name().as_ref() == b"entry" => {
-                return parse_release_entry(&mut reader);
-            }
-            Event::Eof => bail!("release feed contains no entries"),
-            _ => {}
-        }
-    }
-}
-
-fn parse_release_entry(reader: &mut Reader<&[u8]>) -> anyhow::Result<Release> {
-    let mut title = None;
-    let mut url = None;
-    loop {
-        match reader.read_event().context("read release entry")? {
-            Event::Start(element) if element.local_name().as_ref() == b"title" => {
-                title = Some(
-                    reader
-                        .read_text(element.name())
-                        .context("read release title")?
-                        .decode()
-                        .context("decode release title")?
-                        .into_owned(),
-                );
-            }
-            Event::Empty(element) | Event::Start(element)
-                if element.local_name().as_ref() == b"link" =>
-            {
-                for attribute in element.attributes() {
-                    let attribute = attribute.context("read release link")?;
-                    if attribute.key.local_name().as_ref() == b"href" {
-                        let href = attribute
-                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-                            .context("decode release link")?
-                            .into_owned();
-                        if href.contains("/releases/tag/") {
-                            url = Some(href);
-                        }
-                    }
-                }
-            }
-            Event::End(element) if element.local_name().as_ref() == b"entry" => break,
-            Event::Eof => bail!("release entry is incomplete"),
-            _ => {}
-        }
-    }
-    let title = title.context("release entry has no title")?;
-    let url = url.context("release entry has no release link")?;
-    let version = url
-        .rsplit_once("/releases/tag/")
-        .map(|(_, tag)| tag)
-        .unwrap_or(title.as_str())
-        .strip_prefix('v')
-        .unwrap_or_else(|| title.strip_prefix('v').unwrap_or(title.as_str()));
+fn parse_latest_release(location: &str) -> anyhow::Result<Release> {
+    let version = location
+        .strip_prefix("https://github.com/amtoaer/lyrune/releases/tag/v")
+        .context("latest release did not redirect to a version tag")?;
     if version.is_empty() {
-        return Err(anyhow!("release entry has no version"));
+        bail!("latest release has no version");
     }
     Ok(Release {
         version: version.to_owned(),
@@ -128,22 +83,20 @@ mod tests {
     use super::parse_latest_release;
 
     #[test]
-    fn parses_latest_release_feed() {
-        let release = parse_latest_release(
-            r#"
-                <feed xmlns="http://www.w3.org/2005/Atom">
-                    <entry>
-                        <title>v1.5.0</title>
-                        <link rel="alternate" href="https://github.com/amtoaer/lyrune/releases/tag/v1.5.0"/>
-                    </entry>
-                    <entry>
-                        <title>v1.4.1</title>
-                        <link rel="alternate" href="https://github.com/amtoaer/lyrune/releases/tag/v1.4.1"/>
-                    </entry>
-                </feed>
-            "#,
-        )
-        .expect("parse release feed");
-        assert_eq!(release.version, "1.5.0");
+    fn test_parse_latest_release() {
+        let release = parse_latest_release("https://github.com/amtoaer/lyrune/releases/tag/v1.6.0")
+            .expect("parse release redirect");
+        assert_eq!(release.version, "1.6.0");
+    }
+
+    #[test]
+    fn test_invalid_release_redirect() {
+        for location in [
+            "https://github.com/amtoaer/lyrune/releases",
+            "https://github.com/amtoaer/lyrune/releases/tag/v",
+            "https://github.com/other/lyrune/releases/tag/v1.6.0",
+        ] {
+            assert!(parse_latest_release(location).is_err());
+        }
     }
 }

@@ -265,6 +265,7 @@ impl BrowserView {
                             .child(
                                 h_flex()
                                     .w_full()
+                                    .min_h_8()
                                     .px_2()
                                     .justify_between()
                                     .child(
@@ -273,14 +274,16 @@ impl BrowserView {
                                             .font_semibold()
                                             .child("排行榜"),
                                     )
-                                    .child(
-                                        Button::new("refresh-charts")
-                                            .ghost()
-                                            .label("刷新")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.load_charts(true, cx)
-                                            })),
-                                    ),
+                                    .when(self.charts.error.is_some(), |header| {
+                                        header.child(
+                                            Button::new("retry-charts")
+                                                .ghost()
+                                                .label("重试")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.load_charts(true, cx)
+                                                })),
+                                        )
+                                    }),
                             )
                             .when(self.charts.loading, |view| {
                                 view.child(

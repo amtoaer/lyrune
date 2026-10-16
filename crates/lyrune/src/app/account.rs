@@ -1,5 +1,6 @@
 //! 扫码登录、凭据恢复与会话失效。清理账号同时使旧账号的异步结果失效。
 
+use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -224,6 +225,21 @@ impl Account {
         self.login_task = Some(task.abort_handle());
         cx.spawn(async move |this, cx| {
             while let Some(event) = receiver.recv().await {
+                let event = match event {
+                    LoginEvent::QrReady(bytes) => match RUNTIME
+                        .spawn_blocking(move || normalize_login_qr(&bytes))
+                        .await
+                        .context("生成登录二维码任务异常退出")
+                        .and_then(|result| result)
+                    {
+                        Ok(bytes) => LoginEvent::QrReady(bytes),
+                        Err(error) => {
+                            task.abort();
+                            LoginEvent::Failed(format!("{error:#}"))
+                        }
+                    },
+                    event => event,
+                };
                 let completed = matches!(
                     event,
                     LoginEvent::Succeeded(_) | LoginEvent::Expired | LoginEvent::Failed(_)
@@ -330,19 +346,7 @@ impl Account {
     fn handle_login_event(&mut self, event: LoginEvent, cx: &mut Context<Self>) {
         match event {
             LoginEvent::QrReady(bytes) => {
-                let format = match image::guess_format(&bytes) {
-                    Ok(image::ImageFormat::Png) => ImageFormat::Png,
-                    Ok(image::ImageFormat::Jpeg) => ImageFormat::Jpeg,
-                    _ => {
-                        self.invalidate_login();
-                        self.handle_login_event(
-                            LoginEvent::Failed("无法识别登录二维码图像".to_owned()),
-                            cx,
-                        );
-                        return;
-                    }
-                };
-                self.qr_image = Some(Arc::new(Image::from_bytes(format, bytes)));
+                self.qr_image = Some(Arc::new(Image::from_bytes(ImageFormat::Png, bytes)));
                 self.message.clear();
             }
             LoginEvent::WaitingScan => self.message.clear(),
@@ -794,9 +798,7 @@ impl LyruneView {
                     .size(px(208.))
                     .rounded(theme.radius_lg)
                     .overflow_hidden()
-                    .when(account.login_method == LoginMethod::MusicApp, |this| {
-                        this.bg(white()).p_3()
-                    })
+                    .bg(white())
                     .child(img(image.clone()).size_full())
                     .into_any_element(),
                 None => div()
@@ -954,12 +956,83 @@ impl LyruneView {
     }
 }
 
+fn normalize_login_qr(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let image = image::load_from_memory(bytes)
+        .context("无法读取登录二维码图像")?
+        .to_luma8();
+    let mut prepared = rqrr::PreparedImage::prepare(image);
+    let grids = prepared.detect_grids();
+    let [grid] = grids.as_slice() else {
+        anyhow::bail!("登录图像应包含一个二维码，实际检测到 {} 个", grids.len());
+    };
+    let mut payload = Vec::new();
+    grid.decode_to(&mut payload).context("无法解码登录二维码")?;
+    let code = qrcode::QrCode::new(payload).context("无法重新生成登录二维码")?;
+    let image = code
+        .render::<image::Luma<u8>>()
+        .quiet_zone(true)
+        .min_dimensions(624, 624)
+        .build();
+    let mut output = Cursor::new(Vec::new());
+    image
+        .write_to(&mut output, image::ImageFormat::Png)
+        .context("无法编码登录二维码图像")?;
+    Ok(output.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use gpui::{AppContext as _, TestAppContext};
 
-    use super::{Account, AccountState, LoginMethod, QqLoginMode};
+    use super::{Account, AccountState, LoginMethod, QqLoginMode, normalize_login_qr};
     use lyrune_api::{CredentialSession, QqCredential};
+
+    #[test]
+    fn test_normalize_login_qr() -> anyhow::Result<()> {
+        let payload = b"https://example.com/login?token=A%2Bb%2Fc%3D&state=AbC123\x00\xff";
+        let code = qrcode::QrCode::new(payload)?;
+        let mut outputs = Vec::new();
+        for (quiet_zone, format) in [
+            (false, image::ImageFormat::Png),
+            (true, image::ImageFormat::Jpeg),
+        ] {
+            let original = code
+                .render::<image::Luma<u8>>()
+                .quiet_zone(quiet_zone)
+                .build();
+            let mut input = Cursor::new(Vec::new());
+            original.write_to(&mut input, format)?;
+            outputs.push(normalize_login_qr(input.get_ref())?);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        let image = image::load_from_memory(&outputs[0])?.to_luma8();
+        assert_eq!(image.width(), image.height());
+        let margin = image.width() / (code.width() as u32 + 8) * 4;
+        for (x, y, pixel) in image.enumerate_pixels() {
+            assert!(matches!(pixel[0], 0 | 255));
+            if x < margin
+                || y < margin
+                || x >= image.width() - margin
+                || y >= image.height() - margin
+            {
+                assert_eq!(pixel[0], 255);
+            }
+        }
+        let mut prepared = rqrr::PreparedImage::prepare(image);
+        let grids = prepared.detect_grids();
+        assert_eq!(grids.len(), 1);
+        let mut decoded = Vec::new();
+        grids[0].decode_to(&mut decoded)?;
+        assert_eq!(decoded, payload);
+        assert!(normalize_login_qr(b"invalid image").is_err());
+        let mut blank = Cursor::new(Vec::new());
+        image::GrayImage::from_pixel(100, 100, image::Luma([255]))
+            .write_to(&mut blank, image::ImageFormat::Png)?;
+        assert!(normalize_login_qr(blank.get_ref()).is_err());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_login_cancellation() {

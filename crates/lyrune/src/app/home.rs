@@ -261,7 +261,7 @@ impl BrowserView {
                             .min_w_0()
                             .items_start()
                             .gap_1()
-                            .child(div().text_size(px(16.)).font_semibold().child("专属雷达"))
+                            .child(div().text_size(px(15.)).font_semibold().child("专属雷达"))
                             .child(
                                 div()
                                     .truncate()
@@ -295,7 +295,7 @@ impl BrowserView {
                             .min_w_0()
                             .items_start()
                             .gap_1()
-                            .child(div().text_size(px(16.)).font_semibold().child("猜你喜欢"))
+                            .child(div().text_size(px(15.)).font_semibold().child("猜你喜欢"))
                             .child(
                                 div()
                                     .truncate()

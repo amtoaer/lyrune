@@ -113,6 +113,7 @@ impl BrowserView {
         &mut self,
         compact: bool,
         narrow: bool,
+        content_width: Pixels,
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -126,7 +127,7 @@ impl BrowserView {
         };
         let card_width = cover_size + px(16.);
         let grid_width = home_content_width(compact, narrow);
-        let feature_width = (grid_width - px(32.)) / 3.;
+        let stack_recommendations = content_width - page_horizontal_padding(narrow) * 2. < px(560.);
         let cards = self
             .home
             .playlists
@@ -179,55 +180,79 @@ impl BrowserView {
         let recommendation_loading = self.home.recommendation_loading.is_some();
         let radar_icon = media_icon_hsla(MediaIcon::Radar, theme.primary, px(25.));
         let guess_icon = media_icon_hsla(MediaIcon::Headphones, theme.primary, px(25.));
-        let recommendation_cards = [
+        let [daily_card, radar_card, guess_card] = [
             Button::new("home-daily")
                 .ghost()
-                .w(feature_width)
-                .h(px(92.))
-                .p_4()
+                .w_full()
+                .when(!stack_recommendations, |button| {
+                    button.flex_1().flex_grow(1.5).min_w_0()
+                })
+                .h(px(156.))
+                .p(px(22.))
                 .rounded(px(12.))
-                .bg(theme.muted.opacity(0.7))
+                .bg(theme.primary.opacity(0.15))
                 .when(recommendation_loading, |button| {
-                    button
-                        .bg(theme.muted.opacity(0.7))
-                        .text_color(theme.secondary_foreground)
+                    button.text_color(theme.secondary_foreground)
                 })
                 .disabled(recommendation_loading)
                 .child(
-                    h_flex()
+                    v_flex()
                         .size_full()
-                        .gap_4()
                         .child(
-                            div()
-                                .size(px(48.))
-                                .flex_shrink_0()
-                                .rounded(px(10.))
-                                .bg(theme.background.opacity(0.55))
-                                .flex()
-                                .items_center()
-                                .justify_center()
+                            h_flex()
+                                .w_full()
+                                .flex_1()
+                                .gap_4()
+                                .justify_between()
                                 .child(
-                                    div()
-                                        .text_xl()
-                                        .font_bold()
-                                        .text_color(theme.primary)
-                                        .child("30"),
+                                    v_flex()
+                                        .min_w_0()
+                                        .items_start()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_size(px(24.))
+                                                .font_semibold()
+                                                .child("每日 30 首"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground)
+                                                .child("为你每天更新"),
+                                        ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .w(px(70.))
+                                        .h(px(78.))
+                                        .flex_shrink_0()
+                                        .rounded(px(12.))
+                                        .bg(theme.background.opacity(0.55))
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .w(px(30.))
+                                                .h(px(3.))
+                                                .rounded_full()
+                                                .bg(theme.primary.opacity(0.5)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(36.))
+                                                .font_semibold()
+                                                .text_color(theme.primary)
+                                                .child("30"),
+                                        ),
                                 ),
                         )
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .items_start()
-                                .gap_1()
-                                .child(div().font_semibold().child("每日 30 首"))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child("为你每天更新"),
-                                ),
-                        ),
+                        .child(h_flex().w_full().justify_end().child(media_icon_hsla(
+                            MediaIcon::Forward,
+                            theme.primary,
+                            px(16.),
+                        ))),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     let profile = this.account.read(cx).profile.as_ref();
@@ -246,8 +271,8 @@ impl BrowserView {
                 })),
             Button::new("home-radar")
                 .ghost()
-                .w(feature_width)
-                .h(px(92.))
+                .w_full()
+                .h(px(72.))
                 .p_4()
                 .rounded(px(12.))
                 .bg(theme.muted.opacity(0.7))
@@ -258,42 +283,28 @@ impl BrowserView {
                 })
                 .disabled(recommendation_loading)
                 .child(
-                    h_flex()
-                        .size_full()
-                        .gap_4()
-                        .child(
-                            div()
-                                .size(px(48.))
-                                .flex_shrink_0()
-                                .rounded(px(10.))
-                                .bg(theme.background.opacity(0.55))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(radar_icon),
-                        )
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .items_start()
-                                .gap_1()
-                                .child(div().font_semibold().child("专属雷达"))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child("不断更新的个性推荐"),
-                                ),
-                        ),
+                    h_flex().size_full().gap_3().child(radar_icon).child(
+                        v_flex()
+                            .min_w_0()
+                            .items_start()
+                            .gap_1()
+                            .child(div().font_semibold().child("专属雷达"))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("不断更新的个性推荐"),
+                            ),
+                    ),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.start_home_recommendation(RecommendationKind::Radar, cx)
                 })),
             Button::new("home-guess")
                 .ghost()
-                .w(feature_width)
-                .h(px(92.))
+                .w_full()
+                .h(px(72.))
                 .p_4()
                 .rounded(px(12.))
                 .bg(theme.muted.opacity(0.7))
@@ -304,34 +315,20 @@ impl BrowserView {
                 })
                 .disabled(recommendation_loading)
                 .child(
-                    h_flex()
-                        .size_full()
-                        .gap_4()
-                        .child(
-                            div()
-                                .size(px(48.))
-                                .flex_shrink_0()
-                                .rounded(px(10.))
-                                .bg(theme.background.opacity(0.55))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(guess_icon),
-                        )
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .items_start()
-                                .gap_1()
-                                .child(div().font_semibold().child("猜你喜欢"))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child("持续生成的个性漫游"),
-                                ),
-                        ),
+                    h_flex().size_full().gap_3().child(guess_icon).child(
+                        v_flex()
+                            .min_w_0()
+                            .items_start()
+                            .gap_1()
+                            .child(div().font_semibold().child("猜你喜欢"))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("持续生成的个性漫游"),
+                            ),
+                    ),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.start_home_recommendation(RecommendationKind::Guess, cx)
@@ -386,10 +383,22 @@ impl BrowserView {
                                         )
                                         .child(
                                             h_flex()
+                                                .w_full()
                                                 .items_start()
-                                                .flex_wrap()
                                                 .gap_4()
-                                                .children(recommendation_cards),
+                                                .when(stack_recommendations, |view| view.flex_col())
+                                                .child(daily_card)
+                                                .child(
+                                                    v_flex()
+                                                        .w_full()
+                                                        .min_w_0()
+                                                        .when(!stack_recommendations, |view| {
+                                                            view.flex_1()
+                                                        })
+                                                        .gap_3()
+                                                        .child(radar_card)
+                                                        .child(guess_card),
+                                                ),
                                         ),
                                 )
                                 .child(

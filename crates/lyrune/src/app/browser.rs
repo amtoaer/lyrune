@@ -468,7 +468,9 @@ impl Render for BrowserView {
             });
         }
         let page = match self.main_content {
-            MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
+            MainContent::Home => {
+                self.render_home(compact, narrow, self.content_width, scale_factor, cx)
+            }
             MainContent::Charts => {
                 self.render_charts(compact, narrow, self.content_width, scale_factor, cx)
             }

@@ -188,69 +188,42 @@ impl BrowserView {
                 .h(px(156.))
                 .p(px(22.))
                 .rounded(px(12.))
-                .bg(theme.primary.opacity(0.15))
+                .bg(linear_gradient(
+                    110.,
+                    linear_color_stop(theme.primary.opacity(0.08), 0.),
+                    linear_color_stop(theme.primary.opacity(0.22), 1.),
+                ))
                 .when(recommendation_loading, |button| {
                     button.text_color(theme.secondary_foreground)
                 })
                 .disabled(recommendation_loading)
                 .child(
-                    v_flex()
+                    h_flex()
                         .size_full()
+                        .gap_4()
+                        .justify_between()
                         .child(
-                            h_flex()
-                                .w_full()
-                                .flex_1()
-                                .gap_4()
-                                .justify_between()
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_2()
+                                .child(div().text_size(px(22.)).font_semibold().child("每日推荐"))
                                 .child(
-                                    v_flex()
-                                        .min_w_0()
-                                        .items_start()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_size(px(24.))
-                                                .font_semibold()
-                                                .child("每日 30 首"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(theme.muted_foreground)
-                                                .child("为你每天更新"),
-                                        ),
-                                )
-                                .child(
-                                    v_flex()
-                                        .w(px(70.))
-                                        .h(px(78.))
-                                        .flex_shrink_0()
-                                        .rounded(px(12.))
-                                        .bg(theme.background.opacity(0.55))
-                                        .items_center()
-                                        .justify_center()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .w(px(30.))
-                                                .h(px(3.))
-                                                .rounded_full()
-                                                .bg(theme.primary.opacity(0.5)),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(36.))
-                                                .font_semibold()
-                                                .text_color(theme.primary)
-                                                .child("30"),
-                                        ),
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("为你每天更新"),
                                 ),
                         )
-                        .child(h_flex().w_full().justify_end().child(media_icon_hsla(
-                            MediaIcon::Forward,
-                            theme.primary,
-                            px(16.),
-                        ))),
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(104.))
+                                .line_height(relative(1.))
+                                .font_bold()
+                                .text_color(theme.primary.opacity(0.38))
+                                .child("30"),
+                        ),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     let profile = this.account.read(cx).profile.as_ref();

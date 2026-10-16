@@ -185,7 +185,7 @@ impl BrowserView {
                 .ghost()
                 .w_full()
                 .when(!stack_recommendations, |button| {
-                    button.flex_1().flex_grow(1.5).min_w_0()
+                    button.flex_1().flex_grow(4. / 3.).min_w_0()
                 })
                 .h(px(156.))
                 .p(px(22.))

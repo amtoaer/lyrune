@@ -185,7 +185,6 @@ impl BrowserView {
                 .ghost()
                 .w_full()
                 .min_w_0()
-                .col_span(if stack_recommendations { 1 } else { 3 })
                 .h(px(156.))
                 .p(px(22.))
                 .rounded(px(12.))
@@ -349,7 +348,6 @@ impl BrowserView {
                                 .child(
                                     v_flex()
                                         .w_full()
-                                        .max_w(px(640.))
                                         .gap_3()
                                         .child(
                                             h_flex()
@@ -384,7 +382,7 @@ impl BrowserView {
                                                 .grid_cols(if stack_recommendations {
                                                     1
                                                 } else {
-                                                    5
+                                                    2
                                                 })
                                                 .gap_4()
                                                 .child(daily_card)
@@ -392,11 +390,6 @@ impl BrowserView {
                                                     v_flex()
                                                         .w_full()
                                                         .min_w_0()
-                                                        .col_span(if stack_recommendations {
-                                                            1
-                                                        } else {
-                                                            2
-                                                        })
                                                         .gap_3()
                                                         .child(radar_entry)
                                                         .child(guess_entry),

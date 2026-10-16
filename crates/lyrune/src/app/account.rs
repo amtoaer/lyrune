@@ -779,7 +779,8 @@ impl LyruneView {
                     Button::new("qq-use-qr")
                         .label("使用 QQ 扫码")
                         .ghost()
-                        .small()
+                        .w_full()
+                        .h(px(36.))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.account.update(cx, |account, cx| {
                                 account.select_qq_mode(QqLoginMode::Qr, cx)
@@ -812,11 +813,11 @@ impl LyruneView {
                 .w_full()
                 .h(px(328.))
                 .items_center()
-                .justify_center()
                 .gap_3()
                 .child(
                     div()
                         .id("login-qr")
+                        .flex_shrink_0()
                         .when(account.state == AccountState::SignedOut, |this| {
                             this.cursor_pointer()
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -846,19 +847,23 @@ impl LyruneView {
                                 .child(account.message.clone()),
                         ),
                 )
-                .when(account.login_method == LoginMethod::Qq, |this| {
-                    this.child(
-                        Button::new("qq-use-quick")
-                            .label("检测本机已登录账号")
-                            .ghost()
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.account.update(cx, |account, cx| {
-                                    account.select_qq_mode(QqLoginMode::Quick, cx)
-                                });
-                            })),
-                    )
-                })
+                .child(div().w_full().h(px(36.)).flex_shrink_0().mt_auto().when(
+                    account.login_method == LoginMethod::Qq,
+                    |this| {
+                        this.child(
+                            Button::new("qq-use-quick")
+                                .label("检测本机已登录账号")
+                                .ghost()
+                                .w_full()
+                                .h(px(36.))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.account.update(cx, |account, cx| {
+                                        account.select_qq_mode(QqLoginMode::Quick, cx)
+                                    });
+                                })),
+                        )
+                    },
+                ))
                 .into_any_element()
         };
 

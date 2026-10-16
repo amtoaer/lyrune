@@ -305,6 +305,11 @@ impl ProtocolClient {
     ) -> Result<PlaylistPage> {
         let limit = limit.clamp(1, 100);
         let data = match &playlist.id {
+            UserPlaylistId::Chart { top_id, period } => {
+                return self
+                    .chart_page(credential, *top_id, period, offset, limit)
+                    .await;
+            }
             UserPlaylistId::Artist { mid } => {
                 self.call(
                     "music.musichallSong.SongListInter",
@@ -418,6 +423,7 @@ impl ProtocolClient {
                 (*diss_id, 0, None)
             }
             UserPlaylistId::Artist { .. }
+            | UserPlaylistId::Chart { .. }
             | UserPlaylistId::Album { .. }
             | UserPlaylistId::Search { .. }
             | UserPlaylistId::Recommendation { .. } => {

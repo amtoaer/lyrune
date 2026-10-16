@@ -15,7 +15,7 @@ use gpui_component::{
 use lyrune_api::{RecommendationKind, UserPlaylist};
 
 use super::browser::BrowserView;
-use super::page_horizontal_padding;
+use super::{home_content_width, page_horizontal_padding};
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::library::playlist_cover;
 use crate::runtime::RUNTIME;
@@ -117,47 +117,6 @@ impl BrowserView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        if self.home.loading && self.home.playlists.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .text_color(theme.muted_foreground)
-                .child(Spinner::new().with_size(px(24.)).color(theme.primary))
-                .child("正在加载主页推荐…")
-                .into_any_element();
-        }
-        if self.home.playlists.is_empty()
-            && let Some(error) = self.home.error.clone()
-        {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_4()
-                .text_color(theme.muted_foreground)
-                .child(error)
-                .child(
-                    Button::new("retry-home")
-                        .outline()
-                        .h(px(44.))
-                        .px_4()
-                        .label("重新加载")
-                        .on_click(cx.listener(|this, _, _, cx| this.load_home(cx))),
-                )
-                .into_any_element();
-        }
-        if self.home.loaded && self.home.playlists.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(theme.muted_foreground)
-                .child("QQ 音乐暂时没有返回可显示的歌单推荐")
-                .into_any_element();
-        }
-
         let cover_size = if narrow {
             px(132.)
         } else if compact {
@@ -173,13 +132,7 @@ impl BrowserView {
         } else {
             px(384.)
         };
-        let grid_width = if narrow {
-            px(640.)
-        } else if compact {
-            px(704.)
-        } else {
-            px(784.)
-        };
+        let grid_width = home_content_width(compact, narrow);
         let cards = self
             .home
             .playlists
@@ -348,11 +301,30 @@ impl BrowserView {
                                         .w_full()
                                         .gap_3()
                                         .child(
-                                            div()
+                                            h_flex()
+                                                .w_full()
                                                 .px_2()
-                                                .text_size(if narrow { px(22.) } else { px(24.) })
-                                                .font_semibold()
-                                                .child("智能推荐"),
+                                                .justify_between()
+                                                .child(
+                                                    div()
+                                                        .text_size(if narrow {
+                                                            px(22.)
+                                                        } else {
+                                                            px(24.)
+                                                        })
+                                                        .font_semibold()
+                                                        .child("智能推荐"),
+                                                )
+                                                .child(
+                                                    Button::new("home-charts")
+                                                        .ghost()
+                                                        .label("排行榜 ›")
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.show_charts(window, cx)
+                                                            },
+                                                        )),
+                                                ),
                                         )
                                         .child(
                                             h_flex()
@@ -381,6 +353,32 @@ impl BrowserView {
                                             )
                                         }),
                                 )
+                                .when(self.home.loading, |view| {
+                                    view.child(
+                                        h_flex()
+                                            .gap_2()
+                                            .text_color(theme.muted_foreground)
+                                            .child(
+                                                Spinner::new()
+                                                    .with_size(px(20.))
+                                                    .color(theme.primary),
+                                            )
+                                            .child("正在加载主页推荐…"),
+                                    )
+                                })
+                                .when(self.home.error.is_some(), |view| {
+                                    view.child(
+                                        Button::new("retry-home")
+                                            .outline()
+                                            .label("重新加载")
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.load_home(cx)),
+                                            ),
+                                    )
+                                })
+                                .when(self.home.loaded && self.home.playlists.is_empty(), |view| {
+                                    view.child("QQ 音乐暂时没有返回可显示的歌单推荐")
+                                })
                                 .child(h_flex().items_start().flex_wrap().gap_4().children(cards)),
                         ),
                     ),

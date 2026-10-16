@@ -366,6 +366,8 @@ impl LyruneView {
         self.browser.update(cx, |browser, cx| {
             browser.library_generation = browser.library_generation.wrapping_add(1);
             browser.home.generation = browser.home.generation.wrapping_add(1);
+            browser.charts.generation = browser.charts.generation.wrapping_add(1);
+            browser.charts.loading = false;
             cx.notify();
         });
         self.playback

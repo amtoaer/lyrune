@@ -5,6 +5,7 @@ mod account;
 mod animation;
 mod artist;
 mod browser;
+mod charts;
 mod home;
 mod lyrics;
 mod lyrics_loading;
@@ -72,6 +73,16 @@ const PLAYER_BAR_HEIGHT: f32 = 112.;
 
 fn page_horizontal_padding(narrow: bool) -> Pixels {
     if narrow { px(20.) } else { px(24.) }
+}
+
+fn home_content_width(compact: bool, narrow: bool) -> Pixels {
+    if narrow {
+        px(640.)
+    } else if compact {
+        px(704.)
+    } else {
+        px(784.)
+    }
 }
 
 fn progress_fraction(position: Duration, duration: Duration) -> f32 {

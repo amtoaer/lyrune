@@ -1,4 +1,5 @@
 mod cdn;
+mod charts;
 mod library;
 mod lyrics;
 mod playback;
@@ -202,6 +203,13 @@ mod tests {
 
     #[test]
     fn test_response_error_precedence() {
+        assert!(
+            response_data(json!({
+                "code": 0,
+                "result": {"code": 2000, "data": {"data": {"period": "2026_42"}}}
+            }))
+            .is_err()
+        );
         for response in [json!({"code": "1000"}), json!({"result": {"code": 104401}})] {
             let error = response_data(response).unwrap_err();
             assert!(crate::account::is_credential_rejected(&error));

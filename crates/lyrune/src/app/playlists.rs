@@ -397,7 +397,10 @@ impl BrowserView {
             )
         });
         let (playlist, tracks, has_more, loading, loaded) = {
-            let state = lock_resource(&resource);
+            let mut state = lock_resource(&resource);
+            if matches!(playlist.id, UserPlaylistId::Chart { .. }) {
+                state.playlist.cover_url = playlist.cover_url;
+            }
             (
                 state.playlist.clone(),
                 state.tracks.clone(),
@@ -792,7 +795,7 @@ impl BrowserView {
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let Some(playlist) = self.playlist.selected.clone() else {
             return div()
                 .h(px(220.))
@@ -840,7 +843,6 @@ impl BrowserView {
                 .flatten()
         });
         let owner_identity = owner.zip(owner_avatar_url);
-        let has_owner = owner_identity.is_some();
         let has_tracks = !self.track_table.read(cx).delegate().tracks().is_empty();
         let long_title = playlist_title_is_long(&playlist.title);
         let title_size = if long_title {
@@ -873,6 +875,9 @@ impl BrowserView {
         } else {
             px(56.)
         };
+        let chart_period = matches!(playlist.id, UserPlaylistId::Chart { .. })
+            .then(|| self.render_chart_period(&playlist, cx));
+        let has_metadata = owner_identity.is_some() || chart_period.is_some();
         div()
             .min_h(if narrow {
                 px(182.)
@@ -916,6 +921,7 @@ impl BrowserView {
                                         .child(match &playlist.id {
                                             UserPlaylistId::Artist { .. } => "歌手",
                                             UserPlaylistId::Album { .. } => "专辑",
+                                            UserPlaylistId::Chart { .. } => "排行榜",
                                             _ => "歌单",
                                         }),
                                 ),
@@ -956,13 +962,16 @@ impl BrowserView {
                                                 .child(owner),
                                         )
                                     })
+                                    .when_some(chart_period, |metadata, period| {
+                                        metadata.child(period)
+                                    })
                                     .child(
                                         div()
                                             .font_normal()
                                             .text_color(theme.secondary_foreground)
                                             .child(format!(
                                                 "{}{} 首歌曲",
-                                                if has_owner { "· " } else { "" },
+                                                if has_metadata { "· " } else { "" },
                                                 playlist.track_count
                                             )),
                                     ),

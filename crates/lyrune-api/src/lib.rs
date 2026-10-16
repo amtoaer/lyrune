@@ -10,7 +10,7 @@ mod signing;
 pub use account::{CredentialSession, LoginEvent, QqCredential, run_qr_login};
 pub use client::{CdnCache, ProtocolClient};
 pub use models::{
-    LyricResult, PlaybackOption, PlaylistPage, Quality, RadarTrackPage, RecommendationKind,
-    SearchAlbum, SearchArtist, SearchPage, SearchResults, Track, UserPlaylist, UserPlaylistId,
-    UserProfile,
+    Chart, ChartGroup, ChartHistory, ChartPreviewTrack, LyricResult, PlaybackOption, PlaylistPage,
+    Quality, RadarTrackPage, RecommendationKind, SearchAlbum, SearchArtist, SearchPage,
+    SearchResults, Track, UserPlaylist, UserPlaylistId, UserProfile,
 };

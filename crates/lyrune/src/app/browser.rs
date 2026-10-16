@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use super::{
     account::Account,
     artist::ArtistPageState,
+    charts::ChartsPageState,
     home::HomePageState,
     navigation::{self, MainContent, NavigationHistory, PageResourceCache},
     navigation_view::{
@@ -51,6 +52,7 @@ pub(super) struct BrowserView {
     pub(super) main_content: MainContent,
     pub(super) navigation_history: NavigationHistory,
     pub(super) home: HomePageState,
+    pub(super) charts: ChartsPageState,
     pub(super) search: SearchPageState,
     pub(super) artist: ArtistPageState,
     pub(super) playlist_list: Entity<ListState<PlaylistListDelegate>>,
@@ -276,6 +278,7 @@ impl BrowserView {
             main_content: MainContent::Home,
             navigation_history: NavigationHistory::new(history_limit),
             home: HomePageState::default(),
+            charts: ChartsPageState::default(),
             search: SearchPageState::default(),
             artist: ArtistPageState::default(),
             playlist_list,
@@ -466,6 +469,9 @@ impl Render for BrowserView {
         }
         let page = match self.main_content {
             MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
+            MainContent::Charts => {
+                self.render_charts(compact, narrow, self.content_width, scale_factor, cx)
+            }
             MainContent::Search => self.render_search(narrow, self.content_width, window, cx),
             MainContent::Artist => {
                 self.render_artist_content(compact, narrow, scale_factor, self.content_width, cx)
@@ -663,6 +669,255 @@ mod tests {
             assert!(browser.main_content == MainContent::Search);
             assert_eq!(browser.search.query, "reopened");
         });
+    }
+
+    #[gpui::test]
+    fn test_chart_navigation_and_periods(cx: &mut TestAppContext) {
+        use std::sync::Arc;
+
+        use gpui::{Modifiers, size};
+        use lyrune_api::{Chart, ChartGroup};
+
+        use crate::app::navigation::{PlaylistCachePolicy, lock_resource};
+        use crate::app::playback::PlaybackEvent;
+
+        cx.update(gpui_component::init);
+        let (host, cx) = cx.add_window_view(|window, cx| TestBrowser {
+            browser: new_browser(window, cx),
+            reveal: 0.,
+            hidden: false,
+        });
+        let browser = host.read_with(cx, |host, _| host.browser.clone());
+        let chart = |id| {
+            serde_json::from_value::<Chart>(serde_json::json!({
+                "topId": id, "title": format!("榜单 {id}"), "period": "2026_42",
+                "frontPicUrl": "", "updateTips": "每周更新", "totalNum": 1,
+                "song": [{"title": "歌曲", "singerName": "歌手"}],
+                "history": {"year": [2026, 2025], "subPeriod": [[42, 41], [52, 50]]}
+            }))
+            .unwrap()
+        };
+        let weekly = chart(5);
+        let resources = browser.update(cx, |browser, cx| {
+            browser.charts.groups = Arc::new(vec![
+                ChartGroup { group_id: 0, group_name: "巅峰榜".into(), toplist: vec![chart(62), chart(26), chart(27), chart(4)] },
+                ChartGroup { group_id: 1, group_name: "地区榜".into(), toplist: vec![weekly.clone()] },
+            ]);
+            let resources = ["2026_42", "2025_50"].map(|period| {
+                let mut playlist = weekly.playlist(period.into());
+                playlist.cover_url = None;
+                let resource = browser.page_resource_cache.playlist(0, playlist.clone(), false, PlaylistCachePolicy::Fresh);
+                let track = serde_json::from_value(serde_json::json!({
+                    "mid": period, "title": period, "artists": "歌手", "album": "专辑", "album_mid": "", "duration_seconds": 180
+                })).unwrap();
+                lock_resource(&resource).apply_page(playlist, vec![Arc::new(track)], false, 1, 0);
+                resource
+            });
+            cx.notify();
+            resources
+        });
+        cx.update(|window, cx| browser.update(cx, |browser, cx| browser.show_charts(window, cx)));
+        for width in [850., 1440.] {
+            cx.simulate_resize(size(px(width), px(1500.)));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let first = cx.debug_bounds("chart-62").unwrap();
+            let second = cx.debug_bounds("chart-26").unwrap();
+            let third = cx.debug_bounds("chart-27").unwrap();
+            if width < 900. {
+                assert!(second.top() >= first.bottom());
+            } else {
+                assert_eq!(first.top(), second.top());
+                assert_eq!(first.left(), third.left());
+                assert_eq!(first.size.width, second.size.width);
+                assert!(third.top() >= first.bottom());
+            }
+        }
+        let card = cx.debug_bounds("chart-5").unwrap();
+        cx.simulate_click(card.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        browser.update(cx, |browser, cx| browser.select_track(0, cx));
+        let playing_id = weekly.playlist("2026_42".into()).id;
+        let picker = cx.debug_bounds("chart-period").unwrap();
+        cx.simulate_click(picker.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let year = cx.debug_bounds("chart-year-2025").unwrap();
+        cx.simulate_click(year.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("chart-week-2025_51").is_none());
+        let week = cx.debug_bounds("chart-week-2025_50").unwrap();
+        cx.simulate_click(week.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let playback = browser.read_with(cx, |browser, cx| {
+            assert_eq!(
+                browser.playlist.selected.as_ref().unwrap().id,
+                weekly.playlist("2025_50".into()).id
+            );
+            assert_eq!(
+                browser.playlist.selected.as_ref().unwrap().cover_url,
+                Some(weekly.front_pic_url.clone())
+            );
+            assert_eq!(
+                browser.track_table.read(cx).delegate().tracks()[0].mid,
+                "2025_50"
+            );
+            assert_eq!(
+                browser
+                    .playback
+                    .read(cx)
+                    .state
+                    .queue
+                    .as_ref()
+                    .unwrap()
+                    .playlist_id,
+                playing_id
+            );
+            browser.playback.clone()
+        });
+        playback.update(cx, |_, cx| {
+            cx.emit(PlaybackEvent::PlaylistLoaded(resources[0].clone()))
+        });
+        cx.run_until_parked();
+        browser.read_with(cx, |browser, cx| {
+            assert_eq!(
+                browser.track_table.read(cx).delegate().tracks()[0].mid,
+                "2025_50"
+            );
+        });
+        cx.update(|window, cx| {
+            browser.update(cx, |browser, cx| {
+                browser.show_home(window, cx);
+                browser.navigate_back(window, cx);
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        browser.read_with(cx, |browser, _| {
+            assert!(Arc::ptr_eq(
+                browser.playlist.resource.as_ref().unwrap(),
+                &resources[1]
+            ));
+        });
+        browser.update(cx, |browser, cx| browser.select_track(0, cx));
+        browser.read_with(cx, |browser, cx| {
+            assert_eq!(
+                browser
+                    .playback
+                    .read(cx)
+                    .state
+                    .queue
+                    .as_ref()
+                    .unwrap()
+                    .playlist_id,
+                weekly.playlist("2025_50".into()).id
+            );
+        });
+        let previous_cover = browser.read_with(cx, |browser, _| {
+            browser
+                .playlist
+                .selected
+                .as_ref()
+                .unwrap()
+                .cover_url
+                .clone()
+        });
+        let picker = cx.debug_bounds("chart-period").unwrap();
+        cx.simulate_click(picker.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let week = cx.debug_bounds("chart-week-2025_52").unwrap();
+        cx.simulate_click(week.center(), Modifiers::none());
+        browser.read_with(cx, |browser, _| {
+            let playlist = browser.playlist.selected.as_ref().unwrap();
+            assert_eq!(playlist.id, weekly.playlist("2025_52".into()).id);
+            assert_eq!(playlist.cover_url, previous_cover);
+            assert_eq!(
+                lock_resource(browser.playlist.resource.as_ref().unwrap()).fetched_at_secs,
+                0
+            );
+        });
+        cx.update(|window, cx| browser.update(cx, |browser, cx| browser.navigate_back(window, cx)));
+        browser.read_with(cx, |browser, _| {
+            assert!(browser.main_content == MainContent::Charts)
+        });
+    }
+
+    #[gpui::test]
+    fn test_chart_period_scroll(cx: &mut TestAppContext) {
+        use std::sync::Arc;
+
+        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point, size};
+        use lyrune_api::{Chart, ChartGroup};
+
+        use crate::app::navigation::{PlaylistCachePolicy, PlaylistScrollPosition};
+
+        cx.update(gpui_component::init);
+        let (host, cx) = cx.add_window_view(|window, cx| TestBrowser {
+            browser: new_browser(window, cx),
+            reveal: 0.,
+            hidden: false,
+        });
+        cx.simulate_resize(size(px(1440.), px(1000.)));
+        let browser = host.read_with(cx, |host, _| host.browser.clone());
+        let chart: Chart = serde_json::from_value(serde_json::json!({
+            "topId": 5, "title": "内地榜", "period": "2026_42",
+            "frontPicUrl": "", "updateTips": "每周更新", "totalNum": 0, "song": [],
+            "history": {
+                "year": (2010..=2026).rev().collect::<Vec<_>>(),
+                "subPeriod": vec![(1..=52).rev().collect::<Vec<_>>(); 17]
+            }
+        }))
+        .unwrap();
+        browser.update(cx, |browser, cx| {
+            let mut playlist = chart.playlist("2014_3".into());
+            playlist.cover_url = None;
+            browser.charts.groups = Arc::new(vec![ChartGroup {
+                group_id: 1,
+                group_name: "地区榜".into(),
+                toplist: vec![chart],
+            }]);
+            browser.open_playlist(
+                playlist,
+                None,
+                false,
+                PlaylistCachePolicy::Fresh,
+                PlaylistScrollPosition::top(),
+                None,
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        for pass in 0..2 {
+            let picker = cx.debug_bounds("chart-period").unwrap();
+            cx.simulate_click(picker.center(), Modifiers::none());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            for (list, selected) in [
+                ("chart-years", "chart-year-2014"),
+                ("chart-weeks", "chart-week-2014_3"),
+            ] {
+                let viewport = cx.debug_bounds(list).unwrap();
+                let item = cx.debug_bounds(selected).unwrap();
+                assert!(item.top() >= viewport.top());
+                assert!(
+                    item.bottom() <= viewport.bottom(),
+                    "{selected}, pass {pass}: item {item:?}, viewport {viewport:?}"
+                );
+            }
+            if pass == 0 {
+                let viewport = cx.debug_bounds("chart-weeks").unwrap();
+                cx.simulate_event(ScrollWheelEvent {
+                    position: viewport.center(),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                    modifiers: Modifiers::none(),
+                    touch_phase: TouchPhase::Moved,
+                });
+                browser.update(cx, |_, cx| cx.notify());
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                let viewport = cx.debug_bounds("chart-weeks").unwrap();
+                let latest = cx.debug_bounds("chart-week-2014_52").unwrap();
+                assert!(latest.top() >= viewport.top());
+                assert!(latest.bottom() <= viewport.bottom());
+                cx.simulate_click(picker.center(), Modifiers::none());
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+            }
+        }
     }
 
     #[gpui::test]
@@ -883,8 +1138,7 @@ mod tests {
             let table_header = cx.debug_bounds("track-table-header").unwrap();
             let album = cx.debug_bounds("track-table-heading-2").unwrap();
             assert!(
-                (album.left() - table_header.left() - table_header.size.width * 0.45 - px(8.))
-                    .abs()
+                (album.left() - table_header.left() - table_header.size.width * 0.5 - px(8.)).abs()
                     <= px(1.)
             );
             let table_right = table_header.right();

@@ -576,6 +576,36 @@ fn shared_playlist_ignores_a_late_duplicate_page() {
 }
 
 #[test]
+fn test_chart_cover_preserved() {
+    let mut playlist = UserPlaylist::liked();
+    playlist.id = UserPlaylistId::Chart {
+        top_id: 5,
+        period: "2025_50".into(),
+    };
+    playlist.cover_url = Some("https://example.com/chart.jpg".into());
+    let mut resource = PlaylistResource::empty(playlist.clone());
+    playlist.cover_url = Some("https://example.com/2025_50.jpg".into());
+    playlist.track_count = 2;
+
+    for offset in 0..2 {
+        resource.apply_page(
+            playlist.clone(),
+            vec![Arc::new(track(&offset.to_string()))],
+            offset == 0,
+            offset + 1,
+            offset,
+        );
+        assert_eq!(
+            resource.playlist.cover_url.as_deref(),
+            Some("https://example.com/chart.jpg")
+        );
+    }
+    assert_eq!(resource.playlist.id, playlist.id);
+    assert_eq!(resource.playlist.track_count, 2);
+    assert_eq!(mids(&resource.tracks), ["0", "1"]);
+}
+
+#[test]
 fn playback_time_uses_compact_player_formatting() {
     assert_eq!(format_playback_time(Duration::from_secs(137)), "2:17");
     assert_eq!(format_playback_time(Duration::from_secs(3_661)), "1:01:01");

@@ -20,6 +20,7 @@ use super::{LIBRARY_CACHE_TTL, SEARCH_PAGE_SIZE, unix_timestamp_secs};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum MainContent {
     Home,
+    Charts,
     Search,
     Artist,
     ArtistAlbums,
@@ -315,7 +316,7 @@ impl PlaylistResource {
 
     pub(super) fn apply_page(
         &mut self,
-        playlist: UserPlaylist,
+        mut playlist: UserPlaylist,
         tracks: Vec<Arc<Track>>,
         has_more: bool,
         next_offset: u64,
@@ -328,6 +329,9 @@ impl PlaylistResource {
             self.tracks.extend(tracks);
         } else {
             return;
+        }
+        if matches!(self.playlist.id, UserPlaylistId::Chart { .. }) {
+            playlist.cover_url = self.playlist.cover_url.clone();
         }
         self.playlist = playlist;
         self.has_more = has_more;
@@ -456,6 +460,9 @@ pub(super) fn resolved_playlist_scroll_row(
 #[derive(Clone)]
 pub(super) enum NavigationPage {
     Home,
+    Charts {
+        scroll_offset: Pixels,
+    },
     Settings,
     Search {
         query: String,
@@ -485,6 +492,7 @@ impl NavigationPage {
     pub(super) fn same_destination(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Home, Self::Home) => true,
+            (Self::Charts { .. }, Self::Charts { .. }) => true,
             (Self::Settings, Self::Settings) => true,
             (Self::Search { query, .. }, Self::Search { query: other, .. }) => query == other,
             (Self::Artist { artist, .. }, Self::Artist { artist: other, .. })
@@ -634,6 +642,9 @@ impl BrowserView {
     pub(super) fn current_navigation_page(&self, cx: &App) -> Option<NavigationPage> {
         match self.main_content {
             MainContent::Home => Some(NavigationPage::Home),
+            MainContent::Charts => Some(NavigationPage::Charts {
+                scroll_offset: self.charts.scroll_handle.offset().y,
+            }),
             MainContent::Settings => Some(NavigationPage::Settings),
             MainContent::Search => Some(NavigationPage::Search {
                 query: self.search.query.clone(),
@@ -701,6 +712,20 @@ impl BrowserView {
             });
         }
         match page {
+            NavigationPage::Charts { scroll_offset } => {
+                self.main_content = MainContent::Charts;
+                self.search.resource = None;
+                self.artist.resource = None;
+                self.playlist.resource = None;
+                self.playlist_list.update(cx, |list, cx| {
+                    list.set_selected_index(None, window, cx);
+                });
+                self.charts
+                    .scroll_handle
+                    .set_offset(gpui::point(px(0.), scroll_offset));
+                self.load_charts(false, cx);
+                cx.notify();
+            }
             NavigationPage::Home => {
                 self.main_content = MainContent::Home;
                 self.search.resource = None;

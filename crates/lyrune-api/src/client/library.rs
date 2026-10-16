@@ -527,7 +527,6 @@ fn parse_daily_page(data: Value, playlist: &UserPlaylist) -> Result<PlaylistPage
     let total = tracks.len() as u64;
     let mut playlist = playlist.clone();
     playlist.track_count = total;
-    playlist.cover_url = tracks.first().and_then(|track| track.cover_url.clone());
     Ok(PlaylistPage {
         playlist,
         tracks,

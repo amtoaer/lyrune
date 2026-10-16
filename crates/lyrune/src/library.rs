@@ -568,7 +568,6 @@ pub fn playlist_cover(
 
     if playlist.id == UserPlaylistId::Daily {
         return div()
-            .relative()
             .size(size)
             .flex_shrink_0()
             .rounded(radius)
@@ -584,15 +583,6 @@ pub fn playlist_cover(
             .items_center()
             .justify_center()
             .child("30")
-            .when_some(playlist.cover_url.clone(), |cover, url| {
-                cover.child(
-                    img(cached_image_source(url, size, scale_factor))
-                        .absolute()
-                        .inset_0()
-                        .size_full()
-                        .rounded(radius),
-                )
-            })
             .into_any_element();
     }
 

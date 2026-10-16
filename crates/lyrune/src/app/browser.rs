@@ -806,6 +806,29 @@ mod tests {
                 weekly.playlist("2025_50".into()).id
             );
         });
+        let previous_cover = browser.read_with(cx, |browser, _| {
+            browser
+                .playlist
+                .selected
+                .as_ref()
+                .unwrap()
+                .cover_url
+                .clone()
+        });
+        let picker = cx.debug_bounds("chart-period").unwrap();
+        cx.simulate_click(picker.center(), Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let week = cx.debug_bounds("chart-week-2025_52").unwrap();
+        cx.simulate_click(week.center(), Modifiers::none());
+        browser.read_with(cx, |browser, _| {
+            let playlist = browser.playlist.selected.as_ref().unwrap();
+            assert_eq!(playlist.id, weekly.playlist("2025_52".into()).id);
+            assert_eq!(playlist.cover_url, previous_cover);
+            assert_eq!(
+                lock_resource(browser.playlist.resource.as_ref().unwrap()).fetched_at_secs,
+                0
+            );
+        });
         cx.update(|window, cx| browser.update(cx, |browser, cx| browser.navigate_back(window, cx)));
         browser.read_with(cx, |browser, _| {
             assert!(browser.main_content == MainContent::Charts)

@@ -339,6 +339,7 @@ impl BrowserView {
         };
         let chart = Arc::new(chart.clone());
         let period = period.clone();
+        let playlist = playlist.clone();
         let selected_year = period
             .split_once('_')
             .and_then(|(year, _)| year.parse::<u32>().ok());
@@ -402,7 +403,11 @@ impl BrowserView {
                     .flatten()
                     .map(|week| {
                         let value = format!("{}_{week}", chart.history.year[year_index]);
-                        let playlist = chart.playlist(value.clone());
+                        let mut playlist = playlist.clone();
+                        playlist.id = UserPlaylistId::Chart {
+                            top_id: chart.top_id,
+                            period: value.clone(),
+                        };
                         let browser = browser.clone();
                         Button::new(format!("chart-week-{value}"))
                             .debug_selector({

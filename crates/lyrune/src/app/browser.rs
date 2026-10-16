@@ -469,7 +469,9 @@ impl Render for BrowserView {
         }
         let page = match self.main_content {
             MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
-            MainContent::Charts => self.render_charts(narrow, self.content_width, scale_factor, cx),
+            MainContent::Charts => {
+                self.render_charts(compact, narrow, self.content_width, scale_factor, cx)
+            }
             MainContent::Search => self.render_search(narrow, self.content_width, window, cx),
             MainContent::Artist => {
                 self.render_artist_content(compact, narrow, scale_factor, self.content_width, cx)

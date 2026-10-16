@@ -15,7 +15,7 @@ use gpui_component::{
 use lyrune_api::{RecommendationKind, UserPlaylist};
 
 use super::browser::BrowserView;
-use super::page_horizontal_padding;
+use super::{home_content_width, page_horizontal_padding};
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::library::playlist_cover;
 use crate::runtime::RUNTIME;
@@ -132,13 +132,7 @@ impl BrowserView {
         } else {
             px(384.)
         };
-        let grid_width = if narrow {
-            px(640.)
-        } else if compact {
-            px(704.)
-        } else {
-            px(784.)
-        };
+        let grid_width = home_content_width(compact, narrow);
         let cards = self
             .home
             .playlists

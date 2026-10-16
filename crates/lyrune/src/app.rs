@@ -75,6 +75,16 @@ fn page_horizontal_padding(narrow: bool) -> Pixels {
     if narrow { px(20.) } else { px(24.) }
 }
 
+fn home_content_width(compact: bool, narrow: bool) -> Pixels {
+    if narrow {
+        px(640.)
+    } else if compact {
+        px(704.)
+    } else {
+        px(784.)
+    }
+}
+
 fn progress_fraction(position: Duration, duration: Duration) -> f32 {
     if duration.is_zero() {
         0.

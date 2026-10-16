@@ -16,7 +16,7 @@ use lyrune_api::{ChartGroup, UserPlaylist, UserPlaylistId};
 
 use super::browser::BrowserView;
 use super::navigation::{NavigationPage, PlaylistCachePolicy, PlaylistScrollPosition};
-use super::{LIBRARY_CACHE_TTL, page_horizontal_padding, unix_timestamp_secs};
+use super::{LIBRARY_CACHE_TTL, home_content_width, page_horizontal_padding, unix_timestamp_secs};
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::library::{card_grid_dimensions, playlist_cover};
 use crate::runtime::RUNTIME;
@@ -100,13 +100,17 @@ impl BrowserView {
 
     pub(super) fn render_charts(
         &mut self,
+        compact: bool,
         narrow: bool,
         content_width: Pixels,
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let available_width = (content_width - page_horizontal_padding(narrow) * 2.).max(px(1.));
+        let grid_width = home_content_width(compact, narrow);
+        let available_width = (content_width - page_horizontal_padding(narrow) * 2.)
+            .max(px(1.))
+            .min(grid_width);
         let groups = self.charts.groups.clone();
         let sections = groups
             .iter()
@@ -219,12 +223,15 @@ impl BrowserView {
                 v_flex()
                     .w_full()
                     .gap_3()
-                    .child(
-                        div()
-                            .text_size(px(22.))
-                            .font_semibold()
-                            .child(group.group_name.clone()),
-                    )
+                    .when(!featured, |section| {
+                        section.child(
+                            div()
+                                .px_2()
+                                .text_size(if narrow { px(22.) } else { px(24.) })
+                                .font_semibold()
+                                .child(group.group_name.clone()),
+                        )
+                    })
                     .child(
                         div()
                             .grid()
@@ -246,41 +253,57 @@ impl BrowserView {
             .child(
                 v_flex()
                     .w_full()
+                    .items_center()
                     .px(page_horizontal_padding(narrow))
-                    .pt_4()
+                    .pt(if narrow { px(22.) } else { px(32.) })
                     .pb_8()
-                    .gap_6()
                     .child(
-                        h_flex()
+                        v_flex()
                             .w_full()
-                            .justify_between()
-                            .child(div().text_size(px(28.)).font_semibold().child("排行榜"))
+                            .max_w(grid_width)
+                            .gap_3()
                             .child(
-                                Button::new("refresh-charts")
-                                    .ghost()
-                                    .label("刷新")
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.load_charts(true, cx)),
+                                h_flex()
+                                    .w_full()
+                                    .px_2()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_size(if narrow { px(22.) } else { px(24.) })
+                                            .font_semibold()
+                                            .child("排行榜"),
+                                    )
+                                    .child(
+                                        Button::new("refresh-charts")
+                                            .ghost()
+                                            .label("刷新")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.load_charts(true, cx)
+                                            })),
                                     ),
-                            ),
-                    )
-                    .when(self.charts.loading, |view| {
-                        view.child(
-                            h_flex()
-                                .gap_2()
-                                .text_color(theme.muted_foreground)
-                                .child(Spinner::new().with_size(px(20.)).color(theme.primary))
-                                .child("正在加载排行榜…"),
-                        )
-                    })
-                    .when_some(self.charts.error.clone(), |view, error| {
-                        view.child(div().text_color(theme.muted_foreground).child(error))
-                    })
-                    .when(
-                        !self.charts.loading && self.charts.error.is_none() && groups.is_empty(),
-                        |view| view.child("暂无排行榜"),
-                    )
-                    .children(sections),
+                            )
+                            .when(self.charts.loading, |view| {
+                                view.child(
+                                    h_flex()
+                                        .gap_2()
+                                        .text_color(theme.muted_foreground)
+                                        .child(
+                                            Spinner::new().with_size(px(20.)).color(theme.primary),
+                                        )
+                                        .child("正在加载排行榜…"),
+                                )
+                            })
+                            .when_some(self.charts.error.clone(), |view, error| {
+                                view.child(div().text_color(theme.muted_foreground).child(error))
+                            })
+                            .when(
+                                !self.charts.loading
+                                    && self.charts.error.is_none()
+                                    && groups.is_empty(),
+                                |view| view.child("暂无排行榜"),
+                            )
+                            .child(v_flex().w_full().gap_6().children(sections)),
+                    ),
             )
             .into_any_element()
     }

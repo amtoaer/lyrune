@@ -625,8 +625,7 @@ impl LyruneView {
                 .unwrap_or_default();
             let single = accounts.len() == 1;
             v_flex()
-                .w_full()
-                .h(px(328.))
+                .size_full()
                 .gap_2()
                 .child(
                     h_flex()
@@ -817,10 +816,9 @@ impl LyruneView {
                     .into_any_element(),
             };
             v_flex()
-                .w_full()
-                .min_h(px(288.))
+                .size_full()
                 .items_center()
-                .gap_3()
+                .gap_2()
                 .child(
                     div()
                         .id("login-qr")
@@ -835,27 +833,29 @@ impl LyruneView {
                         .child(qr),
                 )
                 .child(
-                    v_flex()
+                    div()
                         .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
                         .items_center()
-                        .gap_1()
-                        .child(match account.login_method {
-                            LoginMethod::MusicApp => "使用手机 QQ 音乐扫码",
-                            LoginMethod::Qq => "使用手机 QQ 扫码",
-                            LoginMethod::Wechat => "使用手机微信扫码",
-                        })
+                        .justify_center()
+                        .text_center()
                         .when(!account.message.is_empty(), |this| {
-                            this.child(
-                                div()
-                                    .w_full()
-                                    .text_sm()
-                                    .text_center()
-                                    .text_color(theme.muted_foreground)
-                                    .child(account.message.clone()),
-                            )
+                            this.text_sm().text_color(theme.muted_foreground)
+                        })
+                        .child(if account.message.is_empty() {
+                            match account.login_method {
+                                LoginMethod::MusicApp => "使用手机 QQ 音乐扫码",
+                                LoginMethod::Qq => "使用手机 QQ 扫码",
+                                LoginMethod::Wechat => "使用手机微信扫码",
+                            }
+                            .to_owned()
+                        } else {
+                            account.message.clone()
                         }),
                 )
-                .child(div().w_full().h(px(36.)).flex_shrink_0().mt_auto().when(
+                .child(div().w_full().h(px(36.)).flex_shrink_0().when(
                     account.login_method == LoginMethod::Qq,
                     |this| {
                         this.child(
@@ -918,7 +918,13 @@ impl LyruneView {
                                     }),
                             ),
                     )
-                    .child(login_content)
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(288.))
+                            .flex_shrink_0()
+                            .child(login_content),
+                    )
                     .child(
                         h_flex()
                             .w_full()

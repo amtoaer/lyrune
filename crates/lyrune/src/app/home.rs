@@ -185,7 +185,7 @@ impl BrowserView {
                 .ghost()
                 .w_full()
                 .min_w_0()
-                .h(px(196.))
+                .h(px(156.))
                 .p(px(22.))
                 .rounded(px(12.))
                 .bg(linear_gradient(
@@ -243,8 +243,9 @@ impl BrowserView {
             Button::new("home-radar")
                 .ghost()
                 .w_full()
-                .h(px(92.))
-                .p_4()
+                .h(px(72.))
+                .px_4()
+                .py_3()
                 .rounded(px(12.))
                 .bg(theme.muted.opacity(0.7))
                 .when(recommendation_loading, |button| {
@@ -289,8 +290,9 @@ impl BrowserView {
             Button::new("home-guess")
                 .ghost()
                 .w_full()
-                .h(px(92.))
-                .p_4()
+                .h(px(72.))
+                .px_4()
+                .py_3()
                 .rounded(px(12.))
                 .bg(theme.muted.opacity(0.7))
                 .when(recommendation_loading, |button| {

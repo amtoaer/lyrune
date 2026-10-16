@@ -876,9 +876,9 @@ impl LyruneView {
         };
 
         let alternatives = [
-            ("music-app-login", "QQ 音乐", LoginMethod::MusicApp),
-            ("qq-login", "QQ", LoginMethod::Qq),
-            ("wechat-login", "微信", LoginMethod::Wechat),
+            ("music-app-login", "QQ 音乐登录", LoginMethod::MusicApp),
+            ("qq-login", "QQ 登录", LoginMethod::Qq),
+            ("wechat-login", "微信登录", LoginMethod::Wechat),
         ]
         .into_iter()
         .filter(|(_, _, method)| *method != account.login_method);

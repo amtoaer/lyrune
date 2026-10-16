@@ -1,25 +1,17 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, ensure};
 use futures_util::future::join_all;
-use reqwest::cookie::{CookieStore as _, Jar};
-use reqwest::header::{LOCATION, REFERER};
-use reqwest::{Client, Url};
+use reqwest::Url;
+use reqwest::header::REFERER;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::{LoginClient, LoginToken};
-use crate::signing::hash33;
-use crate::{ProtocolClient, QqCredential};
+use super::qq::{
+    LOGIN_JUMP, LOGIN_REFERER, MUSIC_APP_ID, QQ_APP_ID, QqSession, parse_redirect, session_cookie,
+};
+use crate::QqCredential;
 
-const QQ_APP_ID: &str = "716027609";
-const MUSIC_APP_ID: &str = "100497308";
-const LOGIN_JUMP: &str = "https://graph.qq.com/oauth2.0/login_jump";
-const MUSIC_REDIRECT: &str =
-    "https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/";
-const LOGIN_REFERER: &str = "https://xui.ptlogin2.qq.com/cgi-bin/xlogin?appid=716027609&daid=383&style=33&target=self&pt_3rd_aid=100497308&s_url=https%3A%2F%2Fgraph.qq.com%2Foauth2.0%2Flogin_jump";
 const QQ_PORTS: [u16; 5] = [4301, 4303, 4305, 4307, 4309];
 
 pub struct QqAccount {
@@ -28,38 +20,19 @@ pub struct QqAccount {
 }
 
 pub struct QqQuickLogin {
-    client: Client,
-    client_guid: String,
+    session: QqSession,
     local_token: String,
-    cookies: Arc<Jar>,
     port: u16,
     accounts: Vec<QqAccount>,
 }
 
 impl QqQuickLogin {
     pub async fn discover(client_guid: String) -> Result<Self> {
-        ensure!(
-            !client_guid.trim().is_empty(),
-            "设备标识未保存，请检查应用设置后重新启动"
-        );
-        let cookies = Arc::new(Jar::default());
-        let client = Client::builder()
-            .no_proxy()
-            .cookie_provider(cookies.clone())
-            .resolve(
-                "localhost.ptlogin2.qq.com",
-                SocketAddr::from(([127, 0, 0, 1], 0)),
-            )
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(3))
-            .user_agent(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
-            )
-            .build()?;
+        let session = QqSession::new(client_guid)?;
+        let client = &session.client;
         client.get(LOGIN_REFERER).send().await?.error_for_status()?;
-        let local_token = session_cookie(&cookies, LOGIN_REFERER, "pt_local_token")?;
+        let local_token = session_cookie(&session.cookies, LOGIN_REFERER, "pt_local_token")?;
         let probes = join_all(QQ_PORTS.map(|port| {
-            let client = &client;
             let local_token = &local_token;
             async move {
                 let result = async {
@@ -117,10 +90,8 @@ impl QqQuickLogin {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            client,
-            client_guid,
+            session,
             local_token,
-            cookies,
             port,
             accounts,
         })
@@ -136,6 +107,7 @@ impl QqQuickLogin {
             "请选择检测到的 QQ 账号"
         );
         let response = self
+            .session
             .client
             .get(format!(
                 "https://localhost.ptlogin2.qq.com:{}/pt_get_st",
@@ -158,7 +130,7 @@ impl QqQuickLogin {
             .and_then(reqwest::Response::error_for_status)
             .map_err(reqwest::Error::without_url)?;
         let client_key = session_cookie(
-            &self.cookies,
+            &self.session.cookies,
             "https://ssl.ptlogin2.qq.com/jump",
             "clientkey",
         )?;
@@ -177,6 +149,7 @@ impl QqQuickLogin {
             None => 9,
         };
         let response = self
+            .session
             .client
             .get("https://ssl.ptlogin2.qq.com/jump")
             .query(&[
@@ -196,110 +169,8 @@ impl QqQuickLogin {
             .and_then(reqwest::Response::error_for_status)
             .map_err(reqwest::Error::without_url)?;
         let redirect = parse_qlogin(&response.text().await?)?;
-        self.client
-            .get(redirect)
-            .header(REFERER, LOGIN_REFERER)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(reqwest::Error::without_url)?;
-        let token = match self.authorize_music().await {
-            Err(error)
-                if error.chain().any(|cause| {
-                    cause
-                        .downcast_ref::<reqwest::Error>()
-                        .is_some_and(|error| error.is_timeout() || error.is_connect())
-                }) =>
-            {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                self.authorize_music().await?
-            }
-            result => result?,
-        };
-        let credential = QqCredential::from_token(token, self.client_guid.clone());
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            ProtocolClient::new()?.ensure_encrypted_uin(credential),
-        )
-        .await
-        .context("读取 QQ 音乐用户资料超时，请稍后重试")?
+        self.session.finish_login(redirect).await
     }
-
-    async fn authorize_music(&self) -> Result<LoginToken> {
-        let p_skey = session_cookie(
-            &self.cookies,
-            "https://graph.qq.com/oauth2.0/authorize",
-            "p_skey",
-        )?;
-        let response = self
-            .client
-            .post("https://graph.qq.com/oauth2.0/authorize")
-            .header(REFERER, "https://graph.qq.com/")
-            .form(&[
-                ("response_type", "code".to_owned()),
-                ("client_id", MUSIC_APP_ID.to_owned()),
-                ("redirect_uri", MUSIC_REDIRECT.to_owned()),
-                ("scope", "get_user_info,get_app_friends".to_owned()),
-                ("state", "state".to_owned()),
-                ("switch", String::new()),
-                ("from_ptlogin", "1".to_owned()),
-                ("src", "1".to_owned()),
-                ("update_auth", "1".to_owned()),
-                ("openapi", "1010_1030".to_owned()),
-                ("g_tk", hash33(&p_skey).to_string()),
-                (
-                    "auth_time",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)?
-                        .as_millis()
-                        .to_string(),
-                ),
-                ("ui", uuid::Uuid::new_v4().to_string()),
-            ])
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(reqwest::Error::without_url)?;
-        let redirect = Url::parse(
-            response
-                .headers()
-                .get(LOCATION)
-                .context("QQ 音乐授权未完成，请重新检测账号后重试")?
-                .to_str()?,
-        )?;
-        ensure!(
-            redirect.scheme() == "https"
-                && redirect.host_str() == Some("y.qq.com")
-                && redirect.path() == "/portal/wx_redirect.html",
-            "QQ 返回了无效的音乐授权地址"
-        );
-        let code = redirect
-            .query_pairs()
-            .find(|(name, _)| name == "code")
-            .map(|(_, value)| value.into_owned())
-            .filter(|code| !code.is_empty())
-            .context("QQ 未返回音乐授权码")?;
-        let client = LoginClient::new(self.client_guid.clone());
-        client
-            .login_with_qq_code(&code)
-            .await
-            .context("QQ 音乐凭据兑换失败")
-    }
-}
-
-fn session_cookie(jar: &Jar, url: &str, name: &str) -> Result<String> {
-    let header = jar
-        .cookies(&Url::parse(url)?)
-        .context("QQ 未返回授权会话 Cookie")?;
-    for cookie in header.to_str()?.split(';') {
-        if let Some((key, value)) = cookie.trim().split_once('=')
-            && key == name
-            && !value.is_empty()
-        {
-            return Ok(value.to_owned());
-        }
-    }
-    bail!("QQ 授权会话缺少 {name}，请重新检测账号后重试")
 }
 
 fn parse_jsonp<T: DeserializeOwned>(body: &str, callback: &str) -> Result<T> {
@@ -350,14 +221,7 @@ fn parse_qlogin(body: &str) -> Result<Url> {
         args.next().is_some_and(|separator| separator.trim() == ","),
         "QQ 快捷授权响应格式无效"
     );
-    let url = Url::parse(args.next().context("QQ 未返回快捷授权地址")?)?;
-    ensure!(
-        url.scheme() == "https"
-            && url.host_str() == Some("ssl.ptlogin2.graph.qq.com")
-            && url.path() == "/check_sig",
-        "QQ 返回了无效的快捷授权地址"
-    );
-    Ok(url)
+    parse_redirect(args.next().context("QQ 未返回快捷授权地址")?)
 }
 
 #[cfg(test)]

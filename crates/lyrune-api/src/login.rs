@@ -2,6 +2,7 @@
 
 mod models;
 mod mqtt;
+pub(crate) mod qq;
 pub(crate) mod quick;
 pub(crate) mod wechat;
 

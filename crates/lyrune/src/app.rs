@@ -839,7 +839,7 @@ impl Render for LyruneView {
             div()
                 .relative()
                 .size_full()
-                .child(self.render_login(cx))
+                .child(self.render_login(window, cx))
                 .child(notification_layer)
                 .when(client_decorations, |this| {
                     this.child(deferred(self.render_window_controls(window, cx)).with_priority(20))

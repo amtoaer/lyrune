@@ -7,16 +7,18 @@ use anyhow::Context as _;
 use gpui::{prelude::*, *};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, StyledExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, avatar::Avatar, h_flex,
+    v_flex,
 };
 use lyrune_api::{
     CredentialSession, LoginEvent, ProtocolClient, QqCredential, QqQuickLogin, UserProfile,
-    run_qr_login, run_wechat_login,
+    run_qq_login, run_qr_login, run_wechat_login,
 };
 use tokio::sync::mpsc;
 
 use crate::credentials::CredentialStore;
-use crate::icons::lyrune_icon;
+use crate::http::cached_image_source;
+use crate::icons::{MediaIcon, lyrune_icon, media_icon_hsla};
 use crate::runtime::RUNTIME;
 
 use super::LyruneView;
@@ -30,11 +32,17 @@ pub(super) enum AccountState {
     SignedIn,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LoginMethod {
     MusicApp,
     Wechat,
     Qq,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QqLoginMode {
+    Quick,
+    Qr,
 }
 
 // 实体随应用存活；关闭窗口不会中断凭据监听或把登录任务交给页面视图。
@@ -51,6 +59,8 @@ pub(super) struct Account {
     login_method: LoginMethod,
     login_task: Option<tokio::task::AbortHandle>,
     qq_login: Option<Arc<QqQuickLogin>>,
+    qq_mode: QqLoginMode,
+    selected_qq: Option<u64>,
 }
 
 impl Default for Account {
@@ -67,6 +77,8 @@ impl Default for Account {
             login_method: LoginMethod::MusicApp,
             login_task: None,
             qq_login: None,
+            qq_mode: QqLoginMode::Quick,
+            selected_qq: None,
         }
     }
 }
@@ -83,7 +95,7 @@ impl Account {
         let generation = self.invalidate_login();
         self.state = AccountState::SigningIn;
         self.qr_image = None;
-        self.message = "正在向 QQ 音乐申请二维码…".to_owned();
+        self.message.clear();
         Some(generation)
     }
 
@@ -180,9 +192,9 @@ impl Account {
         let Some(generation) = self.begin_login() else {
             return;
         };
-        self.qq_login = None;
-        if self.login_method == LoginMethod::Qq {
-            self.message = "正在检测本机 QQ 账号…".to_owned();
+        if self.login_method == LoginMethod::Qq && self.qq_mode == QqLoginMode::Quick {
+            self.qq_login = None;
+            self.message = "正在检测本机已登录账号…".to_owned();
             let task = RUNTIME.spawn(QqQuickLogin::discover(self.client_guid.clone()));
             self.login_task = Some(task.abort_handle());
             cx.spawn(async move |this, cx| {
@@ -190,24 +202,7 @@ impl Account {
                     return;
                 };
                 let _ = this.update(cx, |this, cx| {
-                    if this.generation != generation {
-                        return;
-                    }
-                    this.login_task = None;
-                    this.state = AccountState::SignedOut;
-                    match result {
-                        Ok(login) => {
-                            this.message = if login.accounts().is_empty() {
-                                "未发现已登录账号，请先登录本机 QQ 后重新检测"
-                            } else {
-                                "请选择账号，授权登录 QQ 音乐"
-                            }
-                            .to_owned();
-                            this.qq_login = Some(Arc::new(login));
-                        }
-                        Err(error) => this.message = format!("{error:#}"),
-                    }
-                    cx.notify();
+                    this.complete_qq_discovery(generation, result, cx);
                 });
             })
             .detach();
@@ -223,7 +218,7 @@ impl Account {
             match method {
                 LoginMethod::MusicApp => run_qr_login(sender, guid).await,
                 LoginMethod::Wechat => run_wechat_login(sender, guid).await,
-                LoginMethod::Qq => unreachable!("本机 QQ 已进入账号检测流程"),
+                LoginMethod::Qq => run_qq_login(sender, guid).await,
             }
         });
         self.login_task = Some(task.abort_handle());
@@ -244,6 +239,63 @@ impl Account {
             }
         })
         .detach();
+    }
+
+    fn complete_qq_discovery(
+        &mut self,
+        generation: u64,
+        result: anyhow::Result<QqQuickLogin>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.generation != generation {
+            return;
+        }
+        self.login_task = None;
+        self.state = AccountState::SignedOut;
+        match result {
+            Ok(login) if !login.accounts().is_empty() => {
+                if !login
+                    .accounts()
+                    .iter()
+                    .any(|account| Some(account.uin) == self.selected_qq)
+                {
+                    self.selected_qq = Some(login.accounts()[0].uin);
+                }
+                self.message.clear();
+                self.qq_login = Some(Arc::new(login));
+            }
+            _ => {
+                self.qq_mode = QqLoginMode::Qr;
+                self.start_login(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn select_login_method(&mut self, method: LoginMethod, cx: &mut Context<Self>) {
+        if self.login_method == method || self.state == AccountState::Restoring {
+            return;
+        }
+        self.invalidate_login();
+        self.state = AccountState::SignedOut;
+        self.login_method = method;
+        self.qr_image = None;
+        self.message.clear();
+        if method == LoginMethod::Qq
+            && self.qq_mode == QqLoginMode::Quick
+            && self.qq_login.is_some()
+        {
+            cx.notify();
+        } else {
+            self.start_login(cx);
+        }
+    }
+
+    fn select_qq_mode(&mut self, mode: QqLoginMode, cx: &mut Context<Self>) {
+        self.invalidate_login();
+        self.state = AccountState::SignedOut;
+        self.qq_mode = mode;
+        self.start_login(cx);
     }
 
     fn login_with_qq(&mut self, uin: u64, cx: &mut Context<Self>) {
@@ -291,20 +343,16 @@ impl Account {
                     }
                 };
                 self.qr_image = Some(Arc::new(Image::from_bytes(format, bytes)));
-                self.message = match self.login_method {
-                    LoginMethod::MusicApp => "请使用 QQ 音乐 App 扫描二维码",
-                    LoginMethod::Wechat => "请使用微信扫描二维码",
-                    LoginMethod::Qq => unreachable!("本机 QQ 不使用二维码"),
-                }
-                .to_owned();
+                self.message.clear();
             }
-            LoginEvent::WaitingScan => self.message = "等待扫码…".to_owned(),
+            LoginEvent::WaitingScan => self.message.clear(),
             LoginEvent::WaitingConfirm => {
                 self.message = "已扫码，请在手机上确认登录".to_owned();
             }
             LoginEvent::Succeeded(credential) => {
                 self.login_task = None;
                 self.qq_login = None;
+                self.selected_qq = None;
                 self.state = AccountState::SignedIn;
                 self.qr_image = None;
                 self.install_credential_session(CredentialSession::new(credential), cx);
@@ -319,12 +367,13 @@ impl Account {
                 self.login_task = None;
                 self.state = AccountState::SignedOut;
                 self.qr_image = None;
-                self.message = if self.login_method == LoginMethod::Qq {
-                    "登录失败，请重试或重新检测账号"
-                } else {
-                    "扫码登录失败，点击二维码区域重试"
-                }
-                .to_owned();
+                self.message =
+                    if self.login_method == LoginMethod::Qq && self.qq_mode == QqLoginMode::Quick {
+                        "登录失败，请重试或重新检测账号"
+                    } else {
+                        "扫码登录失败，点击二维码区域重试"
+                    }
+                    .to_owned();
                 cx.emit(AccountEvent::Error(format!("登录失败：{error}")));
             }
         }
@@ -505,6 +554,10 @@ impl LyruneView {
         self.account.update(cx, |account, _| {
             account.profile = None;
             account.qr_image = None;
+            account.qq_login = None;
+            account.selected_qq = None;
+            account.qq_mode = QqLoginMode::Quick;
+            account.login_method = LoginMethod::MusicApp;
         });
         self.browser.update(cx, |browser, cx| {
             browser.library_loading = false;
@@ -540,9 +593,8 @@ impl LyruneView {
             });
             cx.notify();
         });
-        self.account.update(cx, |account, _| {
-            account.message = "使用 QQ 音乐 App 扫码登录".to_owned()
-        });
+        self.account
+            .update(cx, |account, _| account.message.clear());
         if restart_login {
             self.account
                 .update(cx, |account, cx| account.start_login(cx));
@@ -555,82 +607,271 @@ impl LyruneView {
         }));
     }
 
-    pub(super) fn render_login(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_login(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let qr = match &self.account.read(cx).qr_image {
-            Some(image) => img(image.clone())
-                .size(px(240.))
-                .rounded(theme.radius_lg)
-                .into_any_element(),
-            None => div()
-                .size(px(240.))
-                .rounded(theme.radius_lg)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.muted)
-                .text_color(theme.muted_foreground)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(match self.account.read(cx).state {
-                    AccountState::Restoring => "正在恢复登录…",
-                    AccountState::SigningIn => "正在生成二维码…",
-                    _ => "点击重试登录",
-                })
-                .into_any_element(),
-        };
         let account = self.account.read(cx);
-        let login_content = if account.login_method == LoginMethod::Qq {
-            let busy = account.state == AccountState::SigningIn;
+        let busy = account.state == AccountState::SigningIn;
+        let quick =
+            account.login_method == LoginMethod::Qq && account.qq_mode == QqLoginMode::Quick;
+        let login_content = if quick {
+            let accounts = account
+                .qq_login
+                .as_ref()
+                .map(|login| login.accounts())
+                .unwrap_or_default();
+            let single = accounts.len() == 1;
             v_flex()
                 .w_full()
-                .min_h(px(240.))
-                .gap_3()
-                .justify_center()
-                .children(
-                    account
-                        .qq_login
-                        .iter()
-                        .flat_map(|login| login.accounts())
-                        .map(|account| {
-                            let uin = account.uin;
-                            Button::new(("qq-account", uin))
-                                .w_full()
-                                .label(format!("{}（{}）", account.nickname, uin))
+                .h(px(328.))
+                .gap_2()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("本机账号")
+                        .child(
+                            Button::new("qq-detect")
+                                .label("重新检测")
+                                .ghost()
+                                .small()
                                 .disabled(busy)
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                                .child(media_icon_hsla(
+                                    MediaIcon::Loading,
+                                    theme.muted_foreground,
+                                    px(14.),
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| {
                                     this.account
-                                        .update(cx, |account, cx| account.login_with_qq(uin, cx));
-                                }))
-                        }),
+                                        .update(cx, |account, cx| account.start_login(cx));
+                                })),
+                        ),
                 )
                 .child(
-                    Button::new("qq-detect")
-                        .label("重新检测")
-                        .ghost()
-                        .disabled(busy)
+                    v_flex()
+                        .id("qq-accounts")
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .gap_2()
+                        .when(single || accounts.is_empty(), |this| {
+                            this.items_center().justify_center()
+                        })
+                        .when(!single, |this| this.overflow_y_scroll())
+                        .when(accounts.is_empty(), |this| {
+                            this.text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("正在检测本机已登录账号…")
+                        })
+                        .children(accounts.iter().map(|item| {
+                            let uin = item.uin;
+                            let selected = account.selected_qq == Some(uin);
+                            let size = px(if single { 80. } else { 42. });
+                            let avatar = Avatar::new()
+                                .name(item.nickname.clone())
+                                .with_size(size)
+                                .src(cached_image_source(
+                                    format!("https://q1.qlogo.cn/g?b=qq&nk={uin}&s=100"),
+                                    size,
+                                    window.scale_factor(),
+                                ));
+                            let details = v_flex()
+                                .w_full()
+                                .min_w_0()
+                                .gap_1()
+                                .when(single, |this| this.items_center())
+                                .child(
+                                    div()
+                                        .max_w_full()
+                                        .truncate()
+                                        .font_semibold()
+                                        .child(item.nickname.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("QQ {uin}")),
+                                );
+                            if single {
+                                v_flex()
+                                    .w_full()
+                                    .gap_3()
+                                    .items_center()
+                                    .child(avatar)
+                                    .child(details)
+                                    .into_any_element()
+                            } else {
+                                Button::new(("qq-account", uin))
+                                    .w_full()
+                                    .h(px(60.))
+                                    .flex_shrink_0()
+                                    .px_3()
+                                    .disabled(busy)
+                                    .when(selected, |this| {
+                                        this.bg(theme.accent).border_color(theme.primary)
+                                    })
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .gap_3()
+                                            .child(avatar)
+                                            .child(div().flex_1().min_w_0().child(details))
+                                            .child(
+                                                div()
+                                                    .size(px(20.))
+                                                    .flex_shrink_0()
+                                                    .rounded_full()
+                                                    .border_1()
+                                                    .border_color(if selected {
+                                                        theme.primary
+                                                    } else {
+                                                        theme.border
+                                                    })
+                                                    .when(selected, |this| {
+                                                        this.bg(theme.primary)
+                                                            .text_color(theme.primary_foreground)
+                                                            .text_center()
+                                                            .child("✓")
+                                                    }),
+                                            ),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.account.update(cx, |account, cx| {
+                                            account.selected_qq = Some(uin);
+                                            cx.notify();
+                                        });
+                                    }))
+                                    .into_any_element()
+                            }
+                        })),
+                )
+                .when(
+                    !account.message.is_empty() && !accounts.is_empty(),
+                    |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_center()
+                                .text_color(theme.muted_foreground)
+                                .child(account.message.clone()),
+                        )
+                    },
+                )
+                .child(
+                    Button::new("qq-authorize")
+                        .label("登录")
+                        .primary()
+                        .w_full()
+                        .h(px(40.))
+                        .loading(busy && !accounts.is_empty())
+                        .disabled(busy || account.selected_qq.is_none() || accounts.is_empty())
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.account
-                                .update(cx, |account, cx| account.start_login(cx));
+                            this.account.update(cx, |account, cx| {
+                                if let Some(uin) = account.selected_qq {
+                                    account.login_with_qq(uin, cx);
+                                }
+                            });
+                        })),
+                )
+                .child(
+                    Button::new("qq-use-qr")
+                        .label("使用 QQ 扫码")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.account.update(cx, |account, cx| {
+                                account.select_qq_mode(QqLoginMode::Qr, cx)
+                            });
                         })),
                 )
                 .into_any_element()
         } else {
-            div()
-                .id("login-qr")
-                .when(account.state == AccountState::SignedOut, |this| {
-                    this.cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.account
-                                .update(cx, |account, cx| account.start_login(cx));
-                        }))
+            let qr = match &account.qr_image {
+                Some(image) => img(image.clone())
+                    .size(px(208.))
+                    .rounded(theme.radius_lg)
+                    .into_any_element(),
+                None => div()
+                    .size(px(208.))
+                    .rounded(theme.radius_lg)
+                    .bg(theme.muted)
+                    .text_color(theme.muted_foreground)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(match account.state {
+                        AccountState::Restoring => "正在恢复登录…",
+                        AccountState::SigningIn => "正在生成二维码…",
+                        _ => "点击重试登录",
+                    })
+                    .into_any_element(),
+            };
+            v_flex()
+                .w_full()
+                .h(px(328.))
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(
+                    div()
+                        .id("login-qr")
+                        .when(account.state == AccountState::SignedOut, |this| {
+                            this.cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.account
+                                        .update(cx, |account, cx| account.start_login(cx));
+                                }))
+                        })
+                        .child(qr),
+                )
+                .child(
+                    v_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_1()
+                        .child(match account.login_method {
+                            LoginMethod::MusicApp => "使用手机 QQ 音乐扫码",
+                            LoginMethod::Qq => "使用手机 QQ 扫码",
+                            LoginMethod::Wechat => "使用手机微信扫码",
+                        })
+                        .child(
+                            div()
+                                .w_full()
+                                .min_h(px(20.))
+                                .text_sm()
+                                .text_center()
+                                .text_color(theme.muted_foreground)
+                                .child(account.message.clone()),
+                        ),
+                )
+                .when(account.login_method == LoginMethod::Qq, |this| {
+                    this.child(
+                        Button::new("qq-use-quick")
+                            .label("检测本机已登录账号")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.account.update(cx, |account, cx| {
+                                    account.select_qq_mode(QqLoginMode::Quick, cx)
+                                });
+                            })),
+                    )
                 })
-                .child(qr)
                 .into_any_element()
         };
 
+        let alternatives = [
+            ("music-app-login", "QQ 音乐", LoginMethod::MusicApp),
+            ("qq-login", "QQ", LoginMethod::Qq),
+            ("wechat-login", "微信", LoginMethod::Wechat),
+        ]
+        .into_iter()
+        .filter(|(_, _, method)| *method != account.login_method);
         v_flex()
             .size_full()
+            .image_cache(self.image_cache.clone())
             .font(self.preferences.read(cx).fonts.ui.clone())
             .items_center()
             .justify_center()
@@ -638,58 +879,61 @@ impl LyruneView {
             .text_color(theme.foreground)
             .child(
                 v_flex()
-                    .w(px(380.))
+                    .w(px(400.))
                     .items_center()
                     .gap_5()
-                    .p_8()
+                    .p_7()
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.group_box)
                     .shadow_lg()
-                    .child(lyrune_icon(self.preferences.read(cx).color_theme, px(46.)))
-                    .child(div().text_2xl().font_bold().child("登录 Lyrune"))
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("登录 QQ 音乐以加载你的歌单"),
-                    )
-                    .child(
-                        h_flex().gap_2().children(
-                            [
-                                ("music-app-login", "QQ 音乐", LoginMethod::MusicApp),
-                                ("wechat-login", "微信", LoginMethod::Wechat),
-                                ("qq-login", "本机 QQ", LoginMethod::Qq),
-                            ]
-                            .map(|(id, label, method)| {
-                                Button::new(id)
-                                    .label(label)
-                                    .ghost()
-                                    .selected(self.account.read(cx).login_method == method)
-                                    .disabled(
-                                        self.account.read(cx).state == AccountState::Restoring,
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.account.update(cx, |account, cx| {
-                                            if account.login_method != method {
-                                                account.invalidate_login();
-                                                account.state = AccountState::SignedOut;
-                                                account.login_method = method;
-                                                account.start_login(cx);
-                                            }
-                                        });
-                                    }))
-                            }),
-                        ),
+                        v_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(lyrune_icon(self.preferences.read(cx).color_theme, px(44.)))
+                            .child(div().mt_2().text_2xl().font_bold().child("登录 Lyrune"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("登录 QQ 音乐以加载你的歌单"),
+                            ),
                     )
                     .child(login_content)
                     .child(
-                        div()
-                            .text_sm()
-                            .text_center()
-                            .text_color(theme.muted_foreground)
-                            .child(self.account.read(cx).message.clone()),
+                        h_flex()
+                            .w_full()
+                            .justify_center()
+                            .gap_2()
+                            .pt_3()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .children(alternatives.enumerate().flat_map(
+                                |(index, (id, label, method))| {
+                                    let button = Button::new(id)
+                                        .label(label)
+                                        .ghost()
+                                        .small()
+                                        .disabled(account.state == AccountState::Restoring)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.account.update(cx, |account, cx| {
+                                                account.select_login_method(method, cx)
+                                            });
+                                        }))
+                                        .into_any_element();
+                                    (index > 0)
+                                        .then(|| {
+                                            div()
+                                                .text_color(theme.muted_foreground)
+                                                .child("·")
+                                                .into_any_element()
+                                        })
+                                        .into_iter()
+                                        .chain(std::iter::once(button))
+                                },
+                            )),
                     ),
             )
             .into_any_element()
@@ -698,7 +942,9 @@ impl LyruneView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Account, AccountState};
+    use gpui::{AppContext as _, TestAppContext};
+
+    use super::{Account, AccountState, LoginMethod, QqLoginMode};
     use lyrune_api::{CredentialSession, QqCredential};
 
     #[tokio::test]
@@ -711,6 +957,38 @@ mod tests {
         account.invalidate_login();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(account.login_task.is_none());
+    }
+
+    #[gpui::test]
+    fn test_qq_login_switching(cx: &mut TestAppContext) {
+        // 空 GUID 使测试任务在网络请求前退出；仍经过真实的切换、取消和回调路径。
+        let account = cx.new(|_| Account::new(None, String::new()));
+        account.update(cx, |account, cx| {
+            assert_eq!(account.login_method, LoginMethod::MusicApp);
+            account.state = AccountState::SignedOut;
+            account.select_login_method(LoginMethod::Qq, cx);
+            let discovery = account.generation;
+            assert_eq!(account.qq_mode, QqLoginMode::Quick);
+            account.complete_qq_discovery(discovery, Err(anyhow::anyhow!("no local QQ")), cx);
+            assert_eq!(account.qq_mode, QqLoginMode::Qr);
+            assert_eq!(account.state, AccountState::SigningIn);
+
+            account.select_qq_mode(QqLoginMode::Quick, cx);
+            let discovery = account.generation;
+            account.select_qq_mode(QqLoginMode::Qr, cx);
+            let scan = account.generation;
+            account.complete_qq_discovery(discovery, Err(anyhow::anyhow!("late result")), cx);
+            assert_eq!(account.generation, scan);
+            assert_eq!(account.qq_mode, QqLoginMode::Qr);
+
+            account.select_login_method(LoginMethod::Wechat, cx);
+            account.select_login_method(LoginMethod::Qq, cx);
+            assert_eq!(account.qq_mode, QqLoginMode::Qr);
+            account.handle_login_event(lyrune_api::LoginEvent::Expired, cx);
+            assert_eq!(account.qq_mode, QqLoginMode::Qr);
+            assert_eq!(account.state, AccountState::SigningIn);
+            account.invalidate_login();
+        });
     }
 
     #[test]

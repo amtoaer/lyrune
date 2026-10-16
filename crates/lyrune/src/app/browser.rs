@@ -836,6 +836,87 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_chart_period_scroll(cx: &mut TestAppContext) {
+        use std::sync::Arc;
+
+        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point, size};
+        use lyrune_api::{Chart, ChartGroup};
+
+        use crate::app::navigation::{PlaylistCachePolicy, PlaylistScrollPosition};
+
+        cx.update(gpui_component::init);
+        let (host, cx) = cx.add_window_view(|window, cx| TestBrowser {
+            browser: new_browser(window, cx),
+            reveal: 0.,
+            hidden: false,
+        });
+        cx.simulate_resize(size(px(1440.), px(1000.)));
+        let browser = host.read_with(cx, |host, _| host.browser.clone());
+        let chart: Chart = serde_json::from_value(serde_json::json!({
+            "topId": 5, "title": "内地榜", "period": "2026_42",
+            "frontPicUrl": "", "updateTips": "每周更新", "totalNum": 0, "song": [],
+            "history": {
+                "year": (2010..=2026).rev().collect::<Vec<_>>(),
+                "subPeriod": vec![(1..=52).rev().collect::<Vec<_>>(); 17]
+            }
+        }))
+        .unwrap();
+        browser.update(cx, |browser, cx| {
+            let mut playlist = chart.playlist("2014_3".into());
+            playlist.cover_url = None;
+            browser.charts.groups = Arc::new(vec![ChartGroup {
+                group_id: 1,
+                group_name: "地区榜".into(),
+                toplist: vec![chart],
+            }]);
+            browser.open_playlist(
+                playlist,
+                None,
+                false,
+                PlaylistCachePolicy::Fresh,
+                PlaylistScrollPosition::top(),
+                None,
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        for pass in 0..2 {
+            let picker = cx.debug_bounds("chart-period").unwrap();
+            cx.simulate_click(picker.center(), Modifiers::none());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            for (list, selected) in [
+                ("chart-years", "chart-year-2014"),
+                ("chart-weeks", "chart-week-2014_3"),
+            ] {
+                let viewport = cx.debug_bounds(list).unwrap();
+                let item = cx.debug_bounds(selected).unwrap();
+                assert!(item.top() >= viewport.top());
+                assert!(
+                    item.bottom() <= viewport.bottom(),
+                    "{selected}, pass {pass}: item {item:?}, viewport {viewport:?}"
+                );
+            }
+            if pass == 0 {
+                let viewport = cx.debug_bounds("chart-weeks").unwrap();
+                cx.simulate_event(ScrollWheelEvent {
+                    position: viewport.center(),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(2000.))),
+                    modifiers: Modifiers::none(),
+                    touch_phase: TouchPhase::Moved,
+                });
+                browser.update(cx, |_, cx| cx.notify());
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                let viewport = cx.debug_bounds("chart-weeks").unwrap();
+                let latest = cx.debug_bounds("chart-week-2014_52").unwrap();
+                assert!(latest.top() >= viewport.top());
+                assert!(latest.bottom() <= viewport.bottom());
+                cx.simulate_click(picker.center(), Modifiers::none());
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+            }
+        }
+    }
+
+    #[gpui::test]
     fn test_artist_album_navigation(cx: &mut TestAppContext) {
         use std::sync::Arc;
 

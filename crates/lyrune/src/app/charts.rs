@@ -30,6 +30,8 @@ pub(super) struct ChartsPageState {
     fetched_at_secs: u64,
     error: Option<String>,
     period_year: Option<u32>,
+    period_year_scroll: ScrollHandle,
+    period_week_scroll: ScrollHandle,
 }
 
 impl BrowserView {
@@ -343,6 +345,25 @@ impl BrowserView {
         let selected_year = period
             .split_once('_')
             .and_then(|(year, _)| year.parse::<u32>().ok());
+        let selected_year_index = chart
+            .history
+            .year
+            .iter()
+            .position(|year| Some(*year) == selected_year)
+            .unwrap_or(0);
+        let selected_week_index = chart
+            .history
+            .sub_period
+            .get(selected_year_index)
+            .and_then(|weeks| {
+                weeks.iter().position(|week| {
+                    format!("{}_{week}", chart.history.year[selected_year_index]) == period
+                })
+            })
+            .unwrap_or(0);
+        let row_height = px(36.);
+        let year_scroll = self.charts.period_year_scroll.clone();
+        let week_scroll = self.charts.period_week_scroll.clone();
         let browser = cx.entity().downgrade();
         let on_open_browser = browser.clone();
         Popover::new(format!("chart-period-{}-{period}", chart.top_id))
@@ -361,8 +382,15 @@ impl BrowserView {
             )
             .on_open_change(move |open, _, cx| {
                 if *open {
-                    let _ = on_open_browser
-                        .update(cx, |this, _| this.charts.period_year = selected_year);
+                    let _ = on_open_browser.update(cx, |this, _| {
+                        this.charts.period_year = selected_year;
+                        this.charts
+                            .period_year_scroll
+                            .set_offset(point(px(0.), -row_height * selected_year_index as f32));
+                        this.charts
+                            .period_week_scroll
+                            .set_offset(point(px(0.), -row_height * selected_week_index as f32));
+                    });
                 }
             })
             .content(move |_, _, cx| {
@@ -379,19 +407,28 @@ impl BrowserView {
                     .unwrap_or(0);
                 let years = chart.history.year.iter().copied().map(|year| {
                     let browser = browser.clone();
+                    let week_index = if Some(year) == selected_year {
+                        selected_week_index
+                    } else {
+                        0
+                    };
                     Button::new(format!("chart-year-{year}"))
                         .debug_selector(move || format!("chart-year-{year}"))
                         .ghost()
                         .w_full()
-                        .h(px(36.))
+                        .h(row_height)
                         .flex_shrink_0()
                         .label(year.to_string())
                         .when(chart.history.year[year_index] == year, |button| {
                             button.text_color(theme.primary).bg(theme.muted)
                         })
                         .on_click(cx.listener(move |_, _, _, cx| {
-                            let _ =
-                                browser.update(cx, |this, _| this.charts.period_year = Some(year));
+                            let _ = browser.update(cx, |this, _| {
+                                this.charts.period_year = Some(year);
+                                this.charts
+                                    .period_week_scroll
+                                    .set_offset(point(px(0.), -row_height * week_index as f32));
+                            });
                             cx.notify();
                         }))
                 });
@@ -416,7 +453,7 @@ impl BrowserView {
                             })
                             .ghost()
                             .w_full()
-                            .h(px(36.))
+                            .h(row_height)
                             .flex_shrink_0()
                             .label(format!("第 {week} 周"))
                             .when(value == period, |button| {
@@ -444,21 +481,28 @@ impl BrowserView {
                     .items_start()
                     .child(
                         v_flex()
+                            .id("chart-years")
+                            .debug_selector(|| "chart-years".to_owned())
                             .w(px(88.))
                             .h_full()
-                            .overflow_y_scrollbar()
-                            .children(years),
+                            .overflow_y_scroll()
+                            .track_scroll(&year_scroll)
+                            .children(years)
+                            .vertical_scrollbar(&year_scroll),
                     )
                     .child(
                         v_flex()
-                            .flex_1()
-                            .h_full()
-                            .overflow_y_scrollbar()
                             .id(format!(
                                 "chart-weeks-{}-{}",
                                 chart.top_id, chart.history.year[year_index]
                             ))
-                            .children(weeks),
+                            .debug_selector(|| "chart-weeks".to_owned())
+                            .flex_1()
+                            .h_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&week_scroll)
+                            .children(weeks)
+                            .vertical_scrollbar(&week_scroll),
                     )
             })
             .into_any_element()

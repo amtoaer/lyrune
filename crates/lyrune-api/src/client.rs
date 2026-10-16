@@ -98,6 +98,7 @@ impl ProtocolClient {
             "uin": credential.music_id.to_string(),
             "g_tk": hash33(&credential.music_key),
             "guid": credential.client_guid,
+            "tmeLoginType": credential.login_type,
         });
         if let Some(overrides) = comm_overrides.and_then(|value| value.as_object().cloned()) {
             let comm = comm

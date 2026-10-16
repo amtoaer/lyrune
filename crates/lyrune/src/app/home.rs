@@ -12,7 +12,7 @@ use gpui_component::{
     spinner::Spinner,
     v_flex,
 };
-use lyrune_api::{RecommendationKind, UserPlaylist};
+use lyrune_api::{RecommendationKind, UserPlaylist, UserPlaylistId};
 
 use super::browser::BrowserView;
 use super::{home_content_width, page_horizontal_padding};
@@ -113,6 +113,7 @@ impl BrowserView {
         &mut self,
         compact: bool,
         narrow: bool,
+        content_width: Pixels,
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -125,14 +126,8 @@ impl BrowserView {
             px(168.)
         };
         let card_width = cover_size + px(16.);
-        let feature_width = if narrow {
-            px(304.)
-        } else if compact {
-            px(344.)
-        } else {
-            px(384.)
-        };
         let grid_width = home_content_width(compact, narrow);
+        let stack_recommendations = content_width - page_horizontal_padding(narrow) * 2. < px(600.);
         let cards = self
             .home
             .playlists
@@ -185,12 +180,73 @@ impl BrowserView {
         let recommendation_loading = self.home.recommendation_loading.is_some();
         let radar_icon = media_icon_hsla(MediaIcon::Radar, theme.primary, px(25.));
         let guess_icon = media_icon_hsla(MediaIcon::Headphones, theme.primary, px(25.));
-        let recommendation_cards = [
+        let [daily_card, radar_entry, guess_entry] = [
+            Button::new("home-daily")
+                .ghost()
+                .w_full()
+                .min_w_0()
+                .h(px(156.))
+                .p(px(22.))
+                .rounded(px(12.))
+                .bg(linear_gradient(
+                    110.,
+                    linear_color_stop(theme.primary.opacity(0.08), 0.),
+                    linear_color_stop(theme.primary.opacity(0.22), 1.),
+                ))
+                .when(recommendation_loading, |button| {
+                    button.text_color(theme.secondary_foreground)
+                })
+                .disabled(recommendation_loading)
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap_4()
+                        .justify_between()
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_2()
+                                .child(div().text_size(px(22.)).font_semibold().child("每日推荐"))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("为你每天更新"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(104.))
+                                .line_height(relative(1.))
+                                .font_bold()
+                                .text_color(theme.primary.opacity(0.38))
+                                .child("30"),
+                        ),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    let profile = this.account.read(cx).profile.as_ref();
+                    let playlist = UserPlaylist {
+                        id: UserPlaylistId::Daily,
+                        title: "每日 30 首".to_owned(),
+                        cover_url: None,
+                        description: "为你每天更新".to_owned(),
+                        owner: profile
+                            .map(|profile| profile.nickname.clone())
+                            .unwrap_or_default(),
+                        owner_avatar_url: profile.and_then(|profile| profile.avatar_url.clone()),
+                        track_count: 0,
+                    };
+                    this.open_home_playlist(playlist, window, cx);
+                })),
             Button::new("home-radar")
                 .ghost()
-                .w(feature_width)
-                .h(px(92.))
-                .p_4()
+                .w_full()
+                .h(px(72.))
+                .pl_6()
+                .pr_4()
+                .py_3()
                 .rounded(px(12.))
                 .bg(theme.muted.opacity(0.7))
                 .when(recommendation_loading, |button| {
@@ -200,43 +256,31 @@ impl BrowserView {
                 })
                 .disabled(recommendation_loading)
                 .child(
-                    h_flex()
-                        .size_full()
-                        .gap_4()
-                        .child(
-                            div()
-                                .size(px(48.))
-                                .flex_shrink_0()
-                                .rounded(px(10.))
-                                .bg(theme.background.opacity(0.55))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(radar_icon),
-                        )
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .items_start()
-                                .gap_1()
-                                .child(div().font_semibold().child("专属雷达"))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child("不断更新的个性推荐"),
-                                ),
-                        ),
+                    h_flex().size_full().gap_4().child(radar_icon).child(
+                        v_flex()
+                            .min_w_0()
+                            .items_start()
+                            .gap_1()
+                            .child(div().text_size(px(15.)).font_semibold().child("专属雷达"))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("不断更新的个性推荐"),
+                            ),
+                    ),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.start_home_recommendation(RecommendationKind::Radar, cx)
                 })),
             Button::new("home-guess")
                 .ghost()
-                .w(feature_width)
-                .h(px(92.))
-                .p_4()
+                .w_full()
+                .h(px(72.))
+                .pl_6()
+                .pr_4()
+                .py_3()
                 .rounded(px(12.))
                 .bg(theme.muted.opacity(0.7))
                 .when(recommendation_loading, |button| {
@@ -246,34 +290,20 @@ impl BrowserView {
                 })
                 .disabled(recommendation_loading)
                 .child(
-                    h_flex()
-                        .size_full()
-                        .gap_4()
-                        .child(
-                            div()
-                                .size(px(48.))
-                                .flex_shrink_0()
-                                .rounded(px(10.))
-                                .bg(theme.background.opacity(0.55))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(guess_icon),
-                        )
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .items_start()
-                                .gap_1()
-                                .child(div().font_semibold().child("猜你喜欢"))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground)
-                                        .child("持续生成的个性漫游"),
-                                ),
-                        ),
+                    h_flex().size_full().gap_4().child(guess_icon).child(
+                        v_flex()
+                            .min_w_0()
+                            .items_start()
+                            .gap_1()
+                            .child(div().text_size(px(15.)).font_semibold().child("猜你喜欢"))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("持续生成的个性漫游"),
+                            ),
+                    ),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.start_home_recommendation(RecommendationKind::Guess, cx)
@@ -327,11 +357,24 @@ impl BrowserView {
                                                 ),
                                         )
                                         .child(
-                                            h_flex()
-                                                .items_start()
-                                                .flex_wrap()
+                                            div()
+                                                .w_full()
+                                                .grid()
+                                                .grid_cols(if stack_recommendations {
+                                                    1
+                                                } else {
+                                                    2
+                                                })
                                                 .gap_4()
-                                                .children(recommendation_cards),
+                                                .child(daily_card)
+                                                .child(
+                                                    v_flex()
+                                                        .w_full()
+                                                        .min_w_0()
+                                                        .gap_3()
+                                                        .child(radar_entry)
+                                                        .child(guess_entry),
+                                                ),
                                         ),
                                 )
                                 .child(

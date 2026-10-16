@@ -51,8 +51,19 @@ pub(super) fn insert_external_track_after_current(
 pub(super) fn canonical_queue_track_index(
     queue: &PlaybackQueue,
     playlist_id: &UserPlaylistId,
+    playlist_tracks: &[Arc<Track>],
     track_mid: &str,
 ) -> Option<usize> {
+    // 每日推荐的身份不随日期改变，但歌曲集合会变化，不能仅凭同名歌曲复用旧队列。
+    if *playlist_id == UserPlaylistId::Daily
+        && !queue
+            .tracks
+            .iter()
+            .map(|track| &track.mid)
+            .eq(playlist_tracks.iter().map(|track| &track.mid))
+    {
+        return None;
+    }
     (!queue.modified && queue.playlist_id == *playlist_id)
         .then(|| queue.tracks.iter().position(|track| track.mid == track_mid))
         .flatten()
@@ -163,7 +174,9 @@ impl BrowserView {
             .state
             .queue
             .as_ref()
-            .and_then(|queue| canonical_queue_track_index(queue, &playlist.id, &selected_track.mid))
+            .and_then(|queue| {
+                canonical_queue_track_index(queue, &playlist.id, &tracks, &selected_track.mid)
+            })
         {
             if self.playback.read(cx).state.current_track == Some(queue_index) {
                 if self.playback.read(cx).state.load.track.is_none() {

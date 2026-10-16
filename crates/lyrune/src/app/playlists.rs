@@ -298,10 +298,11 @@ impl BrowserView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let force_refresh = playlist.id == UserPlaylistId::Daily;
         let resource = self.page_resource_cache.playlist(
             self.account.read(cx).id().unwrap_or(0),
             playlist.clone(),
-            false,
+            force_refresh,
             PlaylistCachePolicy::Fresh,
         );
         let target = NavigationPage::Playlist {
@@ -318,7 +319,7 @@ impl BrowserView {
         self.open_playlist(
             playlist,
             None,
-            false,
+            force_refresh,
             PlaylistCachePolicy::Fresh,
             PlaylistScrollPosition::top(),
             Some(resource),
@@ -813,13 +814,19 @@ impl BrowserView {
         } else {
             px(176.)
         };
-        let cover = div().rounded(px(18.)).shadow_md().child(playlist_cover(
-            &playlist,
-            cover_size,
-            px(18.),
-            scale_factor,
-            cx,
-        ));
+        let cover = div()
+            .rounded(px(18.))
+            .shadow_md()
+            .when(playlist.id == UserPlaylistId::Daily, |cover| {
+                cover.bg(theme.background)
+            })
+            .child(playlist_cover(
+                &playlist,
+                cover_size,
+                px(18.),
+                scale_factor,
+                cx,
+            ));
         let owned_by_profile = matches!(
             &playlist.id,
             UserPlaylistId::Liked | UserPlaylistId::Created { .. }

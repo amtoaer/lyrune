@@ -5,7 +5,8 @@ use crate::icons::{MediaIcon, media_icon_hsla};
 use gpui::{
     AnyElement, App, Context, Image, ImageFormat, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement as _, Pixels, Stateful, StatefulInteractiveElement as _,
-    Styled as _, TextAlign, Window, div, img, prelude::FluentBuilder as _, px,
+    Styled as _, TextAlign, Window, div, img, linear_color_stop, linear_gradient,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, IndexPath, Sizable as _, StyledExt as _,
@@ -565,6 +566,26 @@ pub fn playlist_cover(
         .into_any_element();
     }
 
+    if playlist.id == UserPlaylistId::Daily {
+        return div()
+            .size(size)
+            .flex_shrink_0()
+            .rounded(radius)
+            .bg(linear_gradient(
+                110.,
+                linear_color_stop(cx.theme().primary.opacity(0.08), 0.),
+                linear_color_stop(cx.theme().primary.opacity(0.22), 1.),
+            ))
+            .text_size(size * 0.48)
+            .font_bold()
+            .text_color(cx.theme().primary.opacity(0.55))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("30")
+            .into_any_element();
+    }
+
     if let Some(url) = playlist.cover_url.clone() {
         return img(cached_image_source(url, size, scale_factor))
             .size(size)
@@ -1083,6 +1104,7 @@ fn track_columns(available_width: Pixels) -> Vec<Column> {
 fn playlist_subtitle(playlist: &UserPlaylist) -> String {
     let kind = match playlist.id {
         UserPlaylistId::Liked => "已点赞的歌曲",
+        UserPlaylistId::Daily => "每日推荐",
         UserPlaylistId::Created { .. } => "创建的歌单",
         UserPlaylistId::Favorite { .. } => "收藏的歌单",
         UserPlaylistId::Recommended { .. } => "推荐歌单",

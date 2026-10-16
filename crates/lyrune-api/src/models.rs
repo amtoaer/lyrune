@@ -24,6 +24,7 @@ pub struct UserProfile {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 pub enum UserPlaylistId {
     Liked,
+    Daily,
     Created { tid: u64, dir_id: u64 },
     Favorite { diss_id: u64 },
     Recommended { diss_id: u64 },

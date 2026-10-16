@@ -174,7 +174,8 @@ impl LyruneView {
         };
         let playback_quality = settings.playback_quality;
         let pending_playback_restore = settings.current_playback.clone();
-        let account = cx.new(|_| Account::new(protocol_client.clone()));
+        let account =
+            cx.new(|_| Account::new(protocol_client.clone(), settings.client_guid.clone()));
 
         let progress =
             cx.new(|cx| PlaybackProgressView::new(audio.clone(), fonts.monospace.clone(), cx));
@@ -838,7 +839,7 @@ impl Render for LyruneView {
             div()
                 .relative()
                 .size_full()
-                .child(self.render_login(cx))
+                .child(self.render_login(window, cx))
                 .child(notification_layer)
                 .when(client_decorations, |this| {
                     this.child(deferred(self.render_window_controls(window, cx)).with_priority(20))

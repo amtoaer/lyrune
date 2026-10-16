@@ -2,14 +2,15 @@
 
 mod models;
 mod mqtt;
+pub(crate) mod qq;
+pub(crate) mod quick;
+pub(crate) mod wechat;
 
 pub(crate) use models::{LoginStatus, LoginToken};
 pub(crate) use mqtt::MqttLoginSession;
 
-use std::sync::LazyLock;
 use std::time::Duration;
 
-use rand::RngExt;
 use reqwest::Client;
 use reqwest::header::COOKIE;
 use serde_json::{Value, json};
@@ -21,30 +22,18 @@ use crate::signing;
 
 const TENCENT_API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
-// 登录协议使用进程级 GUID，不能改用凭据或 CDN 缓存中的安装标识。
-static TENCENT_GUID: LazyLock<String> = LazyLock::new(get_guid);
 
 pub(crate) struct LoginClient {
     client: Client,
-}
-
-const GUID_CHARSET: &[u8] = b"ABCDEF1234567890";
-
-fn get_guid() -> String {
-    let mut rng = rand::rng();
-    (0..32)
-        .map(|_| {
-            let idx = rng.random_range(0..GUID_CHARSET.len());
-            GUID_CHARSET[idx] as char
-        })
-        .collect()
+    guid: String,
 }
 
 impl LoginClient {
     /// 创建 QQ 音乐登录客户端。
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(guid: String) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         Self {
+            guid,
             client: Client::builder()
                 .no_proxy()
                 .timeout(HTTP_TIMEOUT)
@@ -69,13 +58,13 @@ impl LoginClient {
                 "chid": "0",
                 "uin": login_token.music_id.to_string(),
                 "g_tk": signing::hash33(login_token.music_key.as_str()),
-                "guid": TENCENT_GUID.as_str()
+                "guid": self.guid
             }),
             None => json!({
                 "ct": 19,
                 "cv": 2201,
                 "chid": "0",
-                "guid": TENCENT_GUID.as_str()
+                "guid": self.guid
             }),
         };
 
@@ -144,18 +133,37 @@ impl LoginClient {
     }
 
     pub(crate) async fn refresh_login_token(&self, token: &LoginToken) -> LoginResult<LoginToken> {
+        if token.login_type == 2 && !token.open_id.is_empty() && !token.access_token.is_empty() {
+            let response = self.post::<LoginInfoResponse>(json!({
+                "result": {"module": "QQConnectLogin.LoginServer", "method": "QQLogin",
+                    "param": {
+                        "openid": token.open_id, "access_token": token.access_token,
+                        "refresh_token": token.refresh_token, "musicid": token.music_id,
+                        "musickey": token.music_key, "onlyNeedAccessToken": 0, "forceRefreshToken": 0
+                    }},
+                "comm": {"ct": 19, "cv": 1, "tmeLoginType": 2}
+            }), Some(token)).await?;
+            return response.into_token();
+        }
+        let mut param = json!({
+            "refresh_key": token.refresh_key,
+            "refresh_token": token.refresh_token,
+            "musickey": token.music_key,
+            "musicid": token.music_id,
+        });
+        if token.login_type == 1 {
+            param["openid"] = json!(token.open_id);
+            param["unionid"] = json!(token.union_id);
+            param["str_musicid"] = json!(token.music_id.to_string());
+            param["loginMode"] = json!(2);
+        }
         let response = self
             .post::<LoginInfoResponse>(
                 json!({
                     "result": {
                         "module": "music.login.LoginServer",
                         "method": "Login",
-                        "param": {
-                            "refresh_key": token.refresh_key,
-                            "refresh_token": token.refresh_token,
-                            "musickey": token.music_key,
-                            "musicid": token.music_id,
-                        }
+                        "param": param
                     },
                     "comm": {
                         "tmeLoginType": token.login_type
@@ -194,15 +202,28 @@ impl LoginClient {
             .await?;
         response.into_token()
     }
+
+    async fn login_with_qq_code(&self, code: &str) -> LoginResult<LoginToken> {
+        let response = self
+            .post::<LoginInfoResponse>(
+                json!({
+                    "result": {"module": "QQConnectLogin.LoginServer", "method": "QQLogin",
+                        "param": {"onlyNeedAccessToken": 0, "forceRefreshToken": 0,
+                            "appid": 100497308, "code": code}},
+                    "comm": {"ct": 19, "cv": 1, "tmeLoginType": 2}
+                }),
+                None,
+            )
+            .await?;
+        response.into_token()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn guid_has_expected_format() {
-        let guid = get_guid();
+        let guid = crate::account::new_client_guid();
         assert_eq!(guid.len(), 32);
         assert!(guid.chars().all(|c| matches!(c, 'A'..='F' | '0'..='9')));
     }

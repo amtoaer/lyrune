@@ -40,6 +40,7 @@ lyrune-api = { path = "crates/lyrune-api" }
 lyrune-decrypt = { path = "crates/lyrune-decrypt" }
 mpris-server = { version = "0.10.0", default-features = false, features = ["tokio"] }
 palette = { version = "0.7.6", default-features = false, features = ["std"] }
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
 quick-xml = "0.41"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = [
@@ -54,6 +55,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 resvg = "0.46"
 rodio = "0.22.2"
+rqrr = "0.11"
 rumqttc = { version = "0.25.1", default-features = false }
 rustls = { version = "0.23.43", default-features = false, features = [
     "ring",

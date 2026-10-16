@@ -468,7 +468,9 @@ impl Render for BrowserView {
             });
         }
         let page = match self.main_content {
-            MainContent::Home => self.render_home(compact, narrow, scale_factor, cx),
+            MainContent::Home => {
+                self.render_home(compact, narrow, self.content_width, scale_factor, cx)
+            }
             MainContent::Charts => {
                 self.render_charts(compact, narrow, self.content_width, scale_factor, cx)
             }
@@ -563,7 +565,7 @@ mod tests {
             color_theme: ColorTheme::default(),
             writer: None,
         });
-        let account = cx.new(|_| Account::new(None));
+        let account = cx.new(|_| Account::new(None, String::new()));
         let lyrics = cx.new(|_| LyricsCache::new(None));
         let playback = cx.new(|_| {
             Playback::new(

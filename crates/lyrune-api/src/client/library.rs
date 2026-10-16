@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use reqwest::header::{COOKIE, REFERER};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::ProtocolClient;
@@ -305,6 +306,15 @@ impl ProtocolClient {
     ) -> Result<PlaylistPage> {
         let limit = limit.clamp(1, 100);
         let data = match &playlist.id {
+            UserPlaylistId::Daily => {
+                // 每日推荐属于当前账号的系统目录；按推荐流中的歌单 ID 读取可能只返回部分歌曲。
+                let data = self.call(
+                    "music.srfDissInfo.aiDissInfo", "uniform_get_Dissinfo",
+                    json!({ "dirid": 202, "optype": 3, "tag": 1, "userinfo": 0, "pic_dpi": 300 }),
+                    credential, None,
+                ).await.context("无法加载 QQ 音乐每日 30 首")?;
+                return parse_daily_page(data, playlist);
+            }
             UserPlaylistId::Chart { top_id, period } => {
                 return self
                     .chart_page(credential, *top_id, period, offset, limit)
@@ -423,6 +433,7 @@ impl ProtocolClient {
                 (*diss_id, 0, None)
             }
             UserPlaylistId::Artist { .. }
+            | UserPlaylistId::Daily
             | UserPlaylistId::Chart { .. }
             | UserPlaylistId::Album { .. }
             | UserPlaylistId::Search { .. }
@@ -488,6 +499,41 @@ impl ProtocolClient {
             .await
             .context("QQ 音乐用户资料不是有效 JSON")
     }
+}
+
+fn parse_daily_page(data: Value, playlist: &UserPlaylist) -> Result<PlaylistPage> {
+    #[derive(Deserialize)]
+    struct DailySongs {
+        #[serde(default)]
+        code: i64,
+        #[serde(default)]
+        subcode: i64,
+        #[serde(default)]
+        songlist: Vec<Value>,
+    }
+    let data: DailySongs = serde_json::from_value(data).context("每日 30 首响应格式无效")?;
+    ensure!(
+        data.code == 0 && data.subcode == 0,
+        "每日 30 首返回错误码 {} / {}",
+        data.code,
+        data.subcode
+    );
+    ensure!(!data.songlist.is_empty(), "QQ 音乐尚未返回今日推荐歌曲");
+    let tracks = data
+        .songlist
+        .iter()
+        .map(parse_track)
+        .collect::<Result<Vec<_>>>()?;
+    let total = tracks.len() as u64;
+    let mut playlist = playlist.clone();
+    playlist.track_count = total;
+    Ok(PlaylistPage {
+        playlist,
+        tracks,
+        total,
+        has_more: false,
+        next_offset: total,
+    })
 }
 
 // 分页游标按服务端原始条目数前进；过滤无 mid 的歌曲不能改变分页位置。
@@ -1050,6 +1096,31 @@ mod tests {
         assert_eq!(playlist.title, "amtoaer的每日30首");
         assert_eq!(playlist.description, "每日更新");
         assert_eq!(playlist.track_count, 30);
+    }
+
+    #[test]
+    fn test_daily_page() {
+        let playlist = UserPlaylist {
+            id: UserPlaylistId::Daily,
+            title: "每日 30 首".to_owned(),
+            ..UserPlaylist::liked()
+        };
+        let page = parse_daily_page(
+            json!({"code": 0, "subcode": 0, "total": 99,
+                "songlist": [{"mid": "A", "title": "Song A"}, {"mid": "B", "title": "Song B"}]
+            }),
+            &playlist,
+        )
+        .unwrap();
+        assert_eq!(page.playlist.id, UserPlaylistId::Daily);
+        assert_eq!(page.playlist.title, "每日 30 首");
+        assert_eq!(page.playlist.track_count, 2);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.next_offset, 2);
+        assert!(!page.has_more);
+        assert_eq!(page.tracks[1].mid, "B");
+        assert!(parse_daily_page(json!({"code": 100}), &playlist).is_err());
+        assert!(parse_daily_page(json!({"songlist": []}), &playlist).is_err());
     }
 
     #[test]

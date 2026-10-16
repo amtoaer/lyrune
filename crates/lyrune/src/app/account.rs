@@ -10,8 +10,8 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, Selectable as _, StyledExt as _, h_flex, v_flex,
 };
 use lyrune_api::{
-    CredentialSession, LoginEvent, ProtocolClient, QqCredential, UserProfile, run_qr_login,
-    run_wechat_login,
+    CredentialSession, LoginEvent, ProtocolClient, QqCredential, QqQuickLogin, UserProfile,
+    run_qr_login, run_wechat_login,
 };
 use tokio::sync::mpsc;
 
@@ -34,6 +34,7 @@ pub(super) enum AccountState {
 enum LoginMethod {
     MusicApp,
     Wechat,
+    Qq,
 }
 
 // 实体随应用存活；关闭窗口不会中断凭据监听或把登录任务交给页面视图。
@@ -49,6 +50,7 @@ pub(super) struct Account {
     client_guid: String,
     login_method: LoginMethod,
     login_task: Option<tokio::task::AbortHandle>,
+    qq_login: Option<Arc<QqQuickLogin>>,
 }
 
 impl Default for Account {
@@ -64,6 +66,7 @@ impl Default for Account {
             client_guid: String::new(),
             login_method: LoginMethod::MusicApp,
             login_task: None,
+            qq_login: None,
         }
     }
 }
@@ -177,6 +180,40 @@ impl Account {
         let Some(generation) = self.begin_login() else {
             return;
         };
+        self.qq_login = None;
+        if self.login_method == LoginMethod::Qq {
+            self.message = "正在检测本机 QQ 账号…".to_owned();
+            let task = RUNTIME.spawn(QqQuickLogin::discover(self.client_guid.clone()));
+            self.login_task = Some(task.abort_handle());
+            cx.spawn(async move |this, cx| {
+                let Ok(result) = task.await else {
+                    return;
+                };
+                let _ = this.update(cx, |this, cx| {
+                    if this.generation != generation {
+                        return;
+                    }
+                    this.login_task = None;
+                    this.state = AccountState::SignedOut;
+                    match result {
+                        Ok(login) => {
+                            this.message = if login.accounts().is_empty() {
+                                "未发现已登录账号，请先登录本机 QQ 后重新检测"
+                            } else {
+                                "请选择账号，授权登录 QQ 音乐"
+                            }
+                            .to_owned();
+                            this.qq_login = Some(Arc::new(login));
+                        }
+                        Err(error) => this.message = format!("{error:#}"),
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
         cx.notify();
 
         let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -186,6 +223,7 @@ impl Account {
             match method {
                 LoginMethod::MusicApp => run_qr_login(sender, guid).await,
                 LoginMethod::Wechat => run_wechat_login(sender, guid).await,
+                LoginMethod::Qq => unreachable!("本机 QQ 已进入账号检测流程"),
             }
         });
         self.login_task = Some(task.abort_handle());
@@ -208,6 +246,35 @@ impl Account {
         .detach();
     }
 
+    fn login_with_qq(&mut self, uin: u64, cx: &mut Context<Self>) {
+        let Some(login) = self.qq_login.clone() else {
+            return;
+        };
+        let Some(generation) = self.begin_login() else {
+            return;
+        };
+        self.message = "正在授权登录 QQ 音乐…".to_owned();
+        let task = RUNTIME.spawn(async move { login.login(uin).await });
+        self.login_task = Some(task.abort_handle());
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                let event = match result {
+                    Ok(credential) => LoginEvent::Succeeded(credential),
+                    Err(error) => LoginEvent::Failed(format!("{error:#}")),
+                };
+                this.handle_login_event(event, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn handle_login_event(&mut self, event: LoginEvent, cx: &mut Context<Self>) {
         match event {
             LoginEvent::QrReady(bytes) => {
@@ -227,6 +294,7 @@ impl Account {
                 self.message = match self.login_method {
                     LoginMethod::MusicApp => "请使用 QQ 音乐 App 扫描二维码",
                     LoginMethod::Wechat => "请使用微信扫描二维码",
+                    LoginMethod::Qq => unreachable!("本机 QQ 不使用二维码"),
                 }
                 .to_owned();
             }
@@ -236,6 +304,7 @@ impl Account {
             }
             LoginEvent::Succeeded(credential) => {
                 self.login_task = None;
+                self.qq_login = None;
                 self.state = AccountState::SignedIn;
                 self.qr_image = None;
                 self.install_credential_session(CredentialSession::new(credential), cx);
@@ -250,8 +319,13 @@ impl Account {
                 self.login_task = None;
                 self.state = AccountState::SignedOut;
                 self.qr_image = None;
-                self.message = "扫码登录失败，点击二维码区域重试".to_owned();
-                cx.emit(AccountEvent::Error(format!("扫码登录失败：{error}")));
+                self.message = if self.login_method == LoginMethod::Qq {
+                    "登录失败，请重试或重新检测账号"
+                } else {
+                    "扫码登录失败，点击二维码区域重试"
+                }
+                .to_owned();
+                cx.emit(AccountEvent::Error(format!("登录失败：{error}")));
             }
         }
         cx.notify();
@@ -505,6 +579,55 @@ impl LyruneView {
                 })
                 .into_any_element(),
         };
+        let account = self.account.read(cx);
+        let login_content = if account.login_method == LoginMethod::Qq {
+            let busy = account.state == AccountState::SigningIn;
+            v_flex()
+                .w_full()
+                .min_h(px(240.))
+                .gap_3()
+                .justify_center()
+                .children(
+                    account
+                        .qq_login
+                        .iter()
+                        .flat_map(|login| login.accounts())
+                        .map(|account| {
+                            let uin = account.uin;
+                            Button::new(("qq-account", uin))
+                                .w_full()
+                                .label(format!("{}（{}）", account.nickname, uin))
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.account
+                                        .update(cx, |account, cx| account.login_with_qq(uin, cx));
+                                }))
+                        }),
+                )
+                .child(
+                    Button::new("qq-detect")
+                        .label("重新检测")
+                        .ghost()
+                        .disabled(busy)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.account
+                                .update(cx, |account, cx| account.start_login(cx));
+                        })),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .id("login-qr")
+                .when(account.state == AccountState::SignedOut, |this| {
+                    this.cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.account
+                                .update(cx, |account, cx| account.start_login(cx));
+                        }))
+                })
+                .child(qr)
+                .into_any_element()
+        };
 
         v_flex()
             .size_full()
@@ -537,6 +660,7 @@ impl LyruneView {
                             [
                                 ("music-app-login", "QQ 音乐", LoginMethod::MusicApp),
                                 ("wechat-login", "微信", LoginMethod::Wechat),
+                                ("qq-login", "本机 QQ", LoginMethod::Qq),
                             ]
                             .map(|(id, label, method)| {
                                 Button::new(id)
@@ -559,21 +683,7 @@ impl LyruneView {
                             }),
                         ),
                     )
-                    .child(
-                        div()
-                            .id("login-qr")
-                            .when(
-                                self.account.read(cx).state == AccountState::SignedOut,
-                                |this| {
-                                    this.cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.account
-                                                .update(cx, |account, cx| account.start_login(cx))
-                                        }))
-                                },
-                            )
-                            .child(qr),
-                    )
+                    .child(login_content)
                     .child(
                         div()
                             .text_sm()

@@ -2,6 +2,7 @@
 
 mod models;
 mod mqtt;
+pub(crate) mod quick;
 pub(crate) mod wechat;
 
 pub(crate) use models::{LoginStatus, LoginToken};
@@ -131,6 +132,18 @@ impl LoginClient {
     }
 
     pub(crate) async fn refresh_login_token(&self, token: &LoginToken) -> LoginResult<LoginToken> {
+        if token.login_type == 2 && !token.open_id.is_empty() && !token.access_token.is_empty() {
+            let response = self.post::<LoginInfoResponse>(json!({
+                "result": {"module": "QQConnectLogin.LoginServer", "method": "QQLogin",
+                    "param": {
+                        "openid": token.open_id, "access_token": token.access_token,
+                        "refresh_token": token.refresh_token, "musicid": token.music_id,
+                        "musickey": token.music_key, "onlyNeedAccessToken": 0, "forceRefreshToken": 0
+                    }},
+                "comm": {"ct": 19, "cv": 1, "tmeLoginType": 2}
+            }), Some(token)).await?;
+            return response.into_token();
+        }
         let mut param = json!({
             "refresh_key": token.refresh_key,
             "refresh_token": token.refresh_token,
@@ -182,6 +195,21 @@ impl LoginClient {
                     "comm": {
                         "tmeLoginType": 6
                     }
+                }),
+                None,
+            )
+            .await?;
+        response.into_token()
+    }
+
+    async fn login_with_qq_code(&self, code: &str) -> LoginResult<LoginToken> {
+        let response = self
+            .post::<LoginInfoResponse>(
+                json!({
+                    "result": {"module": "QQConnectLogin.LoginServer", "method": "QQLogin",
+                        "param": {"onlyNeedAccessToken": 0, "forceRefreshToken": 0,
+                            "appid": 100497308, "code": code}},
+                    "comm": {"ct": 19, "cv": 1, "tmeLoginType": 2}
                 }),
                 None,
             )

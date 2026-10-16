@@ -818,7 +818,7 @@ impl LyruneView {
             };
             v_flex()
                 .w_full()
-                .h(px(328.))
+                .min_h(px(288.))
                 .items_center()
                 .gap_3()
                 .child(
@@ -844,15 +844,16 @@ impl LyruneView {
                             LoginMethod::Qq => "使用手机 QQ 扫码",
                             LoginMethod::Wechat => "使用手机微信扫码",
                         })
-                        .child(
-                            div()
-                                .w_full()
-                                .min_h(px(20.))
-                                .text_sm()
-                                .text_center()
-                                .text_color(theme.muted_foreground)
-                                .child(account.message.clone()),
-                        ),
+                        .when(!account.message.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .w_full()
+                                    .text_sm()
+                                    .text_center()
+                                    .text_color(theme.muted_foreground)
+                                    .child(account.message.clone()),
+                            )
+                        }),
                 )
                 .child(div().w_full().h(px(36.)).flex_shrink_0().mt_auto().when(
                     account.login_method == LoginMethod::Qq,

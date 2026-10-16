@@ -5,6 +5,7 @@ mod account;
 mod animation;
 mod artist;
 mod browser;
+mod charts;
 mod home;
 mod lyrics;
 mod lyrics_loading;

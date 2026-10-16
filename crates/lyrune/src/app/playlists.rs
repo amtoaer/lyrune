@@ -792,7 +792,7 @@ impl BrowserView {
         scale_factor: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let Some(playlist) = self.playlist.selected.clone() else {
             return div()
                 .h(px(220.))
@@ -873,6 +873,8 @@ impl BrowserView {
         } else {
             px(56.)
         };
+        let chart_period = matches!(playlist.id, UserPlaylistId::Chart { .. })
+            .then(|| self.render_chart_period(&playlist, cx));
         div()
             .min_h(if narrow {
                 px(182.)
@@ -916,6 +918,7 @@ impl BrowserView {
                                         .child(match &playlist.id {
                                             UserPlaylistId::Artist { .. } => "歌手",
                                             UserPlaylistId::Album { .. } => "专辑",
+                                            UserPlaylistId::Chart { .. } => "排行榜",
                                             _ => "歌单",
                                         }),
                                 ),
@@ -934,6 +937,7 @@ impl BrowserView {
                                     .font_semibold()
                                     .child(playlist.title),
                             )
+                            .when_some(chart_period, |header, period| header.child(period))
                             .child(
                                 h_flex()
                                     .w_full()

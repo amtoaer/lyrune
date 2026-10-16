@@ -127,12 +127,7 @@ impl BrowserView {
         };
         let card_width = cover_size + px(16.);
         let grid_width = home_content_width(compact, narrow);
-        let recommendation_columns =
-            if content_width - page_horizontal_padding(narrow) * 2. < px(600.) {
-                2
-            } else {
-                4
-            };
+        let stack_recommendations = content_width - page_horizontal_padding(narrow) * 2. < px(600.);
         let cards = self
             .home
             .playlists
@@ -183,15 +178,15 @@ impl BrowserView {
             })
             .collect::<Vec<_>>();
         let recommendation_loading = self.home.recommendation_loading.is_some();
-        let radar_icon = media_icon_hsla(MediaIcon::Radar, theme.primary, px(32.));
-        let guess_icon = media_icon_hsla(MediaIcon::Headphones, theme.primary, px(32.));
-        let recommendation_cards = [
+        let radar_icon = media_icon_hsla(MediaIcon::Radar, theme.primary, px(28.));
+        let guess_icon = media_icon_hsla(MediaIcon::Headphones, theme.primary, px(28.));
+        let [daily_card, radar_entry, guess_entry] = [
             Button::new("home-daily")
                 .ghost()
                 .w_full()
                 .min_w_0()
-                .col_span(2)
-                .h(px(156.))
+                .col_span(if stack_recommendations { 1 } else { 3 })
+                .h(px(180.))
                 .p(px(22.))
                 .rounded(px(12.))
                 .bg(linear_gradient(
@@ -249,24 +244,24 @@ impl BrowserView {
             Button::new("home-radar")
                 .ghost()
                 .w_full()
-                .h(px(156.))
+                .h(px(64.))
                 .p_4()
                 .rounded(px(12.))
-                .bg(theme.muted.opacity(0.7))
                 .when(recommendation_loading, |button| {
-                    button
-                        .bg(theme.muted.opacity(0.7))
-                        .text_color(theme.secondary_foreground)
+                    button.text_color(theme.secondary_foreground)
                 })
                 .disabled(recommendation_loading)
                 .child(
-                    v_flex()
+                    h_flex()
                         .size_full()
-                        .items_center()
-                        .justify_center()
                         .gap_3()
                         .child(radar_icon)
-                        .child(div().text_base().font_semibold().child("专属雷达")),
+                        .child(div().flex_1().text_base().font_semibold().child("专属雷达"))
+                        .child(media_icon_hsla(
+                            MediaIcon::Forward,
+                            theme.muted_foreground,
+                            px(16.),
+                        )),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.start_home_recommendation(RecommendationKind::Radar, cx)
@@ -274,24 +269,24 @@ impl BrowserView {
             Button::new("home-guess")
                 .ghost()
                 .w_full()
-                .h(px(156.))
+                .h(px(64.))
                 .p_4()
                 .rounded(px(12.))
-                .bg(theme.muted.opacity(0.7))
                 .when(recommendation_loading, |button| {
-                    button
-                        .bg(theme.muted.opacity(0.7))
-                        .text_color(theme.secondary_foreground)
+                    button.text_color(theme.secondary_foreground)
                 })
                 .disabled(recommendation_loading)
                 .child(
-                    v_flex()
+                    h_flex()
                         .size_full()
-                        .items_center()
-                        .justify_center()
                         .gap_3()
                         .child(guess_icon)
-                        .child(div().text_base().font_semibold().child("猜你喜欢")),
+                        .child(div().flex_1().text_base().font_semibold().child("猜你喜欢"))
+                        .child(media_icon_hsla(
+                            MediaIcon::Forward,
+                            theme.muted_foreground,
+                            px(16.),
+                        )),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.start_home_recommendation(RecommendationKind::Guess, cx)
@@ -348,9 +343,27 @@ impl BrowserView {
                                             div()
                                                 .w_full()
                                                 .grid()
-                                                .grid_cols(recommendation_columns)
+                                                .grid_cols(if stack_recommendations {
+                                                    1
+                                                } else {
+                                                    5
+                                                })
                                                 .gap_4()
-                                                .children(recommendation_cards),
+                                                .child(daily_card)
+                                                .child(
+                                                    v_flex()
+                                                        .w_full()
+                                                        .min_w_0()
+                                                        .col_span(if stack_recommendations {
+                                                            1
+                                                        } else {
+                                                            2
+                                                        })
+                                                        .h(px(180.))
+                                                        .justify_around()
+                                                        .child(radar_entry)
+                                                        .child(guess_entry),
+                                                ),
                                         ),
                                 )
                                 .child(

@@ -894,12 +894,13 @@ impl LyruneView {
                             .gap_2()
                             .child(lyrune_icon(self.preferences.read(cx).color_theme, px(44.)))
                             .child(div().mt_2().text_2xl().font_bold().child("登录 Lyrune"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child("登录 QQ 音乐以加载你的歌单"),
-                            ),
+                            .child(div().text_sm().text_color(theme.muted_foreground).child(
+                                match account.login_method {
+                                    LoginMethod::MusicApp => "使用 QQ 音乐账号登录",
+                                    LoginMethod::Qq => "使用 QQ 账号登录",
+                                    LoginMethod::Wechat => "使用微信账号登录",
+                                },
+                            )),
                     )
                     .child(login_content)
                     .child(

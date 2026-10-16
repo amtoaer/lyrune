@@ -790,9 +790,14 @@ impl LyruneView {
                 .into_any_element()
         } else {
             let qr = match &account.qr_image {
-                Some(image) => img(image.clone())
+                Some(image) => div()
                     .size(px(208.))
                     .rounded(theme.radius_lg)
+                    .overflow_hidden()
+                    .when(account.login_method == LoginMethod::MusicApp, |this| {
+                        this.bg(white()).p_3()
+                    })
+                    .child(img(image.clone()).size_full())
                     .into_any_element(),
                 None => div()
                     .size(px(208.))

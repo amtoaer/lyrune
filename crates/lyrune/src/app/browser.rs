@@ -753,6 +753,10 @@ mod tests {
                 weekly.playlist("2025_50".into()).id
             );
             assert_eq!(
+                browser.playlist.selected.as_ref().unwrap().cover_url,
+                Some(weekly.front_pic_url.clone())
+            );
+            assert_eq!(
                 browser.track_table.read(cx).delegate().tracks()[0].mid,
                 "2025_50"
             );

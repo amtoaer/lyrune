@@ -316,7 +316,7 @@ impl PlaylistResource {
 
     pub(super) fn apply_page(
         &mut self,
-        playlist: UserPlaylist,
+        mut playlist: UserPlaylist,
         tracks: Vec<Arc<Track>>,
         has_more: bool,
         next_offset: u64,
@@ -329,6 +329,9 @@ impl PlaylistResource {
             self.tracks.extend(tracks);
         } else {
             return;
+        }
+        if matches!(self.playlist.id, UserPlaylistId::Chart { .. }) {
+            playlist.cover_url = self.playlist.cover_url.clone();
         }
         self.playlist = playlist;
         self.has_more = has_more;

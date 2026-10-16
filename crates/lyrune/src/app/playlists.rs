@@ -397,7 +397,10 @@ impl BrowserView {
             )
         });
         let (playlist, tracks, has_more, loading, loaded) = {
-            let state = lock_resource(&resource);
+            let mut state = lock_resource(&resource);
+            if matches!(playlist.id, UserPlaylistId::Chart { .. }) {
+                state.playlist.cover_url = playlist.cover_url;
+            }
             (
                 state.playlist.clone(),
                 state.tracks.clone(),

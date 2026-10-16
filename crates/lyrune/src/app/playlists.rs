@@ -814,13 +814,19 @@ impl BrowserView {
         } else {
             px(176.)
         };
-        let cover = div().rounded(px(18.)).shadow_md().child(playlist_cover(
-            &playlist,
-            cover_size,
-            px(18.),
-            scale_factor,
-            cx,
-        ));
+        let cover = div()
+            .rounded(px(18.))
+            .shadow_md()
+            .when(playlist.id == UserPlaylistId::Daily, |cover| {
+                cover.bg(theme.background)
+            })
+            .child(playlist_cover(
+                &playlist,
+                cover_size,
+                px(18.),
+                scale_factor,
+                cx,
+            ));
         let owned_by_profile = matches!(
             &playlist.id,
             UserPlaylistId::Liked | UserPlaylistId::Created { .. }

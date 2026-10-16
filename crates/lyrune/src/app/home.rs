@@ -256,20 +256,25 @@ impl BrowserView {
                 })
                 .disabled(recommendation_loading)
                 .child(
-                    h_flex().size_full().gap_3().child(radar_icon).child(
-                        v_flex()
-                            .min_w_0()
-                            .items_start()
-                            .gap_1()
-                            .child(div().font_semibold().child("专属雷达"))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child("不断更新的个性推荐"),
-                            ),
-                    ),
+                    h_flex()
+                        .size_full()
+                        .justify_center()
+                        .gap_3()
+                        .child(radar_icon)
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_1()
+                                .child(div().font_semibold().child("专属雷达"))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("不断更新的个性推荐"),
+                                ),
+                        ),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.start_home_recommendation(RecommendationKind::Radar, cx)
@@ -288,20 +293,25 @@ impl BrowserView {
                 })
                 .disabled(recommendation_loading)
                 .child(
-                    h_flex().size_full().gap_3().child(guess_icon).child(
-                        v_flex()
-                            .min_w_0()
-                            .items_start()
-                            .gap_1()
-                            .child(div().font_semibold().child("猜你喜欢"))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child("持续生成的个性漫游"),
-                            ),
-                    ),
+                    h_flex()
+                        .size_full()
+                        .justify_center()
+                        .gap_3()
+                        .child(guess_icon)
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .items_start()
+                                .gap_1()
+                                .child(div().font_semibold().child("猜你喜欢"))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("持续生成的个性漫游"),
+                                ),
+                        ),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.start_home_recommendation(RecommendationKind::Guess, cx)

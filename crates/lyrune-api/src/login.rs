@@ -6,10 +6,8 @@ mod mqtt;
 pub(crate) use models::{LoginStatus, LoginToken};
 pub(crate) use mqtt::MqttLoginSession;
 
-use std::sync::LazyLock;
 use std::time::Duration;
 
-use rand::RngExt;
 use reqwest::Client;
 use reqwest::header::COOKIE;
 use serde_json::{Value, json};
@@ -21,30 +19,18 @@ use crate::signing;
 
 const TENCENT_API_URL: &str = "https://u.y.qq.com/cgi-bin/musics.fcg";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
-// 登录协议使用进程级 GUID，不能改用凭据或 CDN 缓存中的安装标识。
-static TENCENT_GUID: LazyLock<String> = LazyLock::new(get_guid);
 
 pub(crate) struct LoginClient {
     client: Client,
-}
-
-const GUID_CHARSET: &[u8] = b"ABCDEF1234567890";
-
-fn get_guid() -> String {
-    let mut rng = rand::rng();
-    (0..32)
-        .map(|_| {
-            let idx = rng.random_range(0..GUID_CHARSET.len());
-            GUID_CHARSET[idx] as char
-        })
-        .collect()
+    guid: String,
 }
 
 impl LoginClient {
     /// 创建 QQ 音乐登录客户端。
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(guid: String) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         Self {
+            guid,
             client: Client::builder()
                 .no_proxy()
                 .timeout(HTTP_TIMEOUT)
@@ -69,13 +55,13 @@ impl LoginClient {
                 "chid": "0",
                 "uin": login_token.music_id.to_string(),
                 "g_tk": signing::hash33(login_token.music_key.as_str()),
-                "guid": TENCENT_GUID.as_str()
+                "guid": self.guid
             }),
             None => json!({
                 "ct": 19,
                 "cv": 2201,
                 "chid": "0",
-                "guid": TENCENT_GUID.as_str()
+                "guid": self.guid
             }),
         };
 
@@ -198,11 +184,9 @@ impl LoginClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn guid_has_expected_format() {
-        let guid = get_guid();
+        let guid = crate::account::new_client_guid();
         assert_eq!(guid.len(), 32);
         assert!(guid.chars().all(|c| matches!(c, 'A'..='F' | '0'..='9')));
     }

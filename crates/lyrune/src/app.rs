@@ -174,7 +174,8 @@ impl LyruneView {
         };
         let playback_quality = settings.playback_quality;
         let pending_playback_restore = settings.current_playback.clone();
-        let account = cx.new(|_| Account::new(protocol_client.clone()));
+        let account =
+            cx.new(|_| Account::new(protocol_client.clone(), settings.client_guid.clone()));
 
         let progress =
             cx.new(|cx| PlaybackProgressView::new(audio.clone(), fonts.monospace.clone(), cx));

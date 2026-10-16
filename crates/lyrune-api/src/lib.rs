@@ -7,7 +7,7 @@ mod login;
 mod models;
 mod signing;
 
-pub use account::{CredentialSession, LoginEvent, QqCredential, run_qr_login};
+pub use account::{CredentialSession, LoginEvent, QqCredential, new_client_guid, run_qr_login};
 pub use client::{CdnCache, ProtocolClient};
 pub use models::{
     Chart, ChartGroup, ChartHistory, ChartPreviewTrack, LyricResult, PlaybackOption, PlaylistPage,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
 use arc_swap::ArcSwapOption;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -163,7 +163,7 @@ pub struct QqCredential {
 }
 
 impl QqCredential {
-    fn from_token(token: LoginToken) -> Self {
+    pub(crate) fn from_token(token: LoginToken, client_guid: String) -> Self {
         Self {
             music_id: token.music_id,
             music_key: token.music_key,
@@ -181,7 +181,7 @@ impl QqCredential {
             login_type: token.login_type,
             expires_at: token.expires_at,
             encrypted_uin: token.encrypted_uin,
-            client_guid: new_client_guid(),
+            client_guid,
         }
     }
 
@@ -227,7 +227,7 @@ impl QqCredential {
     }
 }
 
-pub(crate) fn new_client_guid() -> String {
+pub fn new_client_guid() -> String {
     Uuid::new_v4().simple().to_string().to_ascii_uppercase()
 }
 
@@ -241,14 +241,18 @@ pub enum LoginEvent {
     Failed(String),
 }
 
-pub async fn run_qr_login(events: mpsc::UnboundedSender<LoginEvent>) {
-    if let Err(error) = qr_login(&events).await {
+pub async fn run_qr_login(events: mpsc::UnboundedSender<LoginEvent>, client_guid: String) {
+    if let Err(error) = qr_login(&events, client_guid).await {
         let _ = events.send(LoginEvent::Failed(format!("{error:#}")));
     }
 }
 
-async fn qr_login(events: &mpsc::UnboundedSender<LoginEvent>) -> Result<()> {
-    let client = LoginClient::new();
+async fn qr_login(events: &mpsc::UnboundedSender<LoginEvent>, client_guid: String) -> Result<()> {
+    ensure!(
+        !client_guid.trim().is_empty(),
+        "设备标识未保存，请检查应用设置后重新启动"
+    );
+    let client = LoginClient::new(client_guid.clone());
     let qr = client
         .get_login_qrcode()
         .await
@@ -282,7 +286,7 @@ async fn qr_login(events: &mpsc::UnboundedSender<LoginEvent>) -> Result<()> {
                 return Ok(());
             }
             LoginStatus::Success(token) => {
-                let credential = QqCredential::from_token(token);
+                let credential = QqCredential::from_token(token, client_guid);
                 let credential = ProtocolClient::new()?
                     .ensure_encrypted_uin(credential)
                     .await?;
@@ -294,18 +298,17 @@ async fn qr_login(events: &mpsc::UnboundedSender<LoginEvent>) -> Result<()> {
 }
 
 async fn refresh_credential(credential: QqCredential) -> Result<QqCredential> {
-    let client = LoginClient::new();
+    let client = LoginClient::new(credential.client_guid.clone());
     let previous = credential.to_token();
     let token = client
         .refresh_login_token(&previous)
         .await
         .context("QQ 音乐凭据刷新失败")?;
 
-    let mut refreshed = QqCredential::from_token(token);
+    let mut refreshed = QqCredential::from_token(token, credential.client_guid);
     if refreshed.encrypted_uin.is_empty() {
         refreshed.encrypted_uin = credential.encrypted_uin;
     }
-    refreshed.client_guid = credential.client_guid;
     Ok(refreshed)
 }
 

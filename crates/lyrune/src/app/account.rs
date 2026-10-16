@@ -36,6 +36,7 @@ pub(super) struct Account {
     generation: u64,
     message: String,
     client: Option<ProtocolClient>,
+    client_guid: String,
 }
 
 impl Default for Account {
@@ -48,6 +49,7 @@ impl Default for Account {
             generation: 0,
             message: "正在读取已保存的登录状态…".to_owned(),
             client: None,
+            client_guid: String::new(),
         }
     }
 }
@@ -112,9 +114,10 @@ pub(super) enum AccountEvent {
 impl EventEmitter<AccountEvent> for Account {}
 
 impl Account {
-    pub(super) fn new(client: Option<ProtocolClient>) -> Self {
+    pub(super) fn new(client: Option<ProtocolClient>, client_guid: String) -> Self {
         Self {
             client,
+            client_guid,
             ..Self::default()
         }
     }
@@ -160,7 +163,7 @@ impl Account {
         cx.notify();
 
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        drop(RUNTIME.spawn(run_qr_login(sender)));
+        drop(RUNTIME.spawn(run_qr_login(sender, self.client_guid.clone())));
         cx.spawn(async move |this, cx| {
             while let Some(event) = receiver.recv().await {
                 let completed = matches!(

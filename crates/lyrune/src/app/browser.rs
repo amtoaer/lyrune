@@ -563,7 +563,7 @@ mod tests {
             color_theme: ColorTheme::default(),
             writer: None,
         });
-        let account = cx.new(|_| Account::new(None));
+        let account = cx.new(|_| Account::new(None, String::new()));
         let lyrics = cx.new(|_| LyricsCache::new(None));
         let playback = cx.new(|_| {
             Playback::new(

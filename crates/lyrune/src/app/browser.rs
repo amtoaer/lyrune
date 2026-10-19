@@ -305,6 +305,17 @@ impl BrowserView {
     }
 
     pub(super) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.window_handle != window.window_handle() {
+            let value = self.search_input.read(cx).value();
+            self.search_input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(value)
+                    .placeholder("想播放什么？")
+                    .context_menu(false)
+            });
+            self.navigation_view = cx
+                .new(|cx| NavigationView::new(self.account.clone(), self.search_input.clone(), cx));
+        }
         self.window_handle = window.window_handle();
         self._window_subscriptions = vec![
             cx.subscribe_in(
@@ -671,6 +682,70 @@ mod tests {
             assert!(browser.main_content == MainContent::Search);
             assert_eq!(browser.search.query, "reopened");
         });
+    }
+
+    #[gpui::test]
+    fn test_input_cursor_after_hidden_reopen(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (host, cx) = cx.add_window_view(|window, cx| TestBrowser {
+            browser: new_browser(window, cx),
+            reveal: 0.,
+            hidden: false,
+        });
+        let browser = host.read_with(cx, |host, _| host.browser.clone());
+        let input = browser.read_with(cx, |browser, _| browser.search_input.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            input.update(cx, |input, cx| input.set_value("draft", window, cx));
+            window.draw(cx).clear(cx);
+        });
+        let bounds = input.read_with(cx, |input, _| input.input_bounds());
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.simulate_input("a");
+        let draft = input.read_with(cx, |input, _| input.value());
+        cx.update(|window, cx| window.blur(cx));
+        host.update(cx, |host, cx| {
+            host.hidden = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.remove_window();
+        });
+        let previous = input.downgrade();
+        drop(input);
+
+        let (host, cx) = cx.cx.add_window_view(|window, cx| {
+            browser.update(cx, |browser, cx| browser.attach_window(window, cx));
+            window.activate_window();
+            TestBrowser {
+                browser: browser.clone(),
+                reveal: 0.,
+                hidden: true,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        host.update(cx, |host, cx| {
+            host.hidden = false;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let input = browser.read_with(cx, |browser, _| browser.search_input.clone());
+        assert_eq!(input.read_with(cx, |input, _| input.value()), draft);
+        let bounds = input.read_with(cx, |input, _| input.input_bounds());
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.simulate_input("b");
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(gpui::Focusable::focus_handle(&input, cx).is_focused(window));
+            let bounds = input.read(cx).input_bounds().scale(window.scale_factor());
+            assert!(window.painted_quads().iter().any(|quad| {
+                quad.bounds.size.width == px(2.).scale(window.scale_factor())
+                    && quad.bounds.size.height > px(10.).scale(window.scale_factor())
+                    && bounds.contains(&quad.bounds.center())
+            }));
+        });
+        assert!(previous.upgrade().is_none());
     }
 
     #[gpui::test]

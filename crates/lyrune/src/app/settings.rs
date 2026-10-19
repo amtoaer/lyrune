@@ -203,6 +203,7 @@ pub(super) struct SettingsPage {
     preferences: Entity<Preferences>,
     settings_inputs: SettingsInputs,
     settings_scroll_handle: ScrollHandle,
+    window_handle: AnyWindowHandle,
     pub(super) update_check_in_progress: bool,
     _preferences_subscription: Subscription,
     _input_subscriptions: Vec<Subscription>,
@@ -226,6 +227,7 @@ impl SettingsPage {
             preferences,
             settings_inputs,
             settings_scroll_handle: ScrollHandle::new(),
+            window_handle: window.window_handle(),
             update_check_in_progress: false,
             _preferences_subscription: subscription,
             _input_subscriptions: Vec::new(),
@@ -235,8 +237,44 @@ impl SettingsPage {
     }
 
     pub(super) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 窗口重开后替换窗口绑定；输入内容和滚动位置仍由同一个页面实体持有。
         self._input_subscriptions.clear();
+        if self.window_handle != window.window_handle() {
+            let inputs = self.preferences.update(cx, |preferences, cx| {
+                SettingsInputs::new(&preferences.settings, window, cx)
+            });
+            let previous = &self.settings_inputs;
+            for (input, previous) in [
+                (&inputs.ui_font, &previous.ui_font),
+                (&inputs.monospace_font, &previous.monospace_font),
+                (&inputs.lyric_font, &previous.lyric_font),
+                (&inputs.audio_cache_limit, &previous.audio_cache_limit),
+                (&inputs.image_cache_capacity, &previous.image_cache_capacity),
+                (
+                    &inputs.navigation_history_limit,
+                    &previous.navigation_history_limit,
+                ),
+                (&inputs.lyric_font_scale, &previous.lyric_font_scale),
+                (&inputs.lyric_line_spacing, &previous.lyric_line_spacing),
+                (
+                    &inputs.lyric_background_min_overlay,
+                    &previous.lyric_background_min_overlay,
+                ),
+                (
+                    &inputs.lyric_background_chroma,
+                    &previous.lyric_background_chroma,
+                ),
+                (
+                    &inputs.lyric_background_contrast,
+                    &previous.lyric_background_contrast,
+                ),
+            ] {
+                let value = previous.read(cx).value();
+                input.update(cx, |input, cx| input.set_value(value, window, cx));
+            }
+            self.settings_inputs = inputs;
+            self.window_handle = window.window_handle();
+            cx.notify();
+        }
         type ApplyNumberSetting = fn(&mut SettingsPage, &mut Window, &mut Context<SettingsPage>);
         let numeric_inputs: [(_, _, _, ApplyNumberSetting); 8] = [
             (
@@ -1685,5 +1723,39 @@ mod tests {
                 .audio_cache_limit_gb),
             12
         );
+
+        let previous = cx.update(|window, cx| {
+            page.update(cx, |page, cx| {
+                page.settings_inputs.ui_font.update(cx, |input, cx| {
+                    input.set_value("Draft Font, ", window, cx);
+                });
+                page.settings_inputs.ui_font.downgrade()
+            })
+        });
+        cx.update(|window, _| window.remove_window());
+        let (_, cx) = cx.cx.add_window_view(|window, cx| {
+            page.update(cx, |page, cx| page.attach_window(window, cx));
+            window.activate_window();
+            TestSettingsPage { page: page.clone() }
+        });
+        cx.simulate_resize(gpui::size(px(1080.), px(2400.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let input = page.read_with(cx, |page, cx| {
+            assert_eq!(
+                page.settings_inputs.ui_font.read(cx).value(),
+                "Draft Font, "
+            );
+            assert_eq!(
+                page.settings_inputs.audio_cache_limit.read(cx).value(),
+                "12"
+            );
+            page.settings_inputs.audio_cache_limit.clone()
+        });
+        assert!(previous.upgrade().is_none());
+        let bounds = input.read_with(cx, |input, _| input.input_bounds());
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.blur(cx));
+        cx.run_until_parked();
+        assert_eq!(events.get(), 2);
     }
 }

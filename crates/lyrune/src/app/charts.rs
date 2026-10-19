@@ -189,14 +189,6 @@ impl BrowserView {
                                         .font_medium()
                                         .child(chart.title.clone()),
                                 )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(chart.update_tips.clone()),
-                                )
                                 .into_any_element()
                         };
                         Button::new(format!("chart-{}", chart.top_id))
@@ -210,7 +202,7 @@ impl BrowserView {
                             .h(if featured {
                                 cover_size + px(24.)
                             } else {
-                                cover_size + px(74.)
+                                cover_size + px(48.)
                             })
                             .p_2()
                             .rounded(px(12.))

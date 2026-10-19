@@ -12,7 +12,9 @@ use tokio::task::JoinHandle;
 use crate::cache::{AudioCache, PreparedStream};
 use crate::player::{AudioPlayer, PreparedPlayback};
 use crate::runtime::RUNTIME;
-use crate::settings::{CdnCacheStore, PersistedPlayback, PersistedQueueContinuation};
+use crate::settings::{
+    AppSettings, CdnCacheStore, PersistedPlayback, PersistedQueueContinuation, RepeatMode,
+};
 
 use super::account::Account;
 use super::lyrics_loading::LyricsCache;
@@ -21,7 +23,7 @@ use super::navigation::SharedPlaylistResource;
 use super::playback_sync::{duration_micros, mpris_track_id};
 use super::playlists::PlaylistPageKey;
 use super::preferences::Preferences;
-use super::queue::{PlaybackQueue, RepeatMode};
+use super::queue::PlaybackQueue;
 use crate::singleflight::SingleFlight;
 #[cfg(target_os = "linux")]
 use crate::{inhibit::InhibitHandle, mpris::MprisHandle};
@@ -199,11 +201,7 @@ pub(super) struct PlaybackState {
 }
 
 impl PlaybackState {
-    pub(super) fn new(
-        audio: Option<Arc<AudioPlayer>>,
-        quality: Quality,
-        pending_restore: Option<PersistedPlayback>,
-    ) -> Self {
+    pub(super) fn new(audio: Option<Arc<AudioPlayer>>, settings: &AppSettings) -> Self {
         Self {
             audio,
             queue: None,
@@ -214,12 +212,12 @@ impl PlaybackState {
             load: PlaybackLoad::default(),
             started: false,
             location: None,
-            active_quality: quality,
+            active_quality: settings.playback_quality,
             available_qualities: Vec::new(),
             position: Duration::ZERO,
-            shuffle: false,
-            repeat_mode: RepeatMode::Off,
-            pending_restore,
+            shuffle: settings.shuffle,
+            repeat_mode: settings.repeat_mode,
+            pending_restore: settings.current_playback.clone(),
             last_persisted_at: Instant::now(),
         }
     }

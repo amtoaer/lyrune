@@ -69,13 +69,6 @@ pub(super) fn canonical_queue_track_index(
         .flatten()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum RepeatMode {
-    Off,
-    All,
-    One,
-}
-
 pub(super) struct PlaybackQueue {
     pub(super) playlist_id: UserPlaylistId,
     pub(super) tracks: Vec<Arc<Track>>,
@@ -134,24 +127,6 @@ impl PersistedQueueContinuation {
         match self {
             Self::Radar { has_more, .. } => has_more,
             Self::Guess => true,
-        }
-    }
-}
-
-impl RepeatMode {
-    pub(super) fn next(self) -> Self {
-        match self {
-            Self::Off => Self::All,
-            Self::All => Self::One,
-            Self::One => Self::Off,
-        }
-    }
-
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Off => "循环",
-            Self::All => "列表循环",
-            Self::One => "单曲循环",
         }
     }
 }

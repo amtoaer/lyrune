@@ -567,9 +567,9 @@ mod tests {
         });
         let account = cx.new(|_| Account::new(None, String::new()));
         let lyrics = cx.new(|_| LyricsCache::new(None));
-        let playback = cx.new(|_| {
+        let playback = cx.new(|cx| {
             Playback::new(
-                PlaybackState::new(None, Default::default(), None),
+                PlaybackState::new(None, &preferences.read(cx).settings),
                 account.clone(),
                 preferences.clone(),
                 lyrics,

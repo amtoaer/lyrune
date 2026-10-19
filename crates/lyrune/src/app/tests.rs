@@ -29,7 +29,10 @@ use super::queue::{
     PlaybackQueue, canonical_queue_track_index, insert_external_track_after_current,
     insert_track_after_current,
 };
-use crate::settings::{DEFAULT_NAVIGATION_HISTORY_LIMIT, FrameRate, PersistedQueueContinuation};
+use crate::settings::{
+    AppSettings, DEFAULT_NAVIGATION_HISTORY_LIMIT, FrameRate, PersistedQueueContinuation,
+    RepeatMode,
+};
 
 fn track(mid: &str) -> Track {
     Track {
@@ -85,7 +88,10 @@ fn test_replace_playback_queue() {
         modified: false,
         continuation: None,
     };
-    let mut playback = PlaybackState::new(None, Quality::Standard, None);
+    let mut settings = AppSettings::default();
+    settings.shuffle = true;
+    settings.repeat_mode = RepeatMode::One;
+    let mut playback = PlaybackState::new(None, &settings);
     let first = playback.replace_queue(queue("first"));
     playback.recommendation_loading = true;
     playback.waiting_for_recommendation = true;
@@ -108,11 +114,15 @@ fn test_replace_playback_queue() {
     assert_eq!(playback.load.track, Some(0));
     assert!(playback.load.autoplay);
     assert_eq!(playback.position, Duration::from_secs(42));
+    assert!(playback.shuffle);
+    assert_eq!(playback.repeat_mode, RepeatMode::One);
 }
 
 #[test]
 fn test_playback_snapshot() {
-    let mut playback = PlaybackState::new(None, Quality::High, None);
+    let mut settings = AppSettings::default();
+    settings.playback_quality = Quality::High;
+    let mut playback = PlaybackState::new(None, &settings);
     playback.position = Duration::from_micros(123_456);
     assert!(playback.snapshot(123).is_none());
     playback.queue = Some(PlaybackQueue {

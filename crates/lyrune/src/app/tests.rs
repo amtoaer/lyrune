@@ -362,6 +362,80 @@ fn test_shuffle_insertion() {
 }
 
 #[test]
+fn test_shuffle_restore() {
+    let mut settings = AppSettings::default();
+    settings.shuffle = true;
+    let mut playback = PlaybackState::new(None, &settings);
+    playback.replace_queue(PlaybackQueue {
+        playlist_id: UserPlaylistId::Liked,
+        tracks: ["A", "B", "C", "D"]
+            .map(|mid| Arc::new(track(mid)))
+            .to_vec(),
+        modified: false,
+        continuation: None,
+        shuffle_order: Some(vec![2, 0, 3, 1]),
+    });
+    playback.current_track = Some(3);
+    playback.position = Duration::from_millis(1234);
+    let snapshot = playback.snapshot(123).unwrap();
+    let serialized = serde_json::to_string(&snapshot).unwrap();
+    let mut restored = PlaybackState::new(None, &settings);
+    let (index, resume_at) = restored
+        .restore_queue(serde_json::from_str(&serialized).unwrap())
+        .unwrap();
+    restored.current_track = Some(index);
+    assert_eq!(resume_at, Duration::from_millis(1234));
+    assert_eq!(restored.track().unwrap().mid, "D");
+    assert_eq!(restored.next_track(true), playback.next_track(true));
+    assert_eq!(restored.previous_track(), playback.previous_track());
+    assert_eq!(
+        restored.queue.as_ref().unwrap().shuffle_order,
+        Some(vec![2, 0, 3, 1])
+    );
+
+    let mut legacy = serde_json::to_value(&snapshot).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("queue_shuffle_order");
+    restored
+        .restore_queue(serde_json::from_value(legacy).unwrap())
+        .unwrap();
+    assert_eq!(restored.previous_track(), None);
+    assert_eq!(
+        restored
+            .queue
+            .as_ref()
+            .unwrap()
+            .shuffle_order
+            .as_ref()
+            .unwrap()[0],
+        3
+    );
+
+    let mut invalid = snapshot.clone();
+    invalid.queue_shuffle_order = Some(vec![0, 0, 2, 4]);
+    restored.restore_queue(invalid).unwrap();
+    let mut indices = restored
+        .queue
+        .as_ref()
+        .unwrap()
+        .shuffle_order
+        .clone()
+        .unwrap();
+    indices.sort_unstable();
+    assert_eq!(indices, [0, 1, 2, 3]);
+
+    settings.shuffle = false;
+    let mut sequential = PlaybackState::new(None, &settings);
+    let (index, _) = sequential.restore_queue(snapshot).unwrap();
+    sequential.current_track = Some(index);
+    assert!(sequential.queue.as_ref().unwrap().shuffle_order.is_none());
+    assert_eq!(sequential.previous_track(), Some(2));
+    assert_eq!(sequential.next_track(true), None);
+}
+
+#[test]
 fn playback_load_preserves_intent_until_cleared() {
     for autoplay in [true, false] {
         let mut load = PlaybackLoad::default();

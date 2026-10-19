@@ -418,20 +418,7 @@ impl Playback {
         restore: PersistedPlayback,
         cx: &mut Context<Self>,
     ) {
-        let index = restore
-            .queue_tracks
-            .iter()
-            .position(|track| track.mid == restore.track_mid);
-        if let Some(index) = index {
-            let resume_at = restore.resume_position(restore.queue_tracks[index].duration_seconds);
-            self.state.pending_restore = None;
-            self.state.replace_queue(PlaybackQueue {
-                playlist_id: restore.playlist_id,
-                tracks: restore.queue_tracks,
-                modified: restore.queue_modified,
-                continuation: restore.queue_continuation,
-                shuffle_order: None,
-            });
+        if let Some((index, resume_at)) = self.state.restore_queue(restore) {
             self.start_playback(index, resume_at, None, false, cx);
         } else {
             self.clear_persisted_playback(cx);

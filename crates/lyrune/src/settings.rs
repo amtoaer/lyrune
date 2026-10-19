@@ -41,6 +41,8 @@ pub struct PersistedPlayback {
     pub queue_modified: bool,
     #[serde(default)]
     pub queue_continuation: Option<PersistedQueueContinuation>,
+    #[serde(default)]
+    pub queue_shuffle_order: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -895,6 +897,7 @@ mod tests {
                     next_page: 4,
                     has_more: true,
                 }),
+                queue_shuffle_order: None,
             }),
             window_size: Some(PersistedWindowSize {
                 width: 1440,
@@ -1058,6 +1061,7 @@ mod tests {
                 queue_tracks: vec![queued_track; 128],
                 queue_modified: false,
                 queue_continuation: None,
+                queue_shuffle_order: Some((0..128).rev().collect()),
             }),
             ..Default::default()
         };
@@ -1124,6 +1128,7 @@ mod tests {
             queue_tracks: vec![Arc::new(track("track-mid"))],
             queue_modified: false,
             queue_continuation: None,
+            queue_shuffle_order: None,
         };
         assert_eq!(playback.resume_position(180), Duration::from_millis(92_345));
 
@@ -1145,6 +1150,7 @@ mod tests {
         .expect("deserialize playback without queue_modified");
 
         assert!(!playback.queue_modified);
+        assert!(playback.queue_shuffle_order.is_none());
     }
 
     #[test]

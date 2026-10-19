@@ -231,6 +231,33 @@ impl PlaybackState {
         self.queue_generation
     }
 
+    pub(super) fn restore_queue(
+        &mut self,
+        restore: PersistedPlayback,
+    ) -> Option<(usize, Duration)> {
+        let index = restore
+            .queue_tracks
+            .iter()
+            .position(|track| track.mid == restore.track_mid)?;
+        let resume_at = restore.resume_position(restore.queue_tracks[index].duration_seconds);
+        let shuffle_order = restore.queue_shuffle_order.filter(|order| {
+            let mut sorted = order.clone();
+            sorted.sort_unstable();
+            sorted.into_iter().eq(0..restore.queue_tracks.len())
+        });
+        let mut queue = PlaybackQueue {
+            playlist_id: restore.playlist_id,
+            tracks: restore.queue_tracks,
+            modified: restore.queue_modified,
+            continuation: restore.queue_continuation,
+            shuffle_order,
+        };
+        queue.set_shuffle(self.shuffle, Some(index));
+        self.pending_restore = None;
+        self.replace_queue(queue);
+        Some((index, resume_at))
+    }
+
     pub(super) fn track(&self) -> Option<&Track> {
         self.queue
             .as_ref()?
@@ -301,6 +328,7 @@ impl PlaybackState {
             queue_tracks: queue.tracks.clone(),
             queue_modified: queue.modified,
             queue_continuation: queue.continuation,
+            queue_shuffle_order: queue.shuffle_order.clone(),
         })
     }
 }

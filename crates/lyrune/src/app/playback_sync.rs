@@ -40,10 +40,18 @@ pub(super) fn mpris_track_id(track_mid: &str) -> String {
 }
 
 impl Playback {
-    pub(super) fn persist_playback_options(&self, cx: &mut gpui::App) {
+    pub(super) fn persist_playback_options(&mut self, cx: &mut gpui::App) {
+        let snapshot = self
+            .account
+            .read(cx)
+            .id()
+            .and_then(|id| self.state.snapshot(id));
         self.preferences.update(cx, |preferences, _| {
             preferences.settings.shuffle = self.state.shuffle;
             preferences.settings.repeat_mode = self.state.repeat_mode;
+            if let Some(snapshot) = snapshot {
+                preferences.settings.current_playback = Some(snapshot);
+            }
             preferences.save();
         });
     }

@@ -61,6 +61,33 @@ pub struct PersistedWindowSize {
     pub height: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    All,
+    One,
+}
+
+impl RepeatMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::All,
+            Self::All => Self::One,
+            Self::One => Self::Off,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "循环",
+            Self::All => "列表循环",
+            Self::One => "单曲循环",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FrameRate {
@@ -260,6 +287,8 @@ pub struct AppSettings {
     pub image_cache_capacity: usize,
     pub navigation_history_limit: usize,
     pub playback_quality: Quality,
+    pub shuffle: bool,
+    pub repeat_mode: RepeatMode,
     #[serde(alias = "lyric_frame_rate")]
     pub lyric_highlight_frame_rate: FrameRate,
     pub lyric_scroll_frame_rate: FrameRate,
@@ -295,6 +324,8 @@ impl Default for AppSettings {
             image_cache_capacity: DEFAULT_IMAGE_CACHE_CAPACITY,
             navigation_history_limit: DEFAULT_NAVIGATION_HISTORY_LIMIT,
             playback_quality: Quality::default(),
+            shuffle: false,
+            repeat_mode: RepeatMode::Off,
             lyric_highlight_frame_rate: FrameRate::Fps30,
             lyric_scroll_frame_rate: FrameRate::Display,
             progress_frame_rate: FrameRate::Fps60,
@@ -675,6 +706,8 @@ mod tests {
             DEFAULT_NAVIGATION_HISTORY_LIMIT
         );
         assert_eq!(settings.playback_quality, Quality::Standard);
+        assert!(!settings.shuffle);
+        assert_eq!(settings.repeat_mode, RepeatMode::Off);
         assert_eq!(settings.lyric_highlight_frame_rate, FrameRate::Fps30);
         assert_eq!(settings.lyric_scroll_frame_rate, FrameRate::Display);
         assert_eq!(settings.progress_frame_rate, FrameRate::Fps60);
@@ -768,6 +801,8 @@ mod tests {
             image_cache_capacity: 0,
             navigation_history_limit: usize::MAX,
             playback_quality: Quality::High,
+            shuffle: false,
+            repeat_mode: RepeatMode::Off,
             lyric_highlight_frame_rate: FrameRate::Fps30,
             lyric_scroll_frame_rate: FrameRate::Display,
             progress_frame_rate: FrameRate::Fps60,
@@ -838,6 +873,8 @@ mod tests {
             image_cache_capacity: 72,
             navigation_history_limit: 16,
             playback_quality: Quality::HiRes,
+            shuffle: true,
+            repeat_mode: RepeatMode::All,
             lyric_highlight_frame_rate: FrameRate::Fps120,
             lyric_scroll_frame_rate: FrameRate::Display,
             progress_frame_rate: FrameRate::Fps90,
@@ -909,6 +946,8 @@ mod tests {
             expected.navigation_history_limit
         );
         assert_eq!(restored.playback_quality, expected.playback_quality);
+        assert_eq!(restored.shuffle, expected.shuffle);
+        assert_eq!(restored.repeat_mode, expected.repeat_mode);
         assert_eq!(
             restored.lyric_highlight_frame_rate,
             expected.lyric_highlight_frame_rate

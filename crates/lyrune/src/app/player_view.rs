@@ -13,12 +13,12 @@ use gpui_component::{
 use lyrune_api::{Quality, SearchAlbum, SearchArtist, Track};
 
 use super::progress_view::{PlaybackProgressView, ProgressInput};
-use super::queue::RepeatMode;
 use super::{LyruneView, PLAYER_BAR_HEIGHT};
 use crate::design::ColorTheme;
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
 use crate::player::AudioPlayer;
+use crate::settings::RepeatMode;
 
 #[derive(PartialEq)]
 pub(super) struct PlayerInput {
@@ -684,6 +684,7 @@ impl LyruneView {
                 .update(cx, |browser, cx| browser.toggle_current_track_liked(cx)),
             PlayerAction::Shuffle => self.playback.update(cx, |playback, cx| {
                 playback.state.shuffle = !playback.state.shuffle;
+                playback.persist_playback_options(cx);
                 #[cfg(target_os = "linux")]
                 playback.sync_mpris(false, cx);
                 cx.notify();
@@ -699,6 +700,7 @@ impl LyruneView {
                 .update(cx, |playback, cx| playback.play_next(false, cx)),
             PlayerAction::Repeat => self.playback.update(cx, |playback, cx| {
                 playback.state.repeat_mode = playback.state.repeat_mode.next();
+                playback.persist_playback_options(cx);
                 #[cfg(target_os = "linux")]
                 playback.sync_mpris(false, cx);
                 cx.notify();

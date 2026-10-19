@@ -12,8 +12,6 @@ use tokio::sync::mpsc;
 
 use super::playback::{Playback, PlaybackEvent};
 #[cfg(target_os = "linux")]
-use super::queue::RepeatMode;
-#[cfg(target_os = "linux")]
 use crate::inhibit::InhibitHandle;
 #[cfg(target_os = "linux")]
 use crate::mpris::{
@@ -21,7 +19,7 @@ use crate::mpris::{
 };
 use crate::player::AudioPlayer;
 #[cfg(target_os = "linux")]
-use crate::settings::PersistedQueueContinuation;
+use crate::settings::{PersistedQueueContinuation, RepeatMode};
 #[cfg(target_os = "linux")]
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -42,6 +40,14 @@ pub(super) fn mpris_track_id(track_mid: &str) -> String {
 }
 
 impl Playback {
+    pub(super) fn persist_playback_options(&self, cx: &mut gpui::App) {
+        self.preferences.update(cx, |preferences, _| {
+            preferences.settings.shuffle = self.state.shuffle;
+            preferences.settings.repeat_mode = self.state.repeat_mode;
+            preferences.save();
+        });
+    }
+
     // 绑定应用实体而非窗口。暂停时等待唤醒，不靠不断轮询维持后台播放。
     pub(crate) fn start_background_tick(&mut self, cx: &mut Context<Self>) {
         let (wake_sender, mut wake_receiver) = mpsc::channel(1);
@@ -120,11 +126,13 @@ impl Playback {
                     MprisLoopStatus::Track => RepeatMode::One,
                     MprisLoopStatus::Playlist => RepeatMode::All,
                 };
+                self.persist_playback_options(cx);
                 self.sync_mpris(false, cx);
                 cx.notify();
             }
             MprisCommand::SetShuffle(shuffle) => {
                 self.state.shuffle = shuffle;
+                self.persist_playback_options(cx);
                 self.sync_mpris(false, cx);
                 cx.notify();
             }

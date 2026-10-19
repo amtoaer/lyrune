@@ -3,15 +3,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{Pixels, px};
+use gpui::{AppContext as _, Pixels, TestAppContext, font, px};
 use lyrune_api::{
     PlaylistPage, Quality, RecommendationKind, SearchAlbum, SearchPage, SearchResults, Track,
     UserPlaylist, UserPlaylistId,
 };
 
+use super::account::Account;
 use super::animation::frame_is_due;
 use super::home::HomePageState;
 use super::lyrics::parse_lyrics;
+use super::lyrics_loading::LyricsCache;
 use super::lyrics_view::{
     adjacent_lyric_timing, combined_lyric_frame_interval, lyric_edge_opacity,
     lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
@@ -22,17 +24,20 @@ use super::navigation::{
     PlaylistScrollPosition, SearchCategory, SearchMoreResults, SearchResource, SearchVisibleCounts,
     resolved_playlist_scroll_row,
 };
-use super::playback::{PlaybackLoad, PlaybackState};
+use super::playback::{Playback, PlaybackLoad, PlaybackState};
 use super::playlists::playlist_title_is_long;
+use super::preferences::Preferences;
 use super::progress_view::format_playback_time;
 use super::queue::{
     PlaybackQueue, canonical_queue_track_index, insert_external_track_after_current,
     insert_track_after_current,
 };
+use crate::design::{AppFonts, ColorTheme};
 use crate::settings::{
     AppSettings, DEFAULT_NAVIGATION_HISTORY_LIMIT, FrameRate, PersistedQueueContinuation,
     RepeatMode,
 };
+use crate::singleflight::SingleFlight;
 
 fn track(mid: &str) -> Track {
     Track {
@@ -260,6 +265,65 @@ fn test_shuffle_toggle() {
     );
     playback.position = Duration::ZERO;
     assert_eq!(playback.previous_track(), None);
+}
+
+#[gpui::test]
+fn test_next_at_queue_end(cx: &mut TestAppContext) {
+    let preferences = cx.new(|_| Preferences {
+        settings: AppSettings::default(),
+        fonts: AppFonts {
+            ui: font(".SystemUIFont"),
+            monospace: font(".SystemUIFont"),
+            lyrics: font(".SystemUIFont"),
+        },
+        color_theme: ColorTheme::default(),
+        writer: None,
+    });
+    let account = cx.new(|_| Account::new(None, String::new()));
+    let lyrics = cx.new(|_| LyricsCache::new(None));
+    let playback = cx.new(|cx| {
+        Playback::new(
+            PlaybackState::new(None, &preferences.read(cx).settings),
+            account,
+            preferences,
+            lyrics,
+            None,
+            None,
+            SingleFlight::default(),
+        )
+    });
+
+    playback.update(cx, |playback, cx| {
+        for shuffle in [false, true] {
+            playback.state.shuffle = shuffle;
+            playback.state.replace_queue(PlaybackQueue {
+                playlist_id: UserPlaylistId::Liked,
+                tracks: ["A", "B"].map(|mid| Arc::new(track(mid))).to_vec(),
+                modified: false,
+                continuation: None,
+                shuffle_order: shuffle.then(|| vec![1, 0]),
+            });
+            let last = if shuffle { 0 } else { 1 };
+            playback.state.current_track = Some(last);
+            for loading in [false, true] {
+                let generation = playback.state.load.invalidate();
+                playback.state.load.track = loading.then_some(last);
+                playback.state.load.autoplay = loading;
+                playback.state.started = !loading;
+                playback.state.position = Duration::from_secs(42);
+
+                playback.play_next(false, cx);
+
+                assert_eq!(playback.state.current_track, Some(last));
+                assert_eq!(playback.state.position, Duration::from_secs(180));
+                assert!(!playback.state.started);
+                assert!(!playback.state.is_advancing());
+                assert!(playback.state.load.track.is_none());
+                assert!(!playback.state.load.autoplay);
+                assert!(!playback.state.load.is_current(generation));
+            }
+        }
+    });
 }
 
 #[test]

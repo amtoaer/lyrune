@@ -840,6 +840,11 @@ impl Playback {
             return;
         }
 
+        self.state.load.invalidate();
+        if let Some(audio) = &self.state.audio {
+            audio.stop();
+        }
+        self.state.load.clear();
         self.state.started = false;
         self.wake_playback_tick();
         if can_extend {

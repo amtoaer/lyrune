@@ -17,7 +17,6 @@ use super::{LyruneView, PLAYER_BAR_HEIGHT};
 use crate::design::ColorTheme;
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
-use crate::player::AudioPlayer;
 use crate::settings::RepeatMode;
 
 #[derive(PartialEq)]
@@ -784,12 +783,7 @@ impl LyruneView {
             show_pause: if self.playback.read(cx).state.load.track.is_some() {
                 self.playback.read(cx).state.load.autoplay
             } else {
-                self.playback
-                    .read(cx)
-                    .state
-                    .audio
-                    .as_deref()
-                    .is_some_and(AudioPlayer::is_playing)
+                self.playback.read(cx).state.is_advancing()
             },
             queue_empty: self
                 .playback

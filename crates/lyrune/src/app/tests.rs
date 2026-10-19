@@ -87,6 +87,7 @@ fn test_replace_playback_queue() {
         tracks: vec![Arc::new(track(mid))],
         modified: false,
         continuation: None,
+        shuffle_order: None,
     };
     let mut settings = AppSettings::default();
     settings.shuffle = true;
@@ -132,6 +133,7 @@ fn test_playback_snapshot() {
         tracks: vec![Arc::new(track("first")), Arc::new(track("second"))],
         modified: true,
         continuation: Some(PersistedQueueContinuation::Guess),
+        shuffle_order: None,
     });
     assert!(playback.snapshot(123).is_none());
     playback.current_track = Some(2);
@@ -156,6 +158,207 @@ fn test_playback_snapshot() {
         Some(PersistedQueueContinuation::Guess)
     );
     assert_eq!(playback.position, Duration::from_micros(123_456));
+}
+
+#[test]
+fn test_shuffle_playback() {
+    let mut playback = PlaybackState::new(None, &AppSettings::default());
+    playback.replace_queue(PlaybackQueue {
+        playlist_id: UserPlaylistId::Liked,
+        tracks: ["A", "B", "C", "D"]
+            .map(|mid| Arc::new(track(mid)))
+            .to_vec(),
+        modified: false,
+        continuation: None,
+        shuffle_order: None,
+    });
+    playback.current_track = Some(2);
+    playback.set_shuffle(true);
+    let order = playback
+        .queue
+        .as_ref()
+        .unwrap()
+        .shuffle_order
+        .clone()
+        .unwrap();
+    assert_eq!(order[0], 2);
+    let mut sorted = order.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, [0, 1, 2, 3]);
+    assert_eq!(
+        mids(&playback.queue.as_ref().unwrap().tracks),
+        ["A", "B", "C", "D"]
+    );
+    assert_eq!(playback.previous_track(), None);
+
+    for pair in order.windows(2) {
+        assert_eq!(playback.next_track(true), Some(pair[1]));
+        playback.current_track = Some(pair[1]);
+        assert_eq!(playback.previous_track(), Some(pair[0]));
+        playback.current_track = playback.previous_track();
+        assert_eq!(playback.next_track(false), Some(pair[1]));
+        playback.current_track = Some(pair[1]);
+    }
+    assert_eq!(playback.next_track(true), None);
+    assert_eq!(playback.next_track(false), None);
+    playback.repeat_mode = RepeatMode::All;
+    for &index in &order {
+        assert_eq!(playback.next_track(true), Some(index));
+        playback.current_track = Some(index);
+    }
+    playback.current_track = Some(order[0]);
+    assert_eq!(playback.previous_track(), order.last().copied());
+    playback.repeat_mode = RepeatMode::One;
+    assert_eq!(playback.next_track(true), Some(order[0]));
+    assert_eq!(playback.next_track(false), Some(order[1]));
+    playback.position = Duration::from_secs(3);
+    assert_eq!(playback.previous_track(), playback.current_track);
+}
+
+#[test]
+fn test_shuffle_toggle() {
+    let mut playback = PlaybackState::new(None, &AppSettings::default());
+    playback.replace_queue(PlaybackQueue {
+        playlist_id: UserPlaylistId::Liked,
+        tracks: ["A", "B", "C", "D"]
+            .map(|mid| Arc::new(track(mid)))
+            .to_vec(),
+        modified: false,
+        continuation: None,
+        shuffle_order: None,
+    });
+    playback.current_track = Some(1);
+    playback.position = Duration::from_secs(42);
+    playback.load.track = Some(1);
+    let generation = playback.load.invalidate();
+    playback.set_shuffle(true);
+    let order = playback.queue.as_ref().unwrap().shuffle_order.clone();
+    playback.set_shuffle(true);
+    assert_eq!(playback.queue.as_ref().unwrap().shuffle_order, order);
+    playback.set_shuffle(false);
+    assert_eq!(playback.next_track(false), Some(2));
+    assert!(playback.queue.as_ref().unwrap().shuffle_order.is_none());
+    assert_eq!(playback.current_track, Some(1));
+    assert_eq!(playback.position, Duration::from_secs(42));
+    assert_eq!(playback.load.track, Some(1));
+    assert!(playback.load.is_current(generation));
+
+    // 手动选曲定位到既有随机顺序；重新开启随机才从当前歌曲重新排列。
+    playback.set_shuffle(true);
+    playback.current_track = playback.next_track(false);
+    playback.set_shuffle(false);
+    playback.set_shuffle(true);
+    assert_eq!(
+        playback
+            .queue
+            .as_ref()
+            .unwrap()
+            .shuffle_order
+            .as_ref()
+            .unwrap()[0],
+        playback.current_track.unwrap()
+    );
+    playback.position = Duration::ZERO;
+    assert_eq!(playback.previous_track(), None);
+}
+
+#[test]
+fn test_shuffle_recommendations() {
+    for continuation in [
+        PersistedQueueContinuation::Radar {
+            next_page: 2,
+            has_more: true,
+        },
+        PersistedQueueContinuation::Radar {
+            next_page: 2,
+            has_more: false,
+        },
+        PersistedQueueContinuation::Guess,
+    ] {
+        let mut playback = PlaybackState::new(None, &AppSettings::default());
+        playback.replace_queue(PlaybackQueue {
+            playlist_id: UserPlaylistId::Recommendation {
+                kind: RecommendationKind::Radar,
+            },
+            tracks: ["A", "B"].map(|mid| Arc::new(track(mid))).to_vec(),
+            modified: false,
+            continuation: Some(continuation),
+            shuffle_order: None,
+        });
+        playback.current_track = Some(0);
+        playback.set_shuffle(true);
+        assert!(playback.queue.as_ref().unwrap().shuffle_order.is_none());
+        assert_eq!(playback.next_track(true), Some(1));
+        playback.current_track = Some(1);
+        assert_eq!(playback.previous_track(), Some(0));
+        assert_eq!(playback.next_track(true), None);
+        playback.repeat_mode = RepeatMode::All;
+        assert_eq!(
+            playback.next_track(true),
+            (!continuation.can_load_more()).then_some(0)
+        );
+    }
+}
+
+#[test]
+fn test_shuffle_short_queue() {
+    let mut playback = PlaybackState::new(None, &AppSettings::default());
+    playback.replace_queue(PlaybackQueue {
+        playlist_id: UserPlaylistId::Liked,
+        tracks: Vec::new(),
+        modified: false,
+        continuation: None,
+        shuffle_order: None,
+    });
+    playback.set_shuffle(true);
+    assert_eq!(playback.next_track(true), None);
+    assert_eq!(playback.previous_track(), None);
+    playback
+        .queue
+        .as_mut()
+        .unwrap()
+        .append_tracks([Arc::new(track("A"))]);
+    playback.current_track = Some(0);
+    assert_eq!(playback.next_track(true), None);
+    assert_eq!(playback.previous_track(), None);
+    playback.repeat_mode = RepeatMode::All;
+    assert_eq!(playback.next_track(true), Some(0));
+    assert_eq!(playback.previous_track(), Some(0));
+}
+
+#[test]
+fn test_shuffle_insertion() {
+    for (current, inserted, expected) in [
+        (0, "E", vec!["C", "A", "E", "D", "B"]),
+        (0, "D", vec!["C", "A", "D", "B"]),
+        (2, "A", vec!["C", "A", "D", "B"]),
+        (0, "A", vec!["C", "A", "D", "B"]),
+    ] {
+        let mut queue = PlaybackQueue {
+            playlist_id: UserPlaylistId::Liked,
+            tracks: ["A", "B", "C", "D"]
+                .map(|mid| Arc::new(track(mid)))
+                .to_vec(),
+            modified: false,
+            continuation: None,
+            shuffle_order: Some(vec![2, 0, 3, 1]),
+        };
+        let index = insert_external_track_after_current(
+            &mut queue,
+            Some(current),
+            Arc::new(track(inserted)),
+        );
+        assert_eq!(queue.tracks[index].mid, inserted);
+        let actual = queue
+            .shuffle_order
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|&index| queue.tracks[index].mid.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), queue.tracks.len());
+    }
 }
 
 #[test]
@@ -883,6 +1086,7 @@ fn queue_playback_markers_follow_page_order() {
         tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
         modified: false,
         continuation: None,
+        shuffle_order: None,
     };
     let reordered = vec![Arc::new(track("B")), Arc::new(track("A"))];
     assert_eq!(
@@ -904,6 +1108,7 @@ fn queue_append_preserves_order_and_existing_tracks() {
         tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
         modified: false,
         continuation: None,
+        shuffle_order: Some(vec![1, 0]),
     };
     let mut duplicate = track("B");
     duplicate.title = "different metadata".to_owned();
@@ -921,6 +1126,11 @@ fn queue_append_preserves_order_and_existing_tracks() {
     assert_eq!(mids(&queue.tracks), ["A", "B", "C", "D"]);
     assert_eq!(queue.tracks[1].title, "B");
     assert_eq!(queue.tracks[2].title, "C");
+    let order = queue.shuffle_order.as_ref().unwrap().clone();
+    assert_eq!(&order[..2], [1, 0]);
+    let mut appended = order[2..].to_vec();
+    appended.sort_unstable();
+    assert_eq!(appended, [2, 3]);
     assert_eq!(
         canonical_queue_track_index(&queue, &UserPlaylistId::Liked, &queue.tracks, "D"),
         Some(3)
@@ -930,6 +1140,7 @@ fn queue_append_preserves_order_and_existing_tracks() {
     assert_eq!(queue.append_tracks([Arc::new(track("C"))]), None);
     assert_eq!(queue.append_tracks([]), None);
     assert_eq!(mids(&queue.tracks), ["A", "B", "C", "D"]);
+    assert_eq!(queue.shuffle_order.as_ref().unwrap(), &order);
 }
 
 #[test]
@@ -940,6 +1151,7 @@ fn search_insertion_prevents_reusing_the_source_playlist_queue() {
         tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
         modified: false,
         continuation: None,
+        shuffle_order: None,
     };
 
     let inserted =
@@ -961,6 +1173,7 @@ fn test_daily_queue_refresh() {
         tracks: vec![Arc::new(track("A")), Arc::new(track("B"))],
         modified: false,
         continuation: None,
+        shuffle_order: None,
     };
     assert_eq!(
         canonical_queue_track_index(&queue, &UserPlaylistId::Daily, &queue.tracks, "B"),

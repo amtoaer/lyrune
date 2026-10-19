@@ -336,6 +336,7 @@ impl BrowserView {
                     tracks: vec![track],
                     modified: false,
                     continuation: None,
+                    shuffle_order: None,
                 });
                 0
             };

@@ -7,6 +7,7 @@ use anyhow::Context as _;
 use gpui::Context;
 use hashbrown::HashSet;
 use lyrune_api::{RecommendationKind, Track, UserPlaylist, UserPlaylistId};
+use rand::seq::SliceRandom as _;
 
 use super::browser::BrowserView;
 use super::navigation::SharedPlaylistResource;
@@ -43,7 +44,27 @@ pub(super) fn insert_external_track_after_current(
     current_index: Option<usize>,
     track: Arc<Track>,
 ) -> usize {
+    let existing_index = queue.tracks.iter().position(|item| item.mid == track.mid);
     let index = insert_track_after_current(&mut queue.tracks, current_index, track);
+    if let Some(order) = &mut queue.shuffle_order
+        && (existing_index.is_none() || existing_index != current_index)
+    {
+        let position = order
+            .iter()
+            .filter(|&&item| Some(item) != existing_index)
+            .position(|&item| Some(item) == current_index)
+            .map_or(0, |position| position + 1);
+        order.retain(|&item| Some(item) != existing_index);
+        for item in order.iter_mut() {
+            if existing_index.is_some_and(|removed| *item > removed) {
+                *item -= 1;
+            }
+            if *item >= index {
+                *item += 1;
+            }
+        }
+        order.insert(position, index);
+    }
     queue.modified = true;
     index
 }
@@ -75,9 +96,47 @@ pub(super) struct PlaybackQueue {
     // 插入外部歌曲后不再代表原歌单的顺序，不能仅凭 playlist_id 复用。
     pub(super) modified: bool,
     pub(super) continuation: Option<PersistedQueueContinuation>,
+    pub(super) shuffle_order: Option<Vec<usize>>,
 }
 
 impl PlaybackQueue {
+    pub(super) fn set_shuffle(&mut self, enabled: bool, current: Option<usize>) {
+        if !enabled || self.continuation.is_some() {
+            self.shuffle_order = None;
+        } else if self.shuffle_order.is_none() {
+            let mut order = (0..self.tracks.len()).collect::<Vec<_>>();
+            if let Some(current) = current.filter(|&index| index < order.len()) {
+                order.swap(0, current);
+                order[1..].shuffle(&mut rand::rng());
+            } else {
+                order.shuffle(&mut rand::rng());
+            }
+            self.shuffle_order = Some(order);
+        }
+    }
+
+    pub(super) fn adjacent_index(
+        &self,
+        current: usize,
+        offset: isize,
+        wrap: bool,
+    ) -> Option<usize> {
+        self.tracks.get(current)?;
+        let position = match &self.shuffle_order {
+            Some(order) => order.iter().position(|&index| index == current)?,
+            None => current,
+        };
+        let next = position
+            .checked_add_signed(offset)
+            .filter(|&position| position < self.tracks.len())
+            .or_else(|| wrap.then(|| if offset > 0 { 0 } else { self.tracks.len() - 1 }))?;
+        Some(
+            self.shuffle_order
+                .as_ref()
+                .map_or(next, |order| order[next]),
+        )
+    }
+
     // 页面顺序与队列顺序独立；播放和加载标记都按歌曲身份映射到页面行号。
     pub(super) fn playback_indices_in(
         &self,
@@ -118,6 +177,10 @@ impl PlaybackQueue {
             pending
         };
         self.tracks.extend(pending);
+        if let Some(order) = &mut self.shuffle_order {
+            order.extend(first_added..self.tracks.len());
+            order[first_added..].shuffle(&mut rand::rng());
+        }
         (self.tracks.len() > first_added).then_some(first_added)
     }
 }
@@ -239,6 +302,7 @@ impl BrowserView {
                                 tracks: share_items(tracks),
                                 modified: false,
                                 continuation: Some(continuation),
+                                shuffle_order: None,
                             });
                             playback.start_playback(0, Duration::ZERO, None, true, cx)
                         });
@@ -325,6 +389,7 @@ impl Playback {
                         if let Some(queue) = &mut this.state.queue {
                             queue.continuation = continuation;
                             first_added = queue.append_tracks(tracks.into_iter().map(Arc::new));
+                            queue.set_shuffle(this.state.shuffle, this.state.current_track);
                         }
                         this.persist_current_playback(cx);
                         // 已播到队尾时，续播从第一首新加入的歌开始；去重后的空批次不能越界跳歌。
@@ -365,6 +430,7 @@ impl Playback {
                 tracks: restore.queue_tracks,
                 modified: restore.queue_modified,
                 continuation: restore.queue_continuation,
+                shuffle_order: None,
             });
             self.start_playback(index, resume_at, None, false, cx);
         } else {
@@ -390,6 +456,7 @@ impl Playback {
             tracks,
             modified: false,
             continuation: None,
+            shuffle_order: None,
         });
 
         if !has_more {

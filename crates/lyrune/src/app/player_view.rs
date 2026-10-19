@@ -683,7 +683,7 @@ impl LyruneView {
                 .browser
                 .update(cx, |browser, cx| browser.toggle_current_track_liked(cx)),
             PlayerAction::Shuffle => self.playback.update(cx, |playback, cx| {
-                playback.state.shuffle = !playback.state.shuffle;
+                playback.state.set_shuffle(!playback.state.shuffle);
                 playback.persist_playback_options(cx);
                 #[cfg(target_os = "linux")]
                 playback.sync_mpris(false, cx);

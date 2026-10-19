@@ -131,7 +131,7 @@ impl Playback {
                 cx.notify();
             }
             MprisCommand::SetShuffle(shuffle) => {
-                self.state.shuffle = shuffle;
+                self.state.set_shuffle(shuffle);
                 self.persist_playback_options(cx);
                 self.sync_mpris(false, cx);
                 cx.notify();
@@ -164,9 +164,6 @@ impl Playback {
         } else {
             MprisPlaybackStatus::Paused
         };
-        let (queue_len, current_index) = self.state.queue.as_ref().map_or((0, None), |queue| {
-            (queue.tracks.len(), self.state.current_track)
-        });
         let can_extend = self
             .state
             .queue
@@ -174,18 +171,9 @@ impl Playback {
             .and_then(|queue| queue.continuation)
             .is_some_and(PersistedQueueContinuation::can_load_more);
         let can_go_next = audio_available
-            && current_index.is_some_and(|index| {
-                can_extend
-                    || (self.state.shuffle && queue_len > 1)
-                    || index + 1 < queue_len
-                    || (self.state.repeat_mode == RepeatMode::All && queue_len > 0)
-            });
-        let can_go_previous = audio_available
-            && current_index.is_some_and(|index| {
-                self.state.position >= Duration::from_secs(3)
-                    || index > 0
-                    || (self.state.repeat_mode == RepeatMode::All && queue_len > 0)
-            });
+            && self.state.current_track.is_some()
+            && (can_extend || self.state.next_track(false).is_some());
+        let can_go_previous = audio_available && self.state.previous_track().is_some();
         let track = self.state.track().map(|track| MprisTrack {
             id: mpris_track_id(&track.mid),
             title: track.title.clone(),

@@ -4052,6 +4052,7 @@ dependencies = [
  "palette",
  "qrcode",
  "quick-xml",
+ "rand 0.10.2",
  "reqwest",
  "resvg 0.46.0",
  "rodio",

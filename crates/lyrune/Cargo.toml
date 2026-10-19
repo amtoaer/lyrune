@@ -25,6 +25,7 @@ lyrune-decrypt.workspace = true
 palette.workspace = true
 qrcode.workspace = true
 quick-xml.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 resvg.workspace = true
 rodio.workspace = true

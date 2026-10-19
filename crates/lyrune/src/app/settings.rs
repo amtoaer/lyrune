@@ -203,7 +203,6 @@ pub(super) struct SettingsPage {
     preferences: Entity<Preferences>,
     settings_inputs: SettingsInputs,
     settings_scroll_handle: ScrollHandle,
-    window_handle: AnyWindowHandle,
     pub(super) update_check_in_progress: bool,
     _preferences_subscription: Subscription,
     _input_subscriptions: Vec<Subscription>,
@@ -227,7 +226,6 @@ impl SettingsPage {
             preferences,
             settings_inputs,
             settings_scroll_handle: ScrollHandle::new(),
-            window_handle: window.window_handle(),
             update_check_in_progress: false,
             _preferences_subscription: subscription,
             _input_subscriptions: Vec::new(),
@@ -238,42 +236,20 @@ impl SettingsPage {
 
     pub(super) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._input_subscriptions.clear();
-        if self.window_handle != window.window_handle() {
-            let inputs = self.preferences.update(cx, |preferences, cx| {
-                SettingsInputs::new(&preferences.settings, window, cx)
-            });
-            let previous = &self.settings_inputs;
-            for (input, previous) in [
-                (&inputs.ui_font, &previous.ui_font),
-                (&inputs.monospace_font, &previous.monospace_font),
-                (&inputs.lyric_font, &previous.lyric_font),
-                (&inputs.audio_cache_limit, &previous.audio_cache_limit),
-                (&inputs.image_cache_capacity, &previous.image_cache_capacity),
-                (
-                    &inputs.navigation_history_limit,
-                    &previous.navigation_history_limit,
-                ),
-                (&inputs.lyric_font_scale, &previous.lyric_font_scale),
-                (&inputs.lyric_line_spacing, &previous.lyric_line_spacing),
-                (
-                    &inputs.lyric_background_min_overlay,
-                    &previous.lyric_background_min_overlay,
-                ),
-                (
-                    &inputs.lyric_background_chroma,
-                    &previous.lyric_background_chroma,
-                ),
-                (
-                    &inputs.lyric_background_contrast,
-                    &previous.lyric_background_contrast,
-                ),
-            ] {
-                let value = previous.read(cx).value();
-                input.update(cx, |input, cx| input.set_value(value, window, cx));
-            }
-            self.settings_inputs = inputs;
-            self.window_handle = window.window_handle();
-            cx.notify();
+        for input in [
+            &self.settings_inputs.ui_font,
+            &self.settings_inputs.monospace_font,
+            &self.settings_inputs.lyric_font,
+            &self.settings_inputs.audio_cache_limit,
+            &self.settings_inputs.image_cache_capacity,
+            &self.settings_inputs.navigation_history_limit,
+            &self.settings_inputs.lyric_font_scale,
+            &self.settings_inputs.lyric_line_spacing,
+            &self.settings_inputs.lyric_background_min_overlay,
+            &self.settings_inputs.lyric_background_chroma,
+            &self.settings_inputs.lyric_background_contrast,
+        ] {
+            input.update(cx, |input, cx| input.attach_window(window, cx));
         }
         type ApplyNumberSetting = fn(&mut SettingsPage, &mut Window, &mut Context<SettingsPage>);
         let numeric_inputs: [(_, _, _, ApplyNumberSetting); 8] = [
@@ -1751,7 +1727,10 @@ mod tests {
             );
             page.settings_inputs.audio_cache_limit.clone()
         });
-        assert!(previous.upgrade().is_none());
+        assert_eq!(
+            previous.upgrade(),
+            Some(page.read_with(cx, |page, _| page.settings_inputs.ui_font.clone()))
+        );
         let bounds = input.read_with(cx, |input, _| input.input_bounds());
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
         cx.update(|window, cx| window.blur(cx));

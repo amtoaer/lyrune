@@ -2452,8 +2452,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e9955b6f4b048fd50ca15fc8e225d80bb00ba9ebc8fecdddde5ad26dbef9270"
+source = "git+https://github.com/amtoaer/gpui-kit?rev=e1a1cdd2d2ad0afa267d018531188cd4c38c6552#e1a1cdd2d2ad0afa267d018531188cd4c38c6552"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2493,8 +2492,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "465a363235cd4062ef5f0953fc096fc764ed6f53dfbd9f409f669f93ea3b1ff9"
+source = "git+https://github.com/amtoaer/gpui-kit?rev=e1a1cdd2d2ad0afa267d018531188cd4c38c6552#e1a1cdd2d2ad0afa267d018531188cd4c38c6552"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2540,8 +2538,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c0c9398aaf99e595d450e38eb44ff0c500df8c332b4783d5b72022e69525359"
+source = "git+https://github.com/amtoaer/gpui-kit?rev=e1a1cdd2d2ad0afa267d018531188cd4c38c6552#e1a1cdd2d2ad0afa267d018531188cd4c38c6552"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2552,8 +2549,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7abc281dcbfe51c16a7e73189521a3a771168c31e3ab0db99e21e481d1b1b9a"
+source = "git+https://github.com/amtoaer/gpui-kit?rev=e1a1cdd2d2ad0afa267d018531188cd4c38c6552#e1a1cdd2d2ad0afa267d018531188cd4c38c6552"
 dependencies = [
  "anyhow",
  "gpui-pre",

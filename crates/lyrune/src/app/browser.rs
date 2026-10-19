@@ -305,17 +305,8 @@ impl BrowserView {
     }
 
     pub(super) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.window_handle != window.window_handle() {
-            let value = self.search_input.read(cx).value();
-            self.search_input = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .default_value(value)
-                    .placeholder("想播放什么？")
-                    .context_menu(false)
-            });
-            self.navigation_view = cx
-                .new(|cx| NavigationView::new(self.account.clone(), self.search_input.clone(), cx));
-        }
+        self.search_input
+            .update(cx, |input, cx| input.attach_window(window, cx));
         self.window_handle = window.window_handle();
         self._window_subscriptions = vec![
             cx.subscribe_in(
@@ -745,7 +736,7 @@ mod tests {
                     && bounds.contains(&quad.bounds.center())
             }));
         });
-        assert!(previous.upgrade().is_none());
+        assert_eq!(previous.upgrade(), Some(input));
     }
 
     #[gpui::test]

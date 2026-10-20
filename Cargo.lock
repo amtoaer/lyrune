@@ -4026,7 +4026,7 @@ dependencies = [
 
 [[package]]
 name = "lyrune"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -4067,7 +4067,7 @@ dependencies = [
 
 [[package]]
 name = "lyrune-api"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4091,7 +4091,7 @@ dependencies = [
 
 [[package]]
 name = "lyrune-decrypt"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "base64",
 ]

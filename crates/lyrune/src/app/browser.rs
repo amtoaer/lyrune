@@ -730,8 +730,10 @@ mod tests {
             window.draw(cx).clear(cx);
             assert!(gpui::Focusable::focus_handle(&input, cx).is_focused(window));
             let bounds = input.read(cx).input_bounds().scale(window.scale_factor());
+            let (cursor, _) = input.read(cx).cursor_layout().unwrap();
+            let cursor_width = cursor.size.width.scale(window.scale_factor()).round();
             assert!(window.painted_quads().iter().any(|quad| {
-                quad.bounds.size.width == px(2.).scale(window.scale_factor())
+                quad.bounds.size.width == cursor_width
                     && quad.bounds.size.height > px(10.).scale(window.scale_factor())
                     && bounds.contains(&quad.bounds.center())
             }));

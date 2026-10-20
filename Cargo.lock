@@ -2451,8 +2451,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-base"
-version = "0.7.3"
-source = "git+https://github.com/amtoaer/gpui-kit?rev=e1a1cdd2d2ad0afa267d018531188cd4c38c6552#e1a1cdd2d2ad0afa267d018531188cd4c38c6552"
+version = "0.8.0"
+source = "git+https://github.com/amtoaer/gpui-kit?rev=49101db15938d411d921f187fbd37846868c3448#49101db15938d411d921f187fbd37846868c3448"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2491,8 +2491,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-component"
-version = "0.7.3"
-source = "git+https://github.com/amtoaer/gpui-kit?rev=e1a1cdd2d2ad0afa267d018531188cd4c38c6552#e1a1cdd2d2ad0afa267d018531188cd4c38c6552"
+version = "0.8.0"
+source = "git+https://github.com/amtoaer/gpui-kit?rev=49101db15938d411d921f187fbd37846868c3448#49101db15938d411d921f187fbd37846868c3448"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2537,8 +2537,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-component-macros"
-version = "0.7.3"
-source = "git+https://github.com/amtoaer/gpui-kit?rev=e1a1cdd2d2ad0afa267d018531188cd4c38c6552#e1a1cdd2d2ad0afa267d018531188cd4c38c6552"
+version = "0.8.0"
+source = "git+https://github.com/amtoaer/gpui-kit?rev=49101db15938d411d921f187fbd37846868c3448#49101db15938d411d921f187fbd37846868c3448"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2548,8 +2548,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-kit-assets"
-version = "0.7.3"
-source = "git+https://github.com/amtoaer/gpui-kit?rev=e1a1cdd2d2ad0afa267d018531188cd4c38c6552#e1a1cdd2d2ad0afa267d018531188cd4c38c6552"
+version = "0.8.0"
+source = "git+https://github.com/amtoaer/gpui-kit?rev=49101db15938d411d921f187fbd37846868c3448#49101db15938d411d921f187fbd37846868c3448"
 dependencies = [
  "anyhow",
  "gpui-pre",

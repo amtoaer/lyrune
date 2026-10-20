@@ -463,44 +463,28 @@ impl Render for PlayerControlsView {
                             .justify_center()
                             .gap_1()
                             .child(
-                                div()
-                                    .relative()
-                                    .child(
-                                        Button::new("shuffle")
-                                            .ghost()
-                                            .rounded(px(999.))
-                                            .size(px(44.))
-                                            .p_0()
-                                            .tooltip("随机播放")
-                                            .toggled(self.input.shuffle)
-                                            .selected(self.input.shuffle)
-                                            .disabled(self.input.queue_empty)
-                                            .child(div().w(px(28.)).flex().justify_center().child(
-                                                media_icon(
-                                                    MediaIcon::Shuffle,
-                                                    if self.input.shuffle {
-                                                        icon_accent
-                                                    } else {
-                                                        icon_foreground
-                                                    },
-                                                    px(18.),
-                                                ),
-                                            ))
-                                            .on_click(cx.listener(|_, _, _, cx| {
-                                                cx.emit(PlayerAction::Shuffle)
-                                            })),
-                                    )
-                                    .when(self.input.shuffle, |this| {
-                                        this.child(
-                                            div()
-                                                .absolute()
-                                                .bottom(px(1.))
-                                                .left(px(21.))
-                                                .size(px(3.))
-                                                .rounded_full()
-                                                .bg(theme.primary),
-                                        )
-                                    }),
+                                Button::new("shuffle")
+                                    .ghost()
+                                    .rounded(px(999.))
+                                    .size(px(44.))
+                                    .p_0()
+                                    .tooltip("随机播放")
+                                    .toggled(self.input.shuffle)
+                                    .disabled(self.input.queue_empty)
+                                    .child(div().w(px(28.)).flex().justify_center().child(
+                                        media_icon(
+                                            MediaIcon::Shuffle,
+                                            if self.input.shuffle {
+                                                icon_accent
+                                            } else {
+                                                icon_foreground
+                                            },
+                                            px(18.),
+                                        ),
+                                    ))
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(PlayerAction::Shuffle)),
+                                    ),
                             )
                             .child(
                                 Button::new("previous")
@@ -563,48 +547,32 @@ impl Render for PlayerControlsView {
                                     ),
                             )
                             .child(
-                                div()
-                                    .relative()
-                                    .child(
-                                        Button::new("repeat")
-                                            .ghost()
-                                            .rounded(px(999.))
-                                            .size(px(44.))
-                                            .p_0()
-                                            .tooltip(self.input.repeat_mode.label())
-                                            .toggled(self.input.repeat_mode != RepeatMode::Off)
-                                            .selected(self.input.repeat_mode != RepeatMode::Off)
-                                            .disabled(self.input.queue_empty)
-                                            .child(div().w(px(28.)).flex().justify_center().child(
-                                                media_icon(
-                                                    if self.input.repeat_mode == RepeatMode::One {
-                                                        MediaIcon::RepeatOne
-                                                    } else {
-                                                        MediaIcon::Repeat
-                                                    },
-                                                    if self.input.repeat_mode != RepeatMode::Off {
-                                                        icon_accent
-                                                    } else {
-                                                        icon_foreground
-                                                    },
-                                                    px(18.),
-                                                ),
-                                            ))
-                                            .on_click(cx.listener(|_, _, _, cx| {
-                                                cx.emit(PlayerAction::Repeat)
-                                            })),
-                                    )
-                                    .when(self.input.repeat_mode != RepeatMode::Off, |this| {
-                                        this.child(
-                                            div()
-                                                .absolute()
-                                                .bottom(px(1.))
-                                                .left(px(21.))
-                                                .size(px(3.))
-                                                .rounded_full()
-                                                .bg(theme.primary),
-                                        )
-                                    }),
+                                Button::new("repeat")
+                                    .ghost()
+                                    .rounded(px(999.))
+                                    .size(px(44.))
+                                    .p_0()
+                                    .tooltip(self.input.repeat_mode.label())
+                                    .toggled(self.input.repeat_mode != RepeatMode::Off)
+                                    .disabled(self.input.queue_empty)
+                                    .child(div().w(px(28.)).flex().justify_center().child(
+                                        media_icon(
+                                            if self.input.repeat_mode == RepeatMode::One {
+                                                MediaIcon::RepeatOne
+                                            } else {
+                                                MediaIcon::Repeat
+                                            },
+                                            if self.input.repeat_mode != RepeatMode::Off {
+                                                icon_accent
+                                            } else {
+                                                icon_foreground
+                                            },
+                                            px(18.),
+                                        ),
+                                    ))
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(PlayerAction::Repeat)),
+                                    ),
                             ),
                     ),
             )

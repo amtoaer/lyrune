@@ -21,8 +21,8 @@ directories = "6.0"
 flate2 = "1"
 futures-util = "0.3"
 gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui-base = "=0.7.3"
-gpui-component = "=0.7.3"
+gpui-base = "=0.8.0"
+gpui-component = "=0.8.0"
 gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", features = [
     "font-kit",
     "runtime_shaders",
@@ -77,6 +77,10 @@ zbus_systemd = { version = "0.26100.0", default-features = false, features = ["l
 
 # Keep component and application GPUI types on the same patched snapshot.
 [patch.crates-io]
+gpui-base = { git = "https://github.com/amtoaer/gpui-kit", rev = "49101db15938d411d921f187fbd37846868c3448" }
+gpui-component = { git = "https://github.com/amtoaer/gpui-kit", rev = "49101db15938d411d921f187fbd37846868c3448" }
+gpui-component-macros = { git = "https://github.com/amtoaer/gpui-kit", rev = "49101db15938d411d921f187fbd37846868c3448" }
+gpui-kit-assets = { git = "https://github.com/amtoaer/gpui-kit", rev = "49101db15938d411d921f187fbd37846868c3448" }
 gpui-pre-collections = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
 gpui-pre = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
 gpui-pre-apple = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }

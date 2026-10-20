@@ -235,8 +235,22 @@ impl SettingsPage {
     }
 
     pub(super) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 窗口重开后替换窗口绑定；输入内容和滚动位置仍由同一个页面实体持有。
         self._input_subscriptions.clear();
+        for input in [
+            &self.settings_inputs.ui_font,
+            &self.settings_inputs.monospace_font,
+            &self.settings_inputs.lyric_font,
+            &self.settings_inputs.audio_cache_limit,
+            &self.settings_inputs.image_cache_capacity,
+            &self.settings_inputs.navigation_history_limit,
+            &self.settings_inputs.lyric_font_scale,
+            &self.settings_inputs.lyric_line_spacing,
+            &self.settings_inputs.lyric_background_min_overlay,
+            &self.settings_inputs.lyric_background_chroma,
+            &self.settings_inputs.lyric_background_contrast,
+        ] {
+            input.update(cx, |input, cx| input.attach_window(window, cx));
+        }
         type ApplyNumberSetting = fn(&mut SettingsPage, &mut Window, &mut Context<SettingsPage>);
         let numeric_inputs: [(_, _, _, ApplyNumberSetting); 8] = [
             (
@@ -1685,5 +1699,42 @@ mod tests {
                 .audio_cache_limit_gb),
             12
         );
+
+        let previous = cx.update(|window, cx| {
+            page.update(cx, |page, cx| {
+                page.settings_inputs.ui_font.update(cx, |input, cx| {
+                    input.set_value("Draft Font, ", window, cx);
+                });
+                page.settings_inputs.ui_font.downgrade()
+            })
+        });
+        cx.update(|window, _| window.remove_window());
+        let (_, cx) = cx.cx.add_window_view(|window, cx| {
+            page.update(cx, |page, cx| page.attach_window(window, cx));
+            window.activate_window();
+            TestSettingsPage { page: page.clone() }
+        });
+        cx.simulate_resize(gpui::size(px(1080.), px(2400.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let input = page.read_with(cx, |page, cx| {
+            assert_eq!(
+                page.settings_inputs.ui_font.read(cx).value(),
+                "Draft Font, "
+            );
+            assert_eq!(
+                page.settings_inputs.audio_cache_limit.read(cx).value(),
+                "12"
+            );
+            page.settings_inputs.audio_cache_limit.clone()
+        });
+        assert_eq!(
+            previous.upgrade(),
+            Some(page.read_with(cx, |page, _| page.settings_inputs.ui_font.clone()))
+        );
+        let bounds = input.read_with(cx, |input, _| input.input_bounds());
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.blur(cx));
+        cx.run_until_parked();
+        assert_eq!(events.get(), 2);
     }
 }

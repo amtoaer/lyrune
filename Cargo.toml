@@ -81,25 +81,25 @@ gpui-base = { git = "https://github.com/amtoaer/gpui-kit", rev = "49101db15938d4
 gpui-component = { git = "https://github.com/amtoaer/gpui-kit", rev = "49101db15938d411d921f187fbd37846868c3448" }
 gpui-component-macros = { git = "https://github.com/amtoaer/gpui-kit", rev = "49101db15938d411d921f187fbd37846868c3448" }
 gpui-kit-assets = { git = "https://github.com/amtoaer/gpui-kit", rev = "49101db15938d411d921f187fbd37846868c3448" }
-gpui-pre-collections = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-apple = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-linux = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-macos = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-macros = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-platform = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-shared-string = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-util = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-web = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-wgpu = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-windows = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-http-client = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-refineable = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-derive-refineable = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-scheduler = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-sum-tree = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-ztracing = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
-gpui-pre-ztracing-macro = { git = "https://github.com/amtoaer/zed", rev = "a417dfbfbb89b5a90e69b22ee593456301c37fe9" }
+gpui-pre-collections = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-apple = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-linux = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-macos = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-macros = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-platform = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-shared-string = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-util = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-web = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-wgpu = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-windows = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-http-client = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-refineable = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-derive-refineable = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-scheduler = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-sum-tree = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-ztracing = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
+gpui-pre-ztracing-macro = { git = "https://github.com/amtoaer/zed", rev = "a3e63a1866dfcf8e2332741345b9cedbda82d9c3" }
 
 [workspace.metadata.release]
 release = false

@@ -215,6 +215,7 @@ fn progress_slider_state(value: f32) -> SliderState {
 }
 
 const PROGRESS_THUMB_RADIUS: Pixels = px(8.);
+const PROGRESS_THUMB_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8"/></svg>"#;
 
 pub(super) fn format_playback_time(duration: Duration) -> String {
     let seconds = duration.as_secs();
@@ -269,48 +270,68 @@ impl Render for PlaybackProgressView {
                     .bg(theme.border)
                     .active(|this| this.bg(bar_color.opacity(0.35)))
                     .child(
-                        // Painted as paths because quads and layout snap to device pixels,
-                        // which makes slow progress advance in visible one-pixel steps.
                         canvas(
                             |_, _, _| {},
-                            move |bounds, _, window, _| {
+                            move |bounds, _, window, cx| {
                                 let x = bounds.left() + bounds.size.width * percentage;
                                 if x > bounds.left() {
-                                    let mut fill = PathBuilder::fill();
-                                    fill.add_polygon(
-                                        &[
+                                    window.paint_quad(fill(
+                                        Bounds::from_corners(
                                             bounds.origin,
-                                            point(x, bounds.top()),
                                             point(x, bounds.bottom()),
-                                            bounds.bottom_left(),
-                                        ],
-                                        true,
-                                    );
-                                    if let Ok(path) = fill.build() {
-                                        window.paint_path(path, bar_color);
-                                    }
+                                        ),
+                                        bar_color,
+                                    ));
                                 }
                                 if has_track {
                                     let center = point(x, bounds.center().y);
+                                    let scale_factor = window.scale_factor();
+                                    let mask_size = (20. * scale_factor).ceil();
+                                    let mask_origin = center.scale(scale_factor).map(|value| {
+                                        ScaledPixels((value.0 - mask_size / 2.).floor())
+                                    });
+                                    let mask_bounds = Bounds::new(
+                                        mask_origin.map(|value| px(value.0 / scale_factor)),
+                                        size(
+                                            px(mask_size / scale_factor),
+                                            px(mask_size / scale_factor),
+                                        ),
+                                    );
+                                    // 缓存圆形遮罩并用变换保留亚像素移动，避免 Path 的整窗离屏绘制。
                                     for (radius, color) in [
                                         (PROGRESS_THUMB_RADIUS, bar_color.opacity(0.5)),
                                         (PROGRESS_THUMB_RADIUS - px(1.), thumb_color),
                                     ] {
-                                        let mut circle = PathBuilder::fill();
-                                        circle.move_to(point(center.x - radius, center.y));
-                                        for to in [center.x + radius, center.x - radius] {
-                                            circle.arc_to(
-                                                point(radius, radius),
-                                                px(0.),
-                                                false,
-                                                true,
-                                                point(to, center.y),
-                                            );
-                                        }
-                                        circle.close();
-                                        if let Ok(path) = circle.build() {
-                                            window.paint_path(path, color);
-                                        }
+                                        let scale =
+                                            f32::from(radius) * scale_factor / (mask_size * 0.4);
+                                        let offset = center.scale(scale_factor)
+                                            - (mask_origin
+                                                + point(
+                                                    ScaledPixels(mask_size / 2.),
+                                                    ScaledPixels(mask_size / 2.),
+                                                ))
+                                                * scale;
+                                        let clip_radius = radius + px(1.);
+                                        window.with_content_mask(
+                                            Some(ContentMask {
+                                                bounds: Bounds::from_corners(
+                                                    center - point(clip_radius, clip_radius),
+                                                    center + point(clip_radius, clip_radius),
+                                                ),
+                                            }),
+                                            |window| {
+                                                let _ = window.paint_svg(
+                                                    mask_bounds,
+                                                    "player-progress-thumb.svg".into(),
+                                                    Some(PROGRESS_THUMB_SVG),
+                                                    TransformationMatrix::unit()
+                                                        .translate(offset)
+                                                        .scale(size(scale, scale)),
+                                                    color,
+                                                    cx,
+                                                );
+                                            },
+                                        );
                                     }
                                 }
                             },

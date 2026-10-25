@@ -378,7 +378,7 @@ impl LyruneView {
 
     fn notify_error(&self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.notify_status(
-            Notification::error(message.into()),
+            Notification::new().message(message.into()),
             cx.theme().danger,
             cx.theme().danger_foreground,
             cx,
@@ -436,18 +436,32 @@ impl LyruneView {
     }
 
     fn notify_update(&self, update: AvailableUpdate, cx: &mut Context<Self>) {
-        self.notify_info(
-            format!(
-                "发现 Lyrune {}，请前往 GitHub Release 页面更新",
-                update.version
-            ),
-            cx,
+        let url = format!(
+            "https://github.com/amtoaer/lyrune/releases/tag/v{}",
+            update.version
         );
-    }
-
-    fn notify_info(&self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.notify_status(
-            Notification::info(message.into()),
+            Notification::new()
+                .message(format!("发现 Lyrune 新版本 v{}", update.version))
+                .w(px(320.))
+                .mx_auto()
+                .action(move |_, _, cx| {
+                    let url = url.clone();
+                    let foreground = cx.theme().info_foreground;
+                    Button::new("open-update-release")
+                        .label("前往更新")
+                        .custom(
+                            ButtonCustomVariant::new(cx)
+                                .foreground(foreground)
+                                .hover(foreground.opacity(0.12))
+                                .active(foreground.opacity(0.18)),
+                        )
+                        .role(Role::Link)
+                        .cursor_pointer()
+                        .underline()
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                })
+                .autohide(true),
             cx.theme().info,
             cx.theme().info_foreground,
             cx,
@@ -456,7 +470,7 @@ impl LyruneView {
 
     fn notify_success(&self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.notify_status(
-            Notification::success(message.into()),
+            Notification::new().message(message.into()),
             cx.theme().success,
             cx.theme().success_foreground,
             cx,
@@ -476,6 +490,7 @@ impl LyruneView {
             .text_center()
             .border_0()
             .rounded(px(9.))
+            .px_8()
             .py_3();
         let window_handle = self.window_handle;
         let notifications = self.notifications.clone();

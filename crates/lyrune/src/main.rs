@@ -153,6 +153,7 @@ fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let http_client = http::client().expect("create image HTTP client");
     gpui_platform::application()
+        .with_assets(gpui_kit_assets::Assets)
         .with_http_client(http_client)
         .with_quit_mode(QuitMode::Explicit)
         .run(|cx: &mut App| {

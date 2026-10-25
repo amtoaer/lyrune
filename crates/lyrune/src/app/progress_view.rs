@@ -311,15 +311,26 @@ impl Render for PlaybackProgressView {
                                                     ScaledPixels(mask_size / 2.),
                                                 ))
                                                 * scale;
-                                        let _ = window.paint_svg(
-                                            mask_bounds,
-                                            "player-progress-thumb.svg".into(),
-                                            Some(PROGRESS_THUMB_SVG),
-                                            TransformationMatrix::unit()
-                                                .translate(offset)
-                                                .scale(size(scale, scale)),
-                                            color,
-                                            cx,
+                                        let clip_radius = radius + px(1.);
+                                        window.with_content_mask(
+                                            Some(ContentMask {
+                                                bounds: Bounds::from_corners(
+                                                    center - point(clip_radius, clip_radius),
+                                                    center + point(clip_radius, clip_radius),
+                                                ),
+                                            }),
+                                            |window| {
+                                                let _ = window.paint_svg(
+                                                    mask_bounds,
+                                                    "player-progress-thumb.svg".into(),
+                                                    Some(PROGRESS_THUMB_SVG),
+                                                    TransformationMatrix::unit()
+                                                        .translate(offset)
+                                                        .scale(size(scale, scale)),
+                                                    color,
+                                                    cx,
+                                                );
+                                            },
                                         );
                                     }
                                 }

@@ -15,6 +15,7 @@ futures-util.workspace = true
 gpui.workspace = true
 gpui-base.workspace = true
 gpui-component.workspace = true
+gpui-kit-assets.workspace = true
 gpui-platform.workspace = true
 hashbrown.workspace = true
 image.workspace = true

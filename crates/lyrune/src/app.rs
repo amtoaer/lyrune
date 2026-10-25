@@ -584,7 +584,7 @@ impl LyruneView {
         let progress = transition(
             ("cover-backdrop", "expansion-progress"),
             if self.cover_backdrop_expanded { 1. } else { 0. },
-            Transition::new(LYRIC_EXPANSION_DURATION).ease(gpui_base::animation::ease_out_cubic),
+            Transition::new(LYRIC_EXPANSION_DURATION).ease(|progress| 1. - (1. - progress).powi(4)),
             window,
             cx,
         );

@@ -1,7 +1,9 @@
 //! 播放状态与持久化、MPRIS 和休眠抑制的同步。
 //! 后台 tick 属于应用；窗口关闭后仍处理曲终续播和进度保存。
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use futures_util::{
     future::{Either, select},
@@ -10,7 +12,9 @@ use futures_util::{
 use gpui::Context;
 use tokio::sync::mpsc;
 
-use super::playback::{Playback, PlaybackEvent};
+use super::playback::Playback;
+#[cfg(target_os = "linux")]
+use super::playback::PlaybackEvent;
 #[cfg(target_os = "linux")]
 use crate::inhibit::InhibitHandle;
 #[cfg(target_os = "linux")]

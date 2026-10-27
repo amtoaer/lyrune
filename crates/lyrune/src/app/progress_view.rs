@@ -179,6 +179,7 @@ impl PlaybackProgressView {
         cx.notify();
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn stop(&mut self, cx: &mut Context<Self>) {
         self.seek_preview = None;
         self.position = Duration::ZERO;

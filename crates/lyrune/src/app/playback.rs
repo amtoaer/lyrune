@@ -56,9 +56,11 @@ pub(super) enum PlaybackEvent {
         position: Duration,
         same_track: bool,
     },
+    #[cfg(target_os = "linux")]
     Stopped,
     PlayBrowsedTrack,
     CloseQualityMenu,
+    #[cfg(target_os = "linux")]
     VolumeChanged(f32),
     PlaylistLoaded(SharedPlaylistResource),
     Error(String),
@@ -602,6 +604,7 @@ impl Playback {
         cx.spawn(async move |this, cx| {
             while let Some(event) = receiver.recv().await {
                 let finished = matches!(&event, PlaybackLoadEvent::Finished(_));
+                #[cfg(target_os = "linux")]
                 let seeked = matches!(&event, PlaybackLoadEvent::Finished(Ok(_)));
                 let _ = this.update(cx, |this, cx| {
                     // 切歌、切音质或停止后，旧任务仍可能发来结果；不能据此替换当前音源。

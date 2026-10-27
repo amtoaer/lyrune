@@ -657,6 +657,13 @@ fn normalized_volume(value: f32, fallback: f32) -> f32 {
 mod tests {
     use super::*;
 
+    // 测试线程名形如 `settings::tests::用例`，其中 `::` 在 Windows 上不是合法目录字符。
+    fn test_directory(prefix: &str) -> PathBuf {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("unnamed").replace("::", "-");
+        std::env::temp_dir().join(format!("{prefix}-{}-{name}", std::process::id()))
+    }
+
     fn track(mid: &str) -> Track {
         Track {
             song_id: None,
@@ -847,11 +854,7 @@ mod tests {
 
     #[test]
     fn settings_round_trip_through_disk() {
-        let directory = std::env::temp_dir().join(format!(
-            "lyrune-settings-test-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
+        let directory = test_directory("lyrune-settings-test");
         let path = directory.join("settings.json");
         let expected = AppSettings {
             client_guid: "installation-guid".to_owned(),
@@ -993,11 +996,7 @@ mod tests {
     fn test_atomic_settings_save() -> Result<()> {
         use std::io::Read as _;
 
-        let directory = std::env::temp_dir().join(format!(
-            "lyrune-settings-test-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
+        let directory = test_directory("lyrune-settings-test");
         let path = directory.join("settings.json");
         let temporary_path = path.with_extension("json.tmp");
         let mut settings = AppSettings::default();
@@ -1024,11 +1023,7 @@ mod tests {
 
     #[test]
     fn test_failed_settings_save_preserves_config() -> Result<()> {
-        let directory = std::env::temp_dir().join(format!(
-            "lyrune-settings-test-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
+        let directory = test_directory("lyrune-settings-test");
         let path = directory.join("settings.json");
         let mut settings = AppSettings::default();
         SettingsStore::save_to(&path, settings.clone())?;
@@ -1044,11 +1039,7 @@ mod tests {
 
     #[test]
     fn test_settings_writer_drains_on_shutdown() -> Result<()> {
-        let directory = std::env::temp_dir().join(format!(
-            "lyrune-settings-test-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
+        let directory = test_directory("lyrune-settings-test");
         let path = directory.join("settings.json");
         let writer = SettingsWriter::start(path.clone());
         let queued_track = Arc::new(track("track-mid"));
@@ -1171,11 +1162,7 @@ mod tests {
 
     #[test]
     fn cdn_cache_round_trips_through_disk() {
-        let directory = std::env::temp_dir().join(format!(
-            "lyrune-cdn-cache-test-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
-        ));
+        let directory = test_directory("lyrune-cdn-cache-test");
         let path = directory.join("cdn.json");
         let expected = CdnCache::default();
 

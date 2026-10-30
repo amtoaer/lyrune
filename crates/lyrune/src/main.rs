@@ -306,6 +306,14 @@ fn main() {
                             cx.update(|cx| cx.quit());
                             break;
                         }
+                        TrayCommand::Next | TrayCommand::Previous | TrayCommand::TogglePlayback => {
+                            cx.update(|cx| {
+                                let view = main_window_for_tray.borrow().view.clone();
+                                view.read(cx).playback.clone().update(cx, |playback, cx| {
+                                    playback.handle_tray_command(command, cx);
+                                });
+                            });
+                        }
                     }
                 }
             })

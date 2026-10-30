@@ -11,6 +11,9 @@ const DARK_ICON_SVG: &[u8] = include_bytes!("../assets/lyrune-dark.svg");
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrayCommand {
     Show,
+    Next,
+    TogglePlayback,
+    Previous,
     Quit,
 }
 
@@ -104,6 +107,27 @@ mod platform {
                 .into(),
                 MenuItem::Separator,
                 StandardItem {
+                    label: "上一首".to_owned(),
+                    activate: Box::new(|tray: &mut LinuxTray| tray.send(TrayCommand::Previous)),
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
+                    label: "播放/暂停".to_owned(),
+                    activate: Box::new(|tray: &mut LinuxTray| {
+                        tray.send(TrayCommand::TogglePlayback)
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
+                    label: "下一首".to_owned(),
+                    activate: Box::new(|tray: &mut LinuxTray| tray.send(TrayCommand::Next)),
+                    ..Default::default()
+                }
+                .into(),
+                MenuItem::Separator,
+                StandardItem {
                     label: "退出".to_owned(),
                     icon_name: "application-exit".to_owned(),
                     activate: Box::new(|tray: &mut LinuxTray| tray.send(TrayCommand::Quit)),
@@ -170,16 +194,28 @@ mod platform {
         ) -> Result<Self> {
             let menu = Menu::new();
             let show = MenuItem::new("打开 Lyrune", true, None);
+            let previous = MenuItem::new("上一首", true, None);
+            let toggle_playback = MenuItem::new("播放/暂停", true, None);
+            let next = MenuItem::new("下一首", true, None);
             let quit = MenuItem::new("退出", true, None);
-            menu.append_items(&[&show, &quit])
+            menu.append_items(&[&show, &previous, &toggle_playback, &next, &quit])
                 .context("无法创建系统托盘菜单")?;
 
             let show_id = show.id().clone();
+            let previous_id = previous.id().clone();
+            let toggle_playback_id = toggle_playback.id().clone();
+            let next_id = next.id().clone();
             let quit_id = quit.id().clone();
             let menu_commands = commands.clone();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 let command = if event.id == show_id {
                     Some(TrayCommand::Show)
+                } else if event.id == previous_id {
+                    Some(TrayCommand::Previous)
+                } else if event.id == toggle_playback_id {
+                    Some(TrayCommand::TogglePlayback)
+                } else if event.id == next_id {
+                    Some(TrayCommand::Next)
                 } else if event.id == quit_id {
                     Some(TrayCommand::Quit)
                 } else {

@@ -20,6 +20,7 @@ use crate::mpris::{
 use crate::player::AudioPlayer;
 #[cfg(target_os = "linux")]
 use crate::settings::{PersistedQueueContinuation, RepeatMode};
+use crate::tray::TrayCommand;
 #[cfg(target_os = "linux")]
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -112,6 +113,15 @@ impl Playback {
     pub(crate) fn attach_inhibit(&mut self, inhibit: InhibitHandle) {
         self.inhibit = Some(inhibit);
         self.sync_inhibit();
+    }
+
+    pub(crate) fn handle_tray_command(&mut self, command: TrayCommand, cx: &mut Context<Self>) {
+        match command {
+            TrayCommand::Next => self.play_next(false, cx),
+            TrayCommand::Previous => self.play_previous(cx),
+            TrayCommand::TogglePlayback => self.toggle_playback(cx),
+            TrayCommand::Show | TrayCommand::Quit => {}
+        }
     }
 
     #[cfg(target_os = "linux")]

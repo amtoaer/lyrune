@@ -340,6 +340,7 @@ impl BrowserView {
                 });
                 0
             };
+            playback.state.queue_version = playback.state.queue_version.wrapping_add(1);
             playback.start_playback(queue_index, Duration::ZERO, None, true, cx)
         });
     }

@@ -30,7 +30,6 @@ pub(super) struct PlayerInput {
     pub(super) loading: bool,
     pub(super) show_pause: bool,
     pub(super) queue_empty: bool,
-    pub(super) queue_tracks: Vec<Arc<Track>>,
     pub(super) browsed_tracks_empty: bool,
     pub(super) shuffle: bool,
     pub(super) repeat_mode: RepeatMode,
@@ -61,7 +60,10 @@ pub(super) struct PlayerControlsView {
     track: Option<Arc<Track>>,
     input: PlayerInput,
     volume_slider: Entity<SliderState>,
-    queue_scroll: ScrollHandle,
+    // 按播放顺序排列的队列快照，只在 queue_version 变化时替换。
+    queue_tracks: Arc<[Arc<Track>]>,
+    queue_version: u64,
+    queue_scroll: UniformListScrollHandle,
     _subscription: Subscription,
     #[cfg(test)]
     render_count: usize,
@@ -101,7 +103,6 @@ impl PlayerControlsView {
                 loading: false,
                 show_pause: false,
                 queue_empty: true,
-                queue_tracks: Vec::new(),
                 browsed_tracks_empty: true,
                 shuffle: false,
                 repeat_mode: RepeatMode::Off,
@@ -111,7 +112,9 @@ impl PlayerControlsView {
                 quality_menu_open: false,
             },
             volume_slider,
-            queue_scroll: ScrollHandle::new(),
+            queue_tracks: Arc::new([]),
+            queue_version: 0,
+            queue_scroll: UniformListScrollHandle::new(),
             _subscription: subscription,
             #[cfg(test)]
             render_count: 0,
@@ -134,6 +137,17 @@ impl PlayerControlsView {
         }
         self.track = track;
         self.input = input;
+        cx.notify();
+    }
+
+    pub(super) fn set_queue(
+        &mut self,
+        version: u64,
+        tracks: Arc<[Arc<Track>]>,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue_version = version;
+        self.queue_tracks = tracks;
         cx.notify();
     }
 
@@ -230,6 +244,141 @@ impl PlayerControlsView {
             })
             .into_any_element()
     }
+
+    fn render_queue(&self, icon_foreground: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let tracks = self.queue_tracks.clone();
+        let scroll = self.queue_scroll.clone();
+        let current_mid = self.track.as_ref().map(|track| track.mid.clone());
+        let controls = cx.entity().downgrade();
+        let current_index = current_mid
+            .as_ref()
+            .and_then(|mid| tracks.iter().position(|track| track.mid == *mid));
+        let open_scroll = scroll.clone();
+        Popover::new("playback-queue")
+            .anchor(Anchor::BottomRight)
+            .on_open_change(move |open, _, _| {
+                if *open && let Some(index) = current_index {
+                    open_scroll.scroll_to_item_strict(index, ScrollStrategy::Center);
+                }
+            })
+            .trigger(
+                Button::new("queue")
+                    .debug_selector(|| "queue".to_owned())
+                    .ghost()
+                    .rounded(px(999.))
+                    .size(px(36.))
+                    .p_0()
+                    .tooltip("播放队列")
+                    .child(media_icon(MediaIcon::Queue, icon_foreground, px(19.))),
+            )
+            .content(move |_, _, cx| {
+                let muted = cx.theme().muted_foreground;
+                let header = h_flex()
+                    .justify_between()
+                    .child(div().font_semibold().child("播放队列"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(format!("{} 首", tracks.len())),
+                    );
+                let body = if tracks.is_empty() {
+                    div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("播放队列为空")
+                        .into_any_element()
+                } else {
+                    let count = tracks.len();
+                    let tracks = tracks.clone();
+                    let current_mid = current_mid.clone();
+                    let controls = controls.clone();
+                    let rows =
+                        move |range: std::ops::Range<usize>, _: &mut Window, cx: &mut App| {
+                            let theme = cx.theme();
+                            range
+                                .map(|index| {
+                                    let track = &tracks[index];
+                                    let current = current_mid.as_ref() == Some(&track.mid);
+                                    let controls = controls.clone();
+                                    let mid = track.mid.clone();
+                                    h_flex()
+                                        .id(("queue-track", index))
+                                        .debug_selector(move || format!("queue-track-{index}"))
+                                        .cursor_pointer()
+                                        .gap_3()
+                                        .p_2()
+                                        .rounded(theme.radius)
+                                        .when(current, |row| {
+                                            row.bg(theme.secondary).text_color(theme.primary)
+                                        })
+                                        .hover(|style| style.bg(theme.secondary))
+                                        .on_click(move |_, _, cx| {
+                                            let action = PlayerAction::QueueTrack(mid.clone());
+                                            let _ = controls.update(cx, |_, cx| cx.emit(action));
+                                        })
+                                        .child(
+                                            div()
+                                                .w(px(18.))
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground)
+                                                .child((index + 1).to_string()),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_sm()
+                                                        .child(track.title.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(track.artists.clone()),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(format_duration(track.duration_seconds)),
+                                        )
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                    div()
+                        .relative()
+                        .child(
+                            uniform_list("queue-tracks", count, rows)
+                                .with_sizing_behavior(ListSizingBehavior::Infer)
+                                .max_h(px(420.))
+                                .pr(Scrollbar::width())
+                                .track_scroll(&scroll),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .debug_selector(|| "queue-scrollbar-viewport".to_owned())
+                                .child(
+                                    Scrollbar::vertical(&scroll)
+                                        .id("queue-scrollbar")
+                                        .mode(ScrollbarMode::Always)
+                                        .viewport_from_layout(),
+                                ),
+                        )
+                        .into_any_element()
+                };
+                v_flex().w(px(320.)).gap_3().p_2().child(header).child(body)
+            })
+            .into_any_element()
+    }
 }
 
 impl Render for PlayerControlsView {
@@ -243,15 +392,12 @@ impl Render for PlayerControlsView {
         let track = self.track.clone();
         let has_track = track.is_some();
         let quality_selector = self.render_quality_selector(has_track, cx);
-        let queue_tracks = self.input.queue_tracks.clone();
-        let queue_scroll = self.queue_scroll.clone();
-        let current_mid = track.as_ref().map(|track| track.mid.clone());
-        let controls = cx.entity().downgrade();
+        let palette = self.input.color_theme.palette();
+        let icon_foreground = palette.foreground;
+        let queue = self.render_queue(icon_foreground, cx);
         let theme = cx.theme();
         let loading = self.input.loading;
         let show_pause = self.input.show_pause;
-        let palette = self.input.color_theme.palette();
-        let icon_foreground = palette.foreground;
         let icon_accent = palette.primary;
         let cover_size = if narrow { px(44.) } else { px(52.) };
         let cover = match track.as_ref().and_then(|track| track.cover_url.clone()) {
@@ -594,79 +740,7 @@ impl Render for PlayerControlsView {
                         .w(if compact { px(280.) } else { px(336.) })
                         .justify_end()
                         .gap_2()
-                        .child(
-                            Popover::new("playback-queue")
-                                .anchor(Anchor::BottomRight)
-                                .trigger(
-                                    Button::new("queue")
-                                        .debug_selector(|| "queue".to_owned())
-                                        .ghost()
-                                        .rounded(px(999.))
-                                        .size(px(36.))
-                                        .p_0()
-                                        .tooltip("播放队列")
-                                        .child(media_icon(MediaIcon::Queue, icon_foreground, px(19.))),
-                                )
-                                .content(move |_, _, cx| {
-                                    let theme = cx.theme();
-                                    v_flex()
-                                        .w(px(320.))
-                                        .gap_3()
-                                        .p_2()
-                                        .child(
-                                            h_flex()
-                                                .justify_between()
-                                                .child(div().font_semibold().child("播放队列"))
-                                                .child(div().text_sm().text_color(theme.muted_foreground).child(format!("{} 首", queue_tracks.len()))),
-                                        )
-                                        .child(
-                                            div().relative().child(v_flex()
-                                                .id("queue-tracks")
-                                                .pr(Scrollbar::width())
-                                                .max_h(px(420.))
-                                                .overflow_y_scroll()
-                                                .track_scroll(&queue_scroll)
-                                                .when(queue_tracks.is_empty(), |list| {
-                                                    list.child(div().p_4().text_sm().text_color(theme.muted_foreground).child("播放队列为空"))
-                                                })
-                                                .children(queue_tracks.iter().enumerate().map(|(index, track)| {
-                                                    let current = current_mid.as_ref() == Some(&track.mid);
-                                                    let controls = controls.clone();
-                                                    let mid = track.mid.clone();
-                                                    h_flex()
-                                                        .id(("queue-track", index))
-                                                        .flex_shrink_0()
-                                                        .debug_selector(move || format!("queue-track-{index}"))
-                                                        .cursor_pointer()
-                                                        .gap_3()
-                                                        .p_2()
-                                                        .rounded(theme.radius)
-                                                        .when(current, |row| row.bg(theme.secondary).text_color(theme.primary))
-                                                        .hover(|style| style.bg(theme.secondary))
-                                                        .on_click(move |_, _, cx| {
-                                                            let _ = controls.update(cx, |_, cx| cx.emit(PlayerAction::QueueTrack(mid.clone())));
-                                                        })
-                                                        .child(div().w(px(18.)).text_sm().text_color(theme.muted_foreground).child((index + 1).to_string()))
-                                                        .child(
-                                                            v_flex()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .child(div().truncate().text_sm().child(track.title.clone()))
-                                                                .child(div().truncate().text_xs().text_color(theme.muted_foreground).child(track.artists.clone())),
-                                                        )
-                                                        .child(div().text_xs().text_color(theme.muted_foreground).child(format_duration(track.duration_seconds)))
-                                                })),
-                                            ).child(
-                                                div().absolute().inset_0().debug_selector(|| "queue-scrollbar-viewport".to_owned()).child(
-                                                    Scrollbar::vertical(&queue_scroll)
-                                                        .id("queue-scrollbar")
-                                                        .mode(ScrollbarMode::Always)
-                                                        .viewport_from_layout(),
-                                                ),
-                                            ),
-                                        )
-                                }),
-                        )
+                        .child(queue)
                         .child(quality_selector)
                         .child(
                             Button::new("mute")
@@ -764,7 +838,11 @@ impl LyruneView {
                     .as_ref()
                     .and_then(|queue| queue.tracks.iter().position(|track| track.mid == *mid))
                 {
-                    playback.start_playback(index, Duration::ZERO, None, true, cx);
+                    if playback.state.current_track != Some(index) {
+                        playback.start_playback(index, Duration::ZERO, None, true, cx);
+                    } else if playback.state.load.track.is_none() {
+                        playback.toggle_playback(cx);
+                    }
                 }
             }),
             PlayerAction::ToggleMute => {
@@ -855,16 +933,6 @@ impl LyruneView {
                 .queue
                 .as_ref()
                 .is_none_or(|queue| queue.tracks.is_empty()),
-            queue_tracks: self.playback.read(cx).state.queue.as_ref().map_or_else(
-                Vec::new,
-                |queue| match &queue.shuffle_order {
-                    Some(order) => order
-                        .iter()
-                        .map(|&index| queue.tracks[index].clone())
-                        .collect(),
-                    None => queue.tracks.clone(),
-                },
-            ),
             browsed_tracks_empty: self
                 .browser
                 .read(cx)
@@ -882,6 +950,21 @@ impl LyruneView {
         };
         self.player_controls
             .update(cx, |view, cx| view.set_input(track, input, cx));
+        let queue_version = self.playback.read(cx).state.queue_version;
+        if self.player_controls.read(cx).queue_version != queue_version {
+            let tracks = self.playback.read(cx).state.queue.as_ref().map_or_else(
+                || Arc::from([]),
+                |queue| match &queue.shuffle_order {
+                    Some(order) => order
+                        .iter()
+                        .map(|&index| queue.tracks[index].clone())
+                        .collect(),
+                    None => Arc::from(queue.tracks.as_slice()),
+                },
+            );
+            self.player_controls
+                .update(cx, |view, cx| view.set_queue(queue_version, tracks, cx));
+        }
         player_bar(&self.progress, &self.player_controls, cx.theme().group_box)
     }
 }
@@ -950,24 +1033,26 @@ mod tests {
             progress,
             controls: controls.clone(),
         });
-        let track = std::sync::Arc::new(
-            serde_json::from_value(serde_json::json!({
-                "mid": "queue-song", "title": "歌曲", "artists": "歌手",
-                "album": "专辑", "album_mid": "", "duration_seconds": 180
-            }))
-            .unwrap(),
-        );
-        controls.update(cx, |view, cx| {
-            view.input.queue_tracks = vec![track; 20];
-            cx.notify();
-        });
+        let tracks = (0..200)
+            .map(|index| {
+                std::sync::Arc::new(
+                    serde_json::from_value(serde_json::json!({
+                        "mid": format!("queue-song-{index}"), "title": "歌曲", "artists": "歌手",
+                        "album": "专辑", "album_mid": "", "duration_seconds": 180
+                    }))
+                    .unwrap(),
+                )
+            })
+            .collect::<std::sync::Arc<[_]>>();
+        controls.update(cx, |view, cx| view.set_queue(1, tracks.clone(), cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let button = cx.debug_bounds("queue").unwrap();
         cx.simulate_click(button.center(), Default::default());
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let row = cx.debug_bounds("queue-track-0").unwrap();
         cx.simulate_click(row.center(), Default::default());
-        assert_eq!(selected.borrow().as_deref(), Some("queue-song"));
+        assert_eq!(selected.borrow().as_deref(), Some("queue-song-0"));
+        assert!(cx.debug_bounds("queue-track-199").is_none());
 
         let viewport = cx.debug_bounds("queue-scrollbar-viewport").unwrap();
         assert!(row.right() <= viewport.right() - gpui_component::scroll::Scrollbar::width());
@@ -977,15 +1062,35 @@ mod tests {
             ..Default::default()
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(controls.read_with(cx, |view, _| view.queue_scroll.offset().y) < gpui::px(0.));
+        assert!(
+            controls.read_with(cx, |view, _| view
+                .queue_scroll
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+                .y)
+                < gpui::px(0.)
+        );
         assert_eq!(
             cx.debug_bounds("queue-scrollbar-viewport").unwrap(),
             viewport
         );
 
+        // 重新打开时把当前歌曲滚动到可见区域。
         controls.update(cx, |view, cx| {
-            view.input.queue_tracks.clear();
+            view.track = Some(tracks[150].clone());
             cx.notify();
+        });
+        cx.simulate_click(gpui::point(gpui::px(1.), gpui::px(1.)), Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("queue-scrollbar-viewport").is_none());
+        cx.simulate_click(button.center(), Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("queue-track-150").is_some());
+
+        controls.update(cx, |view, cx| {
+            view.set_queue(2, std::sync::Arc::new([]), cx)
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("queue-track-0").is_none());

@@ -390,6 +390,7 @@ impl Playback {
                             queue.continuation = continuation;
                             first_added = queue.append_tracks(tracks.into_iter().map(Arc::new));
                             queue.set_shuffle(this.state.shuffle, this.state.current_track);
+                            this.state.queue_version = this.state.queue_version.wrapping_add(1);
                         }
                         this.persist_current_playback(cx);
                         // 已播到队尾时，续播从第一首新加入的歌开始；去重后的空批次不能越界跳歌。
@@ -501,6 +502,7 @@ impl Playback {
                 }
                 if let (Some(queue), Ok(tracks)) = (&mut this.state.queue, result) {
                     queue.append_tracks(tracks);
+                    this.state.queue_version = this.state.queue_version.wrapping_add(1);
                     if let Some(resource) = playlist_resource {
                         cx.emit(PlaybackEvent::PlaylistLoaded(resource));
                     }

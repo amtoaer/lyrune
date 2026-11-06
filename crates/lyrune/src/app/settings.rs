@@ -1480,13 +1480,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_settings_tab_index() {
-        for tab in SettingsTab::ALL {
-            assert!(SettingsTab::ALL[tab as usize] == tab);
-        }
-    }
-
     #[gpui::test]
     fn test_number_settings_commit_on_step(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);

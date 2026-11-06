@@ -205,23 +205,18 @@ enum SettingsTab {
     Appearance,
     Playback,
     Lyrics,
-    Updates,
+    Other,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 4] = [
-        Self::Appearance,
-        Self::Playback,
-        Self::Lyrics,
-        Self::Updates,
-    ];
+    const ALL: [Self; 4] = [Self::Appearance, Self::Playback, Self::Lyrics, Self::Other];
 
     fn label(self) -> &'static str {
         match self {
             Self::Appearance => "外观",
             Self::Playback => "播放",
             Self::Lyrics => "歌词",
-            Self::Updates => "更新",
+            Self::Other => "其他",
         }
     }
 }
@@ -1068,7 +1063,7 @@ impl Render for SettingsPage {
                                                 .children(progress_frame_rate_buttons),
                                         ),
                                 ))
-                                .when(tab == SettingsTab::Updates, |this| this.child(
+                                .when(tab == SettingsTab::Other, |this| this.child(
                                     v_flex()
                                         .gap_2()
                                         .child(div().font_medium().child("更新"))

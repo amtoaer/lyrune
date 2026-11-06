@@ -160,6 +160,7 @@ fn main() {
         .with_quit_mode(QuitMode::Explicit)
         .run(|cx: &mut App| {
             gpui_component::init(cx);
+            cx.set_cursor_hide_mode(CursorHideMode::Never);
             let settings = SettingsStore::load().unwrap_or_default();
             let fonts = design::resolve_fonts(
                 &settings.ui_font_families,

@@ -313,7 +313,10 @@ impl LyruneView {
                 },
             ),
             cx.observe_keystrokes(|this, event, window, cx| {
-                if event.keystroke.key == "escape" && !event.keystroke.modifiers.modified() {
+                if event.keystroke.key == "escape"
+                    && !event.keystroke.modifiers.modified()
+                    && event.action.is_none()
+                {
                     if this.account_menu_open || this.quality_menu_open {
                         this.dismiss_popovers(cx);
                     } else if this.cover_backdrop_expanded {

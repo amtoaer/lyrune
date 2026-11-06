@@ -205,17 +205,25 @@ enum SettingsTab {
     Appearance,
     Playback,
     Lyrics,
+    Performance,
     Other,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 4] = [Self::Appearance, Self::Playback, Self::Lyrics, Self::Other];
+    const ALL: [Self; 5] = [
+        Self::Appearance,
+        Self::Playback,
+        Self::Lyrics,
+        Self::Performance,
+        Self::Other,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Appearance => "外观",
             Self::Playback => "播放",
             Self::Lyrics => "歌词",
+            Self::Performance => "性能",
             Self::Other => "其他",
         }
     }
@@ -613,6 +621,26 @@ impl Render for SettingsPage {
                         ),
                 )
         };
+        let setting_heading = |label: &'static str, detail: &'static str| {
+            v_flex()
+                .gap_1()
+                .child(div().font_medium().child(label))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(detail),
+                )
+        };
+        let frame_rate_setting = |label: &'static str, buttons: Vec<Button>| {
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_6()
+                .child(div().flex_1().min_w_0().child(label))
+                .child(h_flex().flex_none().w(px(320.)).gap_1().children(buttons))
+        };
         let theme_picker = |prefix: &'static str, selected: ColorTheme, light: bool| {
             let view = cx.entity().clone();
             Button::new(format!("settings-{prefix}-{}", selected.id()))
@@ -752,11 +780,46 @@ impl Render for SettingsPage {
                     }))
             })
             .collect::<Vec<_>>();
-        div()
-            .relative()
+        v_flex()
             .size_full()
             .min_h_0()
             .child(
+                h_flex()
+                    .w_full()
+                    .justify_center()
+                    .px(page_horizontal_padding(narrow))
+                    .pt(if narrow { px(22.) } else { px(32.) })
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(home_content_width(compact, narrow))
+                            .gap_6()
+                            .px_2()
+                            .child(
+                                div()
+                                    .text_size(if narrow { px(22.) } else { px(24.) })
+                                    .font_semibold()
+                                    .child("设置"),
+                            )
+                            .child(
+                                TabBar::new("settings-tabs")
+                                    .underline()
+                                    .selected_index(tab as usize)
+                                    .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                        this.tab = SettingsTab::ALL[*index];
+                                        this.settings_scroll_handle.set_offset(point(px(0.), px(0.)));
+                                        cx.notify();
+                                    }))
+                                    .children(SettingsTab::ALL.map(|tab| Tab::new().label(tab.label()))),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
                 div()
                     .id("settings-scroll")
                     .size_full()
@@ -767,52 +830,22 @@ impl Render for SettingsPage {
                         .items_start()
                         .justify_center()
                         .px(page_horizontal_padding(narrow))
-                        .pt(if narrow { px(22.) } else { px(32.) })
+                        .pt_6()
                         .pb_8()
                         .child(
                         v_flex()
                         .w_full()
                         .max_w(home_content_width(compact, narrow))
-                        .gap_6()
                         .px_2()
-                        .child(
-                            div()
-                                .text_size(if narrow { px(22.) } else { px(24.) })
-                                .font_semibold()
-                                .child("设置"),
-                        )
-                        .child(
-                            TabBar::new("settings-tabs")
-                                .underline()
-                                .selected_index(tab as usize)
-                                .on_click(cx.listener(|this, index: &usize, _, cx| {
-                                    this.tab = SettingsTab::ALL[*index];
-                                    this.settings_scroll_handle.set_offset(point(px(0.), px(0.)));
-                                    cx.notify();
-                                }))
-                                .children(SettingsTab::ALL.map(|tab| Tab::new().label(tab.label()))),
-                        )
                         .child(
                             v_flex()
                                 .gap_4()
                                 .when(tab == SettingsTab::Appearance, |this| this.child(
                                     v_flex()
                                         .gap_2()
-                                        .child(div().font_medium().child("主题偏好"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("选择固定的亮色、暗色，或跟随系统外观"),
-                                        )
+                                        .child(setting_heading("主题偏好", "选择固定的亮色、暗色，或跟随系统外观"))
                                         .child(h_flex().w_full().gap_1().children(theme_mode_buttons))
-                                        .child(div().font_medium().child("主题配色"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("分别设置亮色和暗色模式使用的主题"),
-                                        )
+                                        .child(setting_heading("主题配色", "分别设置亮色和暗色模式使用的主题"))
                                         .child(
                                             h_flex()
                                                 .w_full()
@@ -841,13 +874,7 @@ impl Render for SettingsPage {
                                         .pt_4()
                                         .border_t_1()
                                         .border_color(theme.border)
-                                        .child(div().font_medium().child("托盘图标"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("选择系统托盘图标的显示样式"),
-                                        )
+                                        .child(setting_heading("托盘图标", "选择系统托盘图标的显示样式"))
                                         .child(
                                             h_flex()
                                                 .w_full()
@@ -861,13 +888,7 @@ impl Render for SettingsPage {
                                         .pt_4()
                                         .border_t_1()
                                         .border_color(theme.border)
-                                        .child(div().font_medium().child("窗口装饰"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("SSD 使用系统绘制标题栏；CSD 由 Lyrune 绘制窗口按钮和边框。切换后立即生效"),
-                                        )
+                                        .child(setting_heading("窗口装饰", "SSD 使用系统绘制标题栏；CSD 由 Lyrune 绘制窗口按钮和边框。切换后立即生效"))
                                         .child(
                                             h_flex()
                                                 .w_full()
@@ -881,13 +902,7 @@ impl Render for SettingsPage {
                                         .pt_4()
                                         .border_t_1()
                                         .border_color(theme.border)
-                                        .child(div().font_medium().child("字体"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("按优先级填写字体名称，以逗号分隔"),
-                                        )
+                                        .child(setting_heading("字体", "按优先级填写字体名称，以逗号分隔"))
                                         .child(font_field(
                                             "UI 字体",
                                             "应用于整个界面",
@@ -930,51 +945,25 @@ impl Render for SettingsPage {
                                                 ),
                                         ),
                                 ))
+                                .when(tab == SettingsTab::Playback, |this| this.child(number_setting(
+                                    "歌曲缓存上限",
+                                    "超过上限时自动清理最久未播放的歌曲",
+                                    &self.settings_inputs.audio_cache_limit,
+                                    "GB",
+                                    false,
+                                )))
                                 .when(tab == SettingsTab::Playback, |this| this.child(
                                     v_flex()
                                         .gap_2()
-                                        .child(div().font_medium().child("首选播放音质"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("应用于后续加载的歌曲"),
-                                        )
-                                        .children(quality_rows),
-                                ))
-                                .when(tab == SettingsTab::Playback, |this| this.child(
-                                    v_flex()
-                                        .gap_4()
                                         .pt_4()
                                         .border_t_1()
                                         .border_color(theme.border)
-                                        .child(div().font_medium().child("缓存与历史"))
-                                        .child(number_setting(
-                                            "歌曲缓存上限",
-                                            "超过上限时自动清理最久未播放的歌曲",
-                                            &self.settings_inputs.audio_cache_limit,
-                                            "GB",
-                                            false,
-                                        ))
-                                        .child(number_setting(
-                                            "图片内存缓存",
-                                            "图片最大缓存数，缩小该数值可以减少内存占用，但同屏显示图片超过该数值会出现渲染问题",
-                                            &self.settings_inputs.image_cache_capacity,
-                                            "张",
-                                            true,
-                                        ))
-                                        .child(number_setting(
-                                            "页面历史上限",
-                                            "最多保留的页面数量（包含当前页），缩小该数值会立即清理最早的历史页面",
-                                            &self.settings_inputs.navigation_history_limit,
-                                            "页",
-                                            true,
-                                        )),
+                                        .child(setting_heading("首选播放音质", "应用于后续加载的歌曲"))
+                                        .children(quality_rows),
                                 ))
                                 .when(tab == SettingsTab::Lyrics, |this| this.child(
                                     v_flex()
                                         .gap_4()
-                                        .child(div().font_medium().child("歌词页样式"))
                                         .child(number_setting(
                                             "歌词字号缩放",
                                             "缩放主歌词、翻译与注音的文字大小，行高随之等比例调整",
@@ -1011,68 +1000,42 @@ impl Render for SettingsPage {
                                             true,
                                         )),
                                 ))
-                                .when(tab == SettingsTab::Lyrics, |this| this.child(
+                                .when(tab == SettingsTab::Performance, |this| this.child(
                                     v_flex()
-                                        .gap_2()
+                                        .gap_4()
+                                        .child(number_setting(
+                                            "图片内存缓存",
+                                            "图片最大缓存数，缩小该数值可以减少内存占用，但同屏显示图片超过该数值会出现渲染问题",
+                                            &self.settings_inputs.image_cache_capacity,
+                                            "张",
+                                            false,
+                                        ))
+                                        .child(number_setting(
+                                            "页面历史上限",
+                                            "最多保留的页面数量（包含当前页），缩小该数值会立即清理最早的历史页面",
+                                            &self.settings_inputs.navigation_history_limit,
+                                            "页",
+                                            true,
+                                        )),
+                                ))
+                                .when(tab == SettingsTab::Performance, |this| this.child(
+                                    v_flex()
+                                        .gap_4()
                                         .pt_4()
                                         .border_t_1()
                                         .border_color(theme.border)
-                                        .child(div().font_medium().child("动画帧率"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("默认表示跟随显示器刷新率；越高越流畅，也会增加资源消耗"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.secondary_foreground)
-                                                .child("歌词逐字高亮与横向跟随"),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .w_full()
-                                                .gap_1()
-                                                .children(highlight_frame_rate_buttons),
-                                        )
-                                        .child(
-                                            div()
-                                                .pt_1()
-                                                .text_xs()
-                                                .text_color(theme.secondary_foreground)
-                                                .child("歌词平滑滚动"),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .w_full()
-                                                .gap_1()
-                                                .children(scroll_frame_rate_buttons),
-                                        )
-                                        .child(
-                                            div()
-                                                .pt_1()
-                                                .text_xs()
-                                                .text_color(theme.secondary_foreground)
-                                                .child("播放进度条"),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .w_full()
-                                                .gap_1()
-                                                .children(progress_frame_rate_buttons),
-                                        ),
+                                        .child(setting_heading(
+                                            "动画帧率",
+                                            "默认表示跟随显示器刷新率；越高越流畅，也会增加资源消耗",
+                                        ))
+                                        .child(frame_rate_setting("歌词逐字高亮与横向跟随", highlight_frame_rate_buttons))
+                                        .child(frame_rate_setting("歌词平滑滚动", scroll_frame_rate_buttons))
+                                        .child(frame_rate_setting("播放进度条", progress_frame_rate_buttons)),
                                 ))
                                 .when(tab == SettingsTab::Other, |this| this.child(
                                     v_flex()
                                         .gap_2()
-                                        .child(div().font_medium().child("更新"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("启动时在后台检查新版本，不会影响正常使用"),
-                                        )
+                                        .child(setting_heading("更新", "启动时在后台检查新版本，不会影响正常使用"))
                                         .child(
                                             Button::new("check-updates-on-startup")
                                                 .label(if check_updates_on_startup {
@@ -1107,7 +1070,8 @@ impl Render for SettingsPage {
                         ),
                     )),
             )
-            .vertical_scrollbar(&self.settings_scroll_handle)
+            .vertical_scrollbar(&self.settings_scroll_handle),
+            )
             .into_any_element()
     }
 }
@@ -1524,12 +1488,12 @@ mod tests {
                 (
                     page.settings_inputs.image_cache_capacity.clone(),
                     1,
-                    SettingsTab::Playback,
+                    SettingsTab::Performance,
                 ),
                 (
                     page.settings_inputs.navigation_history_limit.clone(),
                     1,
-                    SettingsTab::Playback,
+                    SettingsTab::Performance,
                 ),
                 (
                     page.settings_inputs.lyric_font_scale.clone(),
@@ -1698,11 +1662,11 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let before = page.read_with(cx, |page, _| page.render_count);
-        let expected_height = cx.update(|window, _| window.viewport_size().height - px(184.));
+        let expected_bottom = cx.update(|window, _| window.viewport_size().height - px(112.));
         page.read_with(cx, |page, _| {
             assert_eq!(
-                page.settings_scroll_handle.bounds().size.height,
-                expected_height
+                page.settings_scroll_handle.bounds().bottom(),
+                expected_bottom
             )
         });
         for _ in 0..3 {

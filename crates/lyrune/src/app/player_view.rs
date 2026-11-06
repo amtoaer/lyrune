@@ -321,7 +321,7 @@ impl PlayerControlsView {
                                         })
                                         .child(
                                             div()
-                                                .w(px(18.))
+                                                .w(px(28.))
                                                 .text_sm()
                                                 .text_color(theme.muted_foreground)
                                                 .child((index + 1).to_string()),

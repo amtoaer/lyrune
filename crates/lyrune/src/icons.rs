@@ -69,6 +69,7 @@ pub enum MediaIcon {
     Album,
     Clock,
     Playlist,
+    Queue,
     Radar,
     Headphones,
     Play,
@@ -95,6 +96,7 @@ pub enum MediaIcon {
 impl MediaIcon {
     fn body(self) -> &'static str {
         match self {
+            Self::Queue => r#"<path d="M4 6h16M4 11h16M4 16h8"/><path d="m16 15 5 3-5 3Z"/>"#,
             Self::Back => r#"<path d="m15 18-6-6 6-6"/>"#,
             Self::Forward => r#"<path d="m9 18 6-6-6-6"/>"#,
             Self::ChevronUp => r#"<path d="m18 15-6-6-6 6"/>"#,

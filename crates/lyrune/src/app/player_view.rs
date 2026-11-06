@@ -1,12 +1,14 @@
 //! 歌曲信息、播放按钮与音量控件；进度条是同级视图，逐帧刷新不重建这里。
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Selectable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    popover::Popover,
+    scroll::{Scrollbar, ScrollbarMode},
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
@@ -17,6 +19,7 @@ use super::{LyruneView, PLAYER_BAR_HEIGHT};
 use crate::design::ColorTheme;
 use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
+use crate::library::format_duration;
 use crate::settings::RepeatMode;
 
 #[derive(PartialEq)]
@@ -47,6 +50,7 @@ pub(super) enum PlayerAction {
     Next,
     Repeat,
     ToggleMute,
+    QueueTrack(String),
     Quality(Quality),
     ToggleQuality,
     Volume { value: f32, persist: bool },
@@ -56,6 +60,10 @@ pub(super) struct PlayerControlsView {
     track: Option<Arc<Track>>,
     input: PlayerInput,
     volume_slider: Entity<SliderState>,
+    // 按播放顺序排列的队列快照，只在 queue_version 变化时替换。
+    queue_tracks: Arc<[Arc<Track>]>,
+    queue_version: u64,
+    queue_scroll: UniformListScrollHandle,
     _subscription: Subscription,
     #[cfg(test)]
     render_count: usize,
@@ -104,6 +112,9 @@ impl PlayerControlsView {
                 quality_menu_open: false,
             },
             volume_slider,
+            queue_tracks: Arc::new([]),
+            queue_version: 0,
+            queue_scroll: UniformListScrollHandle::new(),
             _subscription: subscription,
             #[cfg(test)]
             render_count: 0,
@@ -126,6 +137,17 @@ impl PlayerControlsView {
         }
         self.track = track;
         self.input = input;
+        cx.notify();
+    }
+
+    pub(super) fn set_queue(
+        &mut self,
+        version: u64,
+        tracks: Arc<[Arc<Track>]>,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue_version = version;
+        self.queue_tracks = tracks;
         cx.notify();
     }
 
@@ -222,6 +244,142 @@ impl PlayerControlsView {
             })
             .into_any_element()
     }
+
+    fn render_queue(&self, icon_foreground: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let tracks = self.queue_tracks.clone();
+        let scroll = self.queue_scroll.clone();
+        let current_mid = self.track.as_ref().map(|track| track.mid.clone());
+        let controls = cx.entity().downgrade();
+        let current_index = current_mid
+            .as_ref()
+            .and_then(|mid| tracks.iter().position(|track| track.mid == *mid));
+        let open_scroll = scroll.clone();
+        Popover::new("playback-queue")
+            .anchor(Anchor::BottomRight)
+            .on_open_change(move |open, _, _| {
+                if *open && let Some(index) = current_index {
+                    open_scroll.scroll_to_item_strict(index, ScrollStrategy::Center);
+                }
+            })
+            .trigger(
+                Button::new("queue")
+                    .debug_selector(|| "queue".to_owned())
+                    .ghost()
+                    .rounded(px(999.))
+                    .size(px(36.))
+                    .p_0()
+                    .tooltip("播放队列")
+                    .child(media_icon(MediaIcon::Queue, icon_foreground, px(19.))),
+            )
+            .content(move |_, _, cx| {
+                let muted = cx.theme().muted_foreground;
+                let header = h_flex()
+                    .justify_between()
+                    .child(div().font_semibold().child("播放队列"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(format!("{} 首", tracks.len())),
+                    );
+                let body = if tracks.is_empty() {
+                    div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(muted)
+                        .child("播放队列为空")
+                        .into_any_element()
+                } else {
+                    let count = tracks.len();
+                    let tracks = tracks.clone();
+                    let current_mid = current_mid.clone();
+                    let controls = controls.clone();
+                    let rows =
+                        move |range: std::ops::Range<usize>, _: &mut Window, cx: &mut App| {
+                            let theme = cx.theme();
+                            range
+                                .map(|index| {
+                                    let track = &tracks[index];
+                                    let current = current_mid.as_ref() == Some(&track.mid);
+                                    let controls = controls.clone();
+                                    let mid = track.mid.clone();
+                                    h_flex()
+                                        .id(("queue-track", index))
+                                        .w_full()
+                                        .debug_selector(move || format!("queue-track-{index}"))
+                                        .cursor_pointer()
+                                        .gap_3()
+                                        .p_2()
+                                        .rounded(theme.radius)
+                                        .when(current, |row| {
+                                            row.bg(theme.secondary).text_color(theme.primary)
+                                        })
+                                        .hover(|style| style.bg(theme.secondary))
+                                        .on_click(move |_, _, cx| {
+                                            let action = PlayerAction::QueueTrack(mid.clone());
+                                            let _ = controls.update(cx, |_, cx| cx.emit(action));
+                                        })
+                                        .child(
+                                            div()
+                                                .w(px(18.))
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground)
+                                                .child((index + 1).to_string()),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_sm()
+                                                        .child(track.title.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(track.artists.clone()),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(format_duration(track.duration_seconds)),
+                                        )
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                    div()
+                        .relative()
+                        .child(
+                            uniform_list("queue-tracks", count, rows)
+                                .with_sizing_behavior(ListSizingBehavior::Infer)
+                                .max_h(px(420.))
+                                .pr(Scrollbar::width())
+                                .track_scroll(&scroll),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .debug_selector(|| "queue-scrollbar-viewport".to_owned())
+                                .child(
+                                    Scrollbar::vertical(&scroll)
+                                        .id("queue-scrollbar")
+                                        .mode(ScrollbarMode::Always)
+                                        .viewport_from_layout(),
+                                ),
+                        )
+                        .into_any_element()
+                };
+                v_flex().w(px(320.)).gap_3().p_2().child(header).child(body)
+            })
+            .into_any_element()
+    }
 }
 
 impl Render for PlayerControlsView {
@@ -235,11 +393,12 @@ impl Render for PlayerControlsView {
         let track = self.track.clone();
         let has_track = track.is_some();
         let quality_selector = self.render_quality_selector(has_track, cx);
+        let palette = self.input.color_theme.palette();
+        let icon_foreground = palette.foreground;
+        let queue = self.render_queue(icon_foreground, cx);
         let theme = cx.theme();
         let loading = self.input.loading;
         let show_pause = self.input.show_pause;
-        let palette = self.input.color_theme.palette();
-        let icon_foreground = palette.foreground;
         let icon_accent = palette.primary;
         let cover_size = if narrow { px(44.) } else { px(52.) };
         let cover = match track.as_ref().and_then(|track| track.cover_url.clone()) {
@@ -579,9 +738,10 @@ impl Render for PlayerControlsView {
             .when(!narrow, |bar| {
                 bar.child(
                     h_flex()
-                        .w(if compact { px(220.) } else { px(300.) })
+                        .w(if compact { px(280.) } else { px(336.) })
                         .justify_end()
                         .gap_2()
+                        .child(queue)
                         .child(quality_selector)
                         .child(
                             Button::new("mute")
@@ -671,6 +831,20 @@ impl LyruneView {
                 #[cfg(target_os = "linux")]
                 playback.sync_mpris(false, cx);
                 cx.notify();
+            }),
+            PlayerAction::QueueTrack(mid) => self.playback.update(cx, |playback, cx| {
+                if let Some(index) = playback
+                    .state
+                    .queue
+                    .as_ref()
+                    .and_then(|queue| queue.tracks.iter().position(|track| track.mid == *mid))
+                {
+                    if playback.state.current_track != Some(index) {
+                        playback.start_playback(index, Duration::ZERO, None, true, cx);
+                    } else if playback.state.load.track.is_none() {
+                        playback.toggle_playback(cx);
+                    }
+                }
             }),
             PlayerAction::ToggleMute => {
                 let settings = &self.preferences.read(cx).settings;
@@ -777,6 +951,21 @@ impl LyruneView {
         };
         self.player_controls
             .update(cx, |view, cx| view.set_input(track, input, cx));
+        let queue_version = self.playback.read(cx).state.queue_version;
+        if self.player_controls.read(cx).queue_version != queue_version {
+            let tracks = self.playback.read(cx).state.queue.as_ref().map_or_else(
+                || Arc::from([]),
+                |queue| match &queue.shuffle_order {
+                    Some(order) => order
+                        .iter()
+                        .map(|&index| queue.tracks[index].clone())
+                        .collect(),
+                    None => Arc::from(queue.tracks.as_slice()),
+                },
+            );
+            self.player_controls
+                .update(cx, |view, cx| view.set_queue(queue_version, tracks, cx));
+        }
         player_bar(&self.progress, &self.player_controls, cx.theme().group_box)
     }
 }
@@ -824,6 +1013,91 @@ mod tests {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             player_bar(&self.progress, &self.controls, cx.theme().group_box)
         }
+    }
+
+    #[gpui::test]
+    fn test_queue_selection(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let progress = cx.new(|cx| PlaybackProgressView::new(None, font(".SystemUIFont"), cx));
+        let controls = cx
+            .new(|cx| PlayerControlsView::new(0.5, ColorTheme::default(), Quality::default(), cx));
+        let selected = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let received = selected.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&controls, move |_, action, _| {
+                if let super::PlayerAction::QueueTrack(mid) = action {
+                    *received.borrow_mut() = Some(mid.clone());
+                }
+            })
+        });
+        let (_, cx) = cx.add_window_view(|_, _| TestPlayerBar {
+            progress,
+            controls: controls.clone(),
+        });
+        let tracks = (0..200)
+            .map(|index| {
+                std::sync::Arc::new(
+                    serde_json::from_value(serde_json::json!({
+                        "mid": format!("queue-song-{index}"), "title": "歌曲", "artists": "歌手",
+                        "album": "专辑", "album_mid": "", "duration_seconds": 180
+                    }))
+                    .unwrap(),
+                )
+            })
+            .collect::<std::sync::Arc<[_]>>();
+        controls.update(cx, |view, cx| view.set_queue(1, tracks.clone(), cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let button = cx.debug_bounds("queue").unwrap();
+        cx.simulate_click(button.center(), Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx.debug_bounds("queue-track-0").unwrap();
+        cx.simulate_click(row.center(), Default::default());
+        assert_eq!(selected.borrow().as_deref(), Some("queue-song-0"));
+        assert!(cx.debug_bounds("queue-track-199").is_none());
+
+        let viewport = cx.debug_bounds("queue-scrollbar-viewport").unwrap();
+        assert_eq!(
+            row.right(),
+            viewport.right() - gpui_component::scroll::Scrollbar::width()
+        );
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-200.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            controls.read_with(cx, |view, _| view
+                .queue_scroll
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+                .y)
+                < gpui::px(0.)
+        );
+        assert_eq!(
+            cx.debug_bounds("queue-scrollbar-viewport").unwrap(),
+            viewport
+        );
+
+        // 重新打开时把当前歌曲滚动到可见区域。
+        controls.update(cx, |view, cx| {
+            view.track = Some(tracks[150].clone());
+            cx.notify();
+        });
+        cx.simulate_click(gpui::point(gpui::px(1.), gpui::px(1.)), Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("queue-scrollbar-viewport").is_none());
+        cx.simulate_click(button.center(), Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("queue-track-150").is_some());
+
+        controls.update(cx, |view, cx| {
+            view.set_queue(2, std::sync::Arc::new([]), cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("queue-track-0").is_none());
     }
 
     #[gpui::test]

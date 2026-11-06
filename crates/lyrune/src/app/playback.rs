@@ -154,6 +154,7 @@ impl Playback {
 
     pub(super) fn clear_session(&mut self, cx: &mut Context<Self>) {
         self.state.queue = None;
+        self.state.queue_version = self.state.queue_version.wrapping_add(1);
         self.state.recommendation_loading = false;
         self.state.waiting_for_recommendation = false;
         self.state.current_track = None;
@@ -183,6 +184,8 @@ pub(super) struct PlaybackState {
     pub(super) audio: Option<Arc<AudioPlayer>>,
     pub(super) queue: Option<PlaybackQueue>,
     pub(super) queue_generation: u64,
+    // 队列歌曲或播放顺序变化时递增；播放队列面板据此按需同步，不在每次渲染时复制队列。
+    pub(super) queue_version: u64,
     // loading 可在当前歌曲播放时预取；waiting 表示已到队尾，结果到达后需要续播。
     pub(super) recommendation_loading: bool,
     pub(super) waiting_for_recommendation: bool,
@@ -208,6 +211,7 @@ impl PlaybackState {
             audio,
             queue: None,
             queue_generation: 0,
+            queue_version: 0,
             recommendation_loading: false,
             waiting_for_recommendation: false,
             current_track: None,
@@ -230,6 +234,7 @@ impl PlaybackState {
         self.recommendation_loading = false;
         self.waiting_for_recommendation = false;
         self.queue = Some(queue);
+        self.queue_version = self.queue_version.wrapping_add(1);
         self.queue_generation
     }
 
@@ -271,7 +276,11 @@ impl PlaybackState {
     pub(super) fn set_shuffle(&mut self, enabled: bool) {
         self.shuffle = enabled;
         if let Some(queue) = &mut self.queue {
+            let shuffled = queue.shuffle_order.is_some();
             queue.set_shuffle(enabled, self.current_track);
+            if queue.shuffle_order.is_some() != shuffled {
+                self.queue_version = self.queue_version.wrapping_add(1);
+            }
         }
     }
 

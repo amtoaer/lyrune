@@ -365,8 +365,10 @@ impl LyruneView {
                 self.progress
                     .update(cx, |view, cx| view.start_track(*position, *duration, cx));
             }
+            #[cfg(target_os = "linux")]
             PlaybackEvent::Stopped => self.progress.update(cx, |view, cx| view.stop(cx)),
             PlaybackEvent::CloseQualityMenu => self.quality_menu_open = false,
+            #[cfg(target_os = "linux")]
             PlaybackEvent::VolumeChanged(volume) => self
                 .player_controls
                 .update(cx, |view, cx| view.reset_volume(*volume, cx)),

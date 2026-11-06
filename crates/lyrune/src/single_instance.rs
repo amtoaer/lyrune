@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,6 +29,7 @@ pub enum InstanceClaim {
 pub struct PrimaryInstance {
     shutdown: Arc<AtomicBool>,
     listener_thread: Option<JoinHandle<()>>,
+    address_path: PathBuf,
     _lock: File,
 }
 
@@ -38,6 +39,7 @@ impl Drop for PrimaryInstance {
         if let Some(thread) = self.listener_thread.take() {
             let _ = thread.join();
         }
+        let _ = fs::remove_file(&self.address_path);
     }
 }
 
@@ -51,10 +53,15 @@ fn instance_path() -> Result<PathBuf> {
     Ok(dirs.cache_dir().join("instance.lock"))
 }
 
+// 锁文件只承担互斥：Windows 的独占锁会连读取一起拒绝，激活地址必须单独存放。
+fn instance_address_path(path: &Path) -> PathBuf {
+    path.with_extension("addr")
+}
+
 fn acquire_at(path: &Path) -> Result<InstanceClaim> {
     let parent = path.parent().context("单例状态路径缺少父目录")?;
     fs::create_dir_all(parent).context("无法创建单例状态目录")?;
-    let mut lock = OpenOptions::new()
+    let lock = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
@@ -63,17 +70,20 @@ fn acquire_at(path: &Path) -> Result<InstanceClaim> {
         .context("无法打开单例状态文件")?;
 
     match lock.try_lock() {
-        Ok(()) => start_primary(lock)
+        Ok(()) => start_primary(lock, instance_address_path(path))
             .map(|(instance, commands)| InstanceClaim::Primary(instance, commands)),
         Err(fs::TryLockError::WouldBlock) => {
-            notify_primary(&mut lock)?;
+            notify_primary(&instance_address_path(path))?;
             Ok(InstanceClaim::Secondary)
         }
         Err(fs::TryLockError::Error(error)) => Err(error).context("无法锁定单例状态文件"),
     }
 }
 
-fn start_primary(mut lock: File) -> Result<(PrimaryInstance, UnboundedReceiver<InstanceCommand>)> {
+fn start_primary(
+    lock: File,
+    address_path: PathBuf,
+) -> Result<(PrimaryInstance, UnboundedReceiver<InstanceCommand>)> {
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
         .context("无法创建单例激活端点")?;
     listener
@@ -81,10 +91,11 @@ fn start_primary(mut lock: File) -> Result<(PrimaryInstance, UnboundedReceiver<I
         .context("无法配置单例激活端点")?;
     let address = listener.local_addr().context("无法读取单例激活地址")?;
 
-    lock.set_len(0).context("无法清空单例状态")?;
-    lock.seek(SeekFrom::Start(0)).context("无法写入单例状态")?;
-    write!(lock, "{INSTANCE_FILE_HEADER}\n{}\n", address.port()).context("无法写入单例激活地址")?;
-    lock.sync_data().context("无法同步单例状态")?;
+    fs::write(
+        &address_path,
+        format!("{INSTANCE_FILE_HEADER}\n{}\n", address.port()),
+    )
+    .context("无法写入单例激活地址")?;
 
     let (commands, command_events) = tokio::sync::mpsc::unbounded_channel();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -114,17 +125,18 @@ fn start_primary(mut lock: File) -> Result<(PrimaryInstance, UnboundedReceiver<I
         PrimaryInstance {
             shutdown,
             listener_thread: Some(listener_thread),
+            address_path,
             _lock: lock,
         },
         command_events,
     ))
 }
 
-fn notify_primary(lock: &mut File) -> Result<()> {
+fn notify_primary(address_path: &Path) -> Result<()> {
     let deadline = Instant::now() + ACTIVATE_TIMEOUT;
     let mut last_error = None;
     while Instant::now() < deadline {
-        match read_primary_address(lock).and_then(send_show_command) {
+        match read_primary_address(address_path).and_then(send_show_command) {
             Ok(()) => return Ok(()),
             Err(error) => last_error = Some(error),
         }
@@ -134,11 +146,12 @@ fn notify_primary(lock: &mut File) -> Result<()> {
         .context("无法唤醒正在运行的 Lyrune")
 }
 
-fn read_primary_address(lock: &mut File) -> Result<SocketAddr> {
-    lock.seek(SeekFrom::Start(0)).context("无法读取单例状态")?;
-    let mut contents = String::new();
-    lock.read_to_string(&mut contents)
-        .context("无法读取单例状态")?;
+fn read_primary_address(address_path: &Path) -> Result<SocketAddr> {
+    let contents = match fs::read_to_string(address_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => bail!("单例状态尚未就绪"),
+        Err(error) => return Err(error).context("无法读取单例状态"),
+    };
     let mut lines = contents.lines();
     if lines.next() != Some(INSTANCE_FILE_HEADER) {
         bail!("单例状态尚未就绪");

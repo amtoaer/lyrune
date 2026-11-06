@@ -8,12 +8,13 @@ use gpui_component::{
     input::{Input, InputEvent, InputState, MaskPattern, NumberInput, NumberInputEvent},
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
+    tab::{Tab, TabBar},
     v_flex,
 };
 use lyrune_api::Quality;
 
 use super::preferences::Preferences;
-use super::{LyruneView, page_horizontal_padding};
+use super::{LyruneView, home_content_width, page_horizontal_padding};
 use crate::cache::audio_cache_limit_bytes;
 use crate::design::{self, ColorTheme};
 use crate::settings::{
@@ -199,10 +200,32 @@ pub(super) enum SettingsAction {
     CheckUpdates,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Appearance,
+    Playback,
+    Lyrics,
+    Other,
+}
+
+impl SettingsTab {
+    const ALL: [Self; 4] = [Self::Appearance, Self::Playback, Self::Lyrics, Self::Other];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Appearance => "外观",
+            Self::Playback => "播放",
+            Self::Lyrics => "歌词",
+            Self::Other => "其他",
+        }
+    }
+}
+
 pub(super) struct SettingsPage {
     preferences: Entity<Preferences>,
     settings_inputs: SettingsInputs,
     settings_scroll_handle: ScrollHandle,
+    tab: SettingsTab,
     pub(super) update_check_in_progress: bool,
     _preferences_subscription: Subscription,
     _input_subscriptions: Vec<Subscription>,
@@ -226,6 +249,7 @@ impl SettingsPage {
             preferences,
             settings_inputs,
             settings_scroll_handle: ScrollHandle::new(),
+            tab: SettingsTab::Appearance,
             update_check_in_progress: false,
             _preferences_subscription: subscription,
             _input_subscriptions: Vec::new(),
@@ -527,8 +551,10 @@ impl Render for SettingsPage {
         {
             self.render_count += 1;
         }
+        let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);
         let theme = cx.theme().clone();
+        let tab = self.tab;
         let settings = &self.preferences.read(cx).settings;
         let font_field = |label: &'static str, detail: &'static str, input: &Entity<InputState>| {
             v_flex()
@@ -736,14 +762,19 @@ impl Render for SettingsPage {
                     .size_full()
                     .track_scroll(&self.settings_scroll_handle)
                     .overflow_y_scroll()
-                    .child(h_flex().w_full().items_start().justify_center().child(
+                    .child(h_flex()
+                        .w_full()
+                        .items_start()
+                        .justify_center()
+                        .px(page_horizontal_padding(narrow))
+                        .pt(if narrow { px(22.) } else { px(32.) })
+                        .pb_8()
+                        .child(
                         v_flex()
                         .w_full()
-                        .max_w(px(760.))
+                        .max_w(home_content_width(compact, narrow))
                         .gap_6()
-                        .px(page_horizontal_padding(narrow))
-                        .pt_8()
-                        .pb_8()
+                        .px_2()
                         .child(
                             div()
                                 .text_size(if narrow { px(22.) } else { px(24.) })
@@ -751,9 +782,20 @@ impl Render for SettingsPage {
                                 .child("设置"),
                         )
                         .child(
+                            TabBar::new("settings-tabs")
+                                .underline()
+                                .selected_index(tab as usize)
+                                .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                    this.tab = SettingsTab::ALL[*index];
+                                    this.settings_scroll_handle.set_offset(point(px(0.), px(0.)));
+                                    cx.notify();
+                                }))
+                                .children(SettingsTab::ALL.map(|tab| Tab::new().label(tab.label()))),
+                        )
+                        .child(
                             v_flex()
                                 .gap_4()
-                                .child(
+                                .when(tab == SettingsTab::Appearance, |this| this.child(
                                     v_flex()
                                         .gap_2()
                                         .child(div().font_medium().child("主题偏好"))
@@ -792,8 +834,8 @@ impl Render for SettingsPage {
                                                         .child(dark_theme_picker),
                                                 ),
                                         )
-                                )
-                                .child(
+                                ))
+                                .when(tab == SettingsTab::Appearance, |this| this.child(
                                     v_flex()
                                         .gap_2()
                                         .pt_4()
@@ -812,52 +854,8 @@ impl Render for SettingsPage {
                                                 .gap_1()
                                                 .children(tray_icon_buttons),
                                         ),
-                                )
-                                .child(
-                                    v_flex()
-                                        .gap_2()
-                                        .pt_4()
-                                        .border_t_1()
-                                        .border_color(theme.border)
-                                        .child(div().font_medium().child("更新"))
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child("启动时在后台检查新版本，不会影响正常使用"),
-                                        )
-                                        .child(
-                                            Button::new("check-updates-on-startup")
-                                                .label(if check_updates_on_startup {
-                                                    "启动时检查更新：开启"
-                                                } else {
-                                                    "启动时检查更新：关闭"
-                                                })
-                                                .ghost()
-                                                .selected(check_updates_on_startup)
-                                                .w_full()
-                                                .h(px(38.))
-                                                .on_click(cx.listener(move |_, _, _, cx| {
-                                                    cx.emit(SettingsAction::CheckOnStartup(!check_updates_on_startup))
-                                                })),
-                                        )
-                                        .child(
-                                            Button::new("check-updates-now")
-                                            .label(if self.update_check_in_progress {
-                                                "正在检查更新…"
-                                            } else {
-                                                "立即检查更新"
-                                            })
-                                            .outline()
-                                            .w_full()
-                                            .h(px(38.))
-                                            .disabled(self.update_check_in_progress)
-                                            .on_click(cx.listener(|_, _, _, cx| {
-                                                cx.emit(SettingsAction::CheckUpdates)
-                                            })),
-                                        ),
-                                )
-                                .child(
+                                ))
+                                .when(tab == SettingsTab::Appearance, |this| this.child(
                                     v_flex()
                                         .gap_2()
                                         .pt_4()
@@ -876,8 +874,8 @@ impl Render for SettingsPage {
                                                 .gap_1()
                                                 .children(window_decoration_buttons),
                                         ),
-                                )
-                                .child(
+                                ))
+                                .when(tab == SettingsTab::Appearance, |this| this.child(
                                     v_flex()
                                         .gap_3()
                                         .pt_4()
@@ -931,13 +929,10 @@ impl Render for SettingsPage {
                                                         )),
                                                 ),
                                         ),
-                                )
-                                .child(
+                                ))
+                                .when(tab == SettingsTab::Playback, |this| this.child(
                                     v_flex()
                                         .gap_2()
-                                        .pt_4()
-                                        .border_t_1()
-                                        .border_color(theme.border)
                                         .child(div().font_medium().child("首选播放音质"))
                                         .child(
                                             div()
@@ -946,8 +941,8 @@ impl Render for SettingsPage {
                                                 .child("应用于后续加载的歌曲"),
                                         )
                                         .children(quality_rows),
-                                )
-                                .child(
+                                ))
+                                .when(tab == SettingsTab::Playback, |this| this.child(
                                     v_flex()
                                         .gap_4()
                                         .pt_4()
@@ -975,13 +970,10 @@ impl Render for SettingsPage {
                                             "页",
                                             true,
                                         )),
-                                )
-                                .child(
+                                ))
+                                .when(tab == SettingsTab::Lyrics, |this| this.child(
                                     v_flex()
                                         .gap_4()
-                                        .pt_4()
-                                        .border_t_1()
-                                        .border_color(theme.border)
                                         .child(div().font_medium().child("歌词页样式"))
                                         .child(number_setting(
                                             "歌词字号缩放",
@@ -1018,8 +1010,8 @@ impl Render for SettingsPage {
                                             "∶1",
                                             true,
                                         )),
-                                )
-                                .child(
+                                ))
+                                .when(tab == SettingsTab::Lyrics, |this| this.child(
                                     v_flex()
                                         .gap_2()
                                         .pt_4()
@@ -1070,7 +1062,48 @@ impl Render for SettingsPage {
                                                 .gap_1()
                                                 .children(progress_frame_rate_buttons),
                                         ),
-                                ),
+                                ))
+                                .when(tab == SettingsTab::Other, |this| this.child(
+                                    v_flex()
+                                        .gap_2()
+                                        .child(div().font_medium().child("更新"))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child("启动时在后台检查新版本，不会影响正常使用"),
+                                        )
+                                        .child(
+                                            Button::new("check-updates-on-startup")
+                                                .label(if check_updates_on_startup {
+                                                    "启动时检查更新：开启"
+                                                } else {
+                                                    "启动时检查更新：关闭"
+                                                })
+                                                .ghost()
+                                                .selected(check_updates_on_startup)
+                                                .w_full()
+                                                .h(px(38.))
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    cx.emit(SettingsAction::CheckOnStartup(!check_updates_on_startup))
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("check-updates-now")
+                                            .label(if self.update_check_in_progress {
+                                                "正在检查更新…"
+                                            } else {
+                                                "立即检查更新"
+                                            })
+                                            .outline()
+                                            .w_full()
+                                            .h(px(38.))
+                                            .disabled(self.update_check_in_progress)
+                                            .on_click(cx.listener(|_, _, _, cx| {
+                                                cx.emit(SettingsAction::CheckUpdates)
+                                            })),
+                                        ),
+                                )),
                         ),
                     )),
             )
@@ -1426,7 +1459,7 @@ mod tests {
     };
     use gpui_component::{input::InputEvent, v_flex};
 
-    use super::{Preferences, SettingsAction, SettingsPage};
+    use super::{Preferences, SettingsAction, SettingsPage, SettingsTab};
     use crate::design::{AppFonts, ColorTheme};
     use crate::settings::AppSettings;
 
@@ -1483,15 +1516,39 @@ mod tests {
         });
         let inputs = page.read_with(cx, |page, _| {
             vec![
-                (page.settings_inputs.audio_cache_limit.clone(), 1),
-                (page.settings_inputs.image_cache_capacity.clone(), 1),
-                (page.settings_inputs.navigation_history_limit.clone(), 1),
-                (page.settings_inputs.lyric_font_scale.clone(), 10),
-                (page.settings_inputs.lyric_line_spacing.clone(), 10),
+                (
+                    page.settings_inputs.audio_cache_limit.clone(),
+                    1,
+                    SettingsTab::Playback,
+                ),
+                (
+                    page.settings_inputs.image_cache_capacity.clone(),
+                    1,
+                    SettingsTab::Playback,
+                ),
+                (
+                    page.settings_inputs.navigation_history_limit.clone(),
+                    1,
+                    SettingsTab::Playback,
+                ),
+                (
+                    page.settings_inputs.lyric_font_scale.clone(),
+                    10,
+                    SettingsTab::Lyrics,
+                ),
+                (
+                    page.settings_inputs.lyric_line_spacing.clone(),
+                    10,
+                    SettingsTab::Lyrics,
+                ),
             ]
         });
-        for (input, step) in inputs {
+        for (input, step, tab) in inputs {
             let initial = if step == 10 { 100 } else { 90 };
+            page.update(cx, |page, cx| {
+                page.tab = tab;
+                cx.notify();
+            });
             cx.update(|window, cx| {
                 input.update(cx, |input, cx| {
                     input.set_value(initial.to_string(), window, cx)
@@ -1545,6 +1602,10 @@ mod tests {
         });
         cx.simulate_resize(gpui::size(px(1080.), px(3000.)));
         cx.update(|window, _| window.activate_window());
+        page.update(cx, |page, cx| {
+            page.tab = SettingsTab::Lyrics;
+            cx.notify();
+        });
         let actions = Rc::new(std::cell::RefCell::new(Vec::new()));
         let received = actions.clone();
         let _subscription = cx.update(|_, cx| {
@@ -1715,6 +1776,11 @@ mod tests {
             TestSettingsPage { page: page.clone() }
         });
         cx.simulate_resize(gpui::size(px(1080.), px(2400.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        page.update(cx, |page, cx| {
+            page.tab = SettingsTab::Playback;
+            cx.notify();
+        });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let input = page.read_with(cx, |page, cx| {
             assert_eq!(

@@ -305,6 +305,7 @@ impl PlayerControlsView {
                                     let mid = track.mid.clone();
                                     h_flex()
                                         .id(("queue-track", index))
+                                        .w_full()
                                         .debug_selector(move || format!("queue-track-{index}"))
                                         .cursor_pointer()
                                         .gap_3()
@@ -1055,7 +1056,10 @@ mod tests {
         assert!(cx.debug_bounds("queue-track-199").is_none());
 
         let viewport = cx.debug_bounds("queue-scrollbar-viewport").unwrap();
-        assert!(row.right() <= viewport.right() - gpui_component::scroll::Scrollbar::width());
+        assert_eq!(
+            row.right(),
+            viewport.right() - gpui_component::scroll::Scrollbar::width()
+        );
         cx.simulate_event(gpui::ScrollWheelEvent {
             position: viewport.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-200.))),

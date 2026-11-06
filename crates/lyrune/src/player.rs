@@ -1,6 +1,6 @@
 use std::io::BufReader;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source as _};
@@ -56,6 +56,15 @@ pub struct AudioPlayer {
 struct PlaybackPosition {
     offset: Duration,
     origin: Option<Duration>,
+    clock: Option<SmoothClock>,
+}
+
+#[derive(Clone, Copy)]
+struct SmoothClock {
+    raw: Duration,
+    raw_seen: Instant,
+    shown: Duration,
+    shown_at: Instant,
 }
 
 impl AudioPlayer {
@@ -90,6 +99,7 @@ impl AudioPlayer {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = PlaybackPosition {
             offset: position_offset,
             origin: (!position_origin.is_zero()).then_some(position_origin),
+            clock: None,
         };
         self.player.append(decoder);
         *self
@@ -123,7 +133,12 @@ impl AudioPlayer {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let source_position = position_since_replace(raw_position, &mut position.origin);
-        absolute_position(position.offset, source_position)
+        let absolute = absolute_position(position.offset, source_position);
+        if self.player.is_paused() {
+            position.clock = None;
+            return absolute;
+        }
+        smooth_position(&mut position.clock, absolute, Instant::now())
     }
 
     pub fn set_volume(&self, volume: f32) {
@@ -173,6 +188,44 @@ fn absolute_position(source_start: Duration, source_position: Duration) -> Durat
     source_start.saturating_add(source_position)
 }
 
+fn smooth_position(clock: &mut Option<SmoothClock>, raw: Duration, now: Instant) -> Duration {
+    // rodio 只在设备拉取缓冲时更新位置，每 30~60ms 跳一次；用墙钟外推，
+    // 再以有界的速率微调追赶原始时钟，使显示位置连续且不回退。
+    const SNAP: f32 = 0.25;
+    const CORRECTION: f32 = 0.25;
+    const MAX_EXTRAPOLATION: Duration = Duration::from_millis(100);
+    let Some(state) = clock.as_mut() else {
+        *clock = Some(SmoothClock {
+            raw,
+            raw_seen: now,
+            shown: raw,
+            shown_at: now,
+        });
+        return raw;
+    };
+    if raw != state.raw {
+        state.raw = raw;
+        state.raw_seen = now;
+    }
+    // 上限避免缓冲不足时无限外推，恢复后又被拉回。
+    let target = (state.raw
+        + now
+            .saturating_duration_since(state.raw_seen)
+            .min(MAX_EXTRAPOLATION))
+    .as_secs_f32();
+    let shown = state.shown.as_secs_f32();
+    let elapsed = now.saturating_duration_since(state.shown_at).as_secs_f32();
+    let error = target - shown;
+    let next = if error.abs() > SNAP {
+        target
+    } else {
+        shown + elapsed * (1. + error / CORRECTION).clamp(0., 1.5)
+    };
+    state.shown = Duration::from_secs_f32(next.max(0.));
+    state.shown_at = now;
+    state.shown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +236,29 @@ mod tests {
             absolute_position(Duration::from_secs(90), Duration::from_secs(3)),
             Duration::from_secs(93)
         );
+    }
+
+    #[test]
+    fn test_smooth_position() {
+        let start = Instant::now();
+        let mut clock = None;
+        let mut previous = smooth_position(&mut clock, Duration::ZERO, start);
+        // 原始时钟每 50ms 跳 50ms，每 10ms 采样一次。
+        for step in 1..=100u64 {
+            let raw = Duration::from_millis(step / 5 * 50);
+            let shown = smooth_position(&mut clock, raw, start + Duration::from_millis(step * 10));
+            let advance = shown - previous;
+            assert!(advance >= Duration::from_millis(5) && advance <= Duration::from_millis(15));
+            previous = shown;
+        }
+        assert!(previous.abs_diff(Duration::from_secs(1)) < Duration::from_millis(60));
+
+        let seeked = smooth_position(
+            &mut clock,
+            Duration::from_secs(30),
+            start + Duration::from_millis(1010),
+        );
+        assert_eq!(seeked, Duration::from_secs(30));
     }
 
     #[test]

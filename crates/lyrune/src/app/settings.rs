@@ -14,7 +14,7 @@ use gpui_component::{
 use lyrune_api::Quality;
 
 use super::preferences::Preferences;
-use super::{LyruneView, page_horizontal_padding};
+use super::{LyruneView, home_content_width, page_horizontal_padding};
 use crate::cache::audio_cache_limit_bytes;
 use crate::design::{self, ColorTheme};
 use crate::settings::{
@@ -556,6 +556,7 @@ impl Render for SettingsPage {
         {
             self.render_count += 1;
         }
+        let compact = window.viewport_size().width < px(1120.);
         let narrow = window.viewport_size().width < px(900.);
         let theme = cx.theme().clone();
         let tab = self.tab;
@@ -766,14 +767,19 @@ impl Render for SettingsPage {
                     .size_full()
                     .track_scroll(&self.settings_scroll_handle)
                     .overflow_y_scroll()
-                    .child(h_flex().w_full().items_start().justify_center().child(
+                    .child(h_flex()
+                        .w_full()
+                        .items_start()
+                        .justify_center()
+                        .px(page_horizontal_padding(narrow))
+                        .pt(if narrow { px(22.) } else { px(32.) })
+                        .pb_8()
+                        .child(
                         v_flex()
                         .w_full()
-                        .max_w(px(760.))
+                        .max_w(home_content_width(compact, narrow))
                         .gap_6()
-                        .px(page_horizontal_padding(narrow))
-                        .pt_8()
-                        .pb_8()
+                        .px_2()
                         .child(
                             div()
                                 .text_size(if narrow { px(22.) } else { px(24.) })

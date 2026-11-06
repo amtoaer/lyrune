@@ -185,7 +185,7 @@ impl BrowserView {
                     }
                     PlaybackEvent::PlayBrowsedTrack => {
                         if !this.track_table.read(cx).delegate().tracks().is_empty() {
-                            this.select_track(0, cx);
+                            this.select_track(None, cx);
                         }
                     }
                     PlaybackEvent::PlaylistLoaded(resource)
@@ -211,7 +211,7 @@ impl BrowserView {
             ),
             cx.subscribe(&track_table, |this, _, event: &TableEvent, cx| {
                 if let TableEvent::DoubleClickedRow(index) = event {
-                    this.select_track(*index, cx);
+                    this.select_track(Some(*index), cx);
                 }
             }),
             cx.subscribe(&search_track_table, |this, _, event: &TableEvent, cx| {
@@ -221,7 +221,7 @@ impl BrowserView {
             }),
             cx.subscribe(&artist_song_table, |this, _, event: &TableEvent, cx| {
                 if let TableEvent::DoubleClickedRow(index) = event {
-                    this.select_artist_track(*index, cx);
+                    this.select_artist_track(Some(*index), cx);
                 }
             }),
         ];
@@ -805,7 +805,7 @@ mod tests {
         let card = cx.debug_bounds("chart-5").unwrap();
         cx.simulate_click(card.center(), Modifiers::none());
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        browser.update(cx, |browser, cx| browser.select_track(0, cx));
+        browser.update(cx, |browser, cx| browser.select_track(Some(0), cx));
         let playing_id = weekly.playlist("2026_42".into()).id;
         let picker = cx.debug_bounds("chart-period").unwrap();
         cx.simulate_click(picker.center(), Modifiers::none());
@@ -866,7 +866,7 @@ mod tests {
                 &resources[1]
             ));
         });
-        browser.update(cx, |browser, cx| browser.select_track(0, cx));
+        browser.update(cx, |browser, cx| browser.select_track(Some(0), cx));
         browser.read_with(cx, |browser, cx| {
             assert_eq!(
                 browser

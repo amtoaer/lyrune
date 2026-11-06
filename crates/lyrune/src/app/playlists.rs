@@ -528,7 +528,7 @@ impl BrowserView {
         .detach();
     }
 
-    pub(super) fn select_track(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn select_track(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
         let (tracks, has_more) = {
             let table = self.track_table.read(cx);
             (
@@ -991,7 +991,6 @@ impl BrowserView {
                                         .h(px(44.))
                                         .min_w(px(44.))
                                         .px_4()
-                                        .tooltip("从第一首开始播放")
                                         .child(
                                             h_flex()
                                                 .gap_2()
@@ -1009,9 +1008,9 @@ impl BrowserView {
                                         )
                                         .when(!has_tracks, |button| button.bg(theme.button_primary))
                                         .disabled(!has_tracks)
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.select_track(0, cx)),
-                                        ),
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.select_track(None, cx)
+                                        })),
                                 ),
                             ),
                     ),

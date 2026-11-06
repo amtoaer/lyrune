@@ -200,21 +200,34 @@ impl BrowserView {
         playlist: UserPlaylist,
         tracks: Vec<Arc<Track>>,
         has_more: bool,
-        index: usize,
+        index: Option<usize>,
         cx: &mut Context<Self>,
     ) {
+        // 未指定歌曲即播放全部：随机播放时从随机歌曲开始，并重建队列以生成新的洗牌顺序。
+        let shuffle_all = index.is_none() && self.playback.read(cx).state.shuffle;
+        let index = match index {
+            Some(index) => index,
+            None if shuffle_all && !tracks.is_empty() => rand::random_range(0..tracks.len()),
+            None => 0,
+        };
         let Some(selected_track) = tracks.get(index) else {
             return;
         };
-        if let Some(queue_index) = self
-            .playback
-            .read(cx)
-            .state
-            .queue
-            .as_ref()
-            .and_then(|queue| {
-                canonical_queue_track_index(queue, &playlist.id, &tracks, &selected_track.mid)
-            })
+        if !shuffle_all
+            && let Some(queue_index) =
+                self.playback
+                    .read(cx)
+                    .state
+                    .queue
+                    .as_ref()
+                    .and_then(|queue| {
+                        canonical_queue_track_index(
+                            queue,
+                            &playlist.id,
+                            &tracks,
+                            &selected_track.mid,
+                        )
+                    })
         {
             if self.playback.read(cx).state.current_track == Some(queue_index) {
                 if self.playback.read(cx).state.load.track.is_none() {

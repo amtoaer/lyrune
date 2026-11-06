@@ -71,7 +71,7 @@ pub(super) struct BrowserView {
     pub(super) preferences: Entity<Preferences>,
     pub(super) playback: Entity<Playback>,
     pub(super) protocol_client: Option<ProtocolClient>,
-    settings_page: Entity<SettingsPage>,
+    pub(super) settings_page: Entity<SettingsPage>,
     navigation_view: Entity<NavigationView>,
     sidebar_view: Entity<SidebarView>,
     content_width: Pixels,
@@ -516,6 +516,7 @@ mod tests {
     use gpui_component::{input::InputEvent, v_flex};
 
     use super::{BrowserView, MainContent};
+    use crate::app::settings::SettingsTab;
     use crate::app::{
         account::Account,
         lyrics_loading::LyricsCache,
@@ -648,6 +649,29 @@ mod tests {
             assert!(browser.main_content == MainContent::Settings);
             assert_eq!(browser.navigation_history.back.len(), history);
         });
+        let settings = browser.read_with(cx, |browser, _| browser.settings_page.clone());
+        cx.simulate_resize(gpui::size(px(1080.), px(600.)));
+        settings.update(cx, |page, cx| {
+            page.restore_navigation_state(SettingsTab::Lyrics, px(-120.), cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| {
+            browser.update(cx, |browser, cx| {
+                browser.show_home(window, cx);
+                browser.navigate_back(window, cx);
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(settings.read_with(cx, |page, _| page.navigation_state()
+            == (SettingsTab::Lyrics, px(-120.))));
+        cx.update(|window, cx| {
+            browser.update(cx, |browser, cx| {
+                browser.show_home(window, cx);
+                browser.show_settings(window, cx);
+            })
+        });
+        assert!(settings.read_with(cx, |page, _| page.navigation_state()
+            == (SettingsTab::Appearance, px(0.))));
 
         cx.update(|window, _| window.remove_window());
         let (_, cx) = cx.cx.add_window_view(|window, cx| {

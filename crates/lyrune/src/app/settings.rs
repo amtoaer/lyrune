@@ -201,7 +201,7 @@ pub(super) enum SettingsAction {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SettingsTab {
+pub(super) enum SettingsTab {
     Appearance,
     Playback,
     Lyrics,
@@ -264,6 +264,22 @@ impl SettingsPage {
             #[cfg(test)]
             render_count: 0,
         }
+    }
+
+    pub(super) fn navigation_state(&self) -> (SettingsTab, Pixels) {
+        (self.tab, self.settings_scroll_handle.offset().y)
+    }
+
+    pub(super) fn restore_navigation_state(
+        &mut self,
+        tab: SettingsTab,
+        scroll_offset: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        self.tab = tab;
+        self.settings_scroll_handle
+            .set_offset(point(px(0.), scroll_offset));
+        cx.notify();
     }
 
     pub(super) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -780,46 +796,11 @@ impl Render for SettingsPage {
                     }))
             })
             .collect::<Vec<_>>();
-        v_flex()
+        div()
+            .relative()
             .size_full()
             .min_h_0()
             .child(
-                h_flex()
-                    .w_full()
-                    .justify_center()
-                    .px(page_horizontal_padding(narrow))
-                    .pt(if narrow { px(22.) } else { px(32.) })
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .max_w(home_content_width(compact, narrow))
-                            .gap_6()
-                            .px_2()
-                            .child(
-                                div()
-                                    .text_size(if narrow { px(22.) } else { px(24.) })
-                                    .font_semibold()
-                                    .child("设置"),
-                            )
-                            .child(
-                                TabBar::new("settings-tabs")
-                                    .underline()
-                                    .selected_index(tab as usize)
-                                    .on_click(cx.listener(|this, index: &usize, _, cx| {
-                                        this.tab = SettingsTab::ALL[*index];
-                                        this.settings_scroll_handle.set_offset(point(px(0.), px(0.)));
-                                        cx.notify();
-                                    }))
-                                    .children(SettingsTab::ALL.map(|tab| Tab::new().label(tab.label()))),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
                 div()
                     .id("settings-scroll")
                     .size_full()
@@ -830,13 +811,29 @@ impl Render for SettingsPage {
                         .items_start()
                         .justify_center()
                         .px(page_horizontal_padding(narrow))
-                        .pt_6()
+                        .pt(if narrow { px(22.) } else { px(32.) })
                         .pb_8()
                         .child(
                         v_flex()
                         .w_full()
                         .max_w(home_content_width(compact, narrow))
+                        .gap_6()
                         .px_2()
+                        .child(
+                            div()
+                                .text_size(if narrow { px(22.) } else { px(24.) })
+                                .font_semibold()
+                                .child("设置"),
+                        )
+                        .child(
+                            TabBar::new("settings-tabs")
+                                .underline()
+                                .selected_index(tab as usize)
+                                .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                    this.restore_navigation_state(SettingsTab::ALL[*index], px(0.), cx)
+                                }))
+                                .children(SettingsTab::ALL.map(|tab| Tab::new().label(tab.label()))),
+                        )
                         .child(
                             v_flex()
                                 .gap_4()
@@ -1070,8 +1067,7 @@ impl Render for SettingsPage {
                         ),
                     )),
             )
-            .vertical_scrollbar(&self.settings_scroll_handle),
-            )
+            .vertical_scrollbar(&self.settings_scroll_handle)
             .into_any_element()
     }
 }
@@ -1662,11 +1658,11 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let before = page.read_with(cx, |page, _| page.render_count);
-        let expected_bottom = cx.update(|window, _| window.viewport_size().height - px(112.));
+        let expected_height = cx.update(|window, _| window.viewport_size().height - px(184.));
         page.read_with(cx, |page, _| {
             assert_eq!(
-                page.settings_scroll_handle.bounds().bottom(),
-                expected_bottom
+                page.settings_scroll_handle.bounds().size.height,
+                expected_height
             )
         });
         for _ in 0..3 {

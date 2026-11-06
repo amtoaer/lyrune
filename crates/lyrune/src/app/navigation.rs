@@ -15,6 +15,7 @@ use crate::icons::MediaIcon;
 use crate::settings::DEFAULT_NAVIGATION_HISTORY_LIMIT;
 
 use super::browser::BrowserView;
+use super::settings::SettingsTab;
 use super::{LIBRARY_CACHE_TTL, SEARCH_PAGE_SIZE, unix_timestamp_secs};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -463,7 +464,10 @@ pub(super) enum NavigationPage {
     Charts {
         scroll_offset: Pixels,
     },
-    Settings,
+    Settings {
+        tab: SettingsTab,
+        scroll_offset: Pixels,
+    },
     Search {
         query: String,
         category: SearchCategory,
@@ -493,7 +497,7 @@ impl NavigationPage {
         match (self, other) {
             (Self::Home, Self::Home) => true,
             (Self::Charts { .. }, Self::Charts { .. }) => true,
-            (Self::Settings, Self::Settings) => true,
+            (Self::Settings { .. }, Self::Settings { .. }) => true,
             (Self::Search { query, .. }, Self::Search { query: other, .. }) => query == other,
             (Self::Artist { artist, .. }, Self::Artist { artist: other, .. })
             | (Self::ArtistAlbums { artist, .. }, Self::ArtistAlbums { artist: other, .. }) => {
@@ -645,7 +649,10 @@ impl BrowserView {
             MainContent::Charts => Some(NavigationPage::Charts {
                 scroll_offset: self.charts.scroll_handle.offset().y,
             }),
-            MainContent::Settings => Some(NavigationPage::Settings),
+            MainContent::Settings => {
+                let (tab, scroll_offset) = self.settings_page.read(cx).navigation_state();
+                Some(NavigationPage::Settings { tab, scroll_offset })
+            }
             MainContent::Search => Some(NavigationPage::Search {
                 query: self.search.query.clone(),
                 category: self.search.category,
@@ -739,8 +746,11 @@ impl BrowserView {
                 }
                 cx.notify();
             }
-            NavigationPage::Settings => {
+            NavigationPage::Settings { tab, scroll_offset } => {
                 self.main_content = MainContent::Settings;
+                self.settings_page.update(cx, |page, cx| {
+                    page.restore_navigation_state(tab, scroll_offset, cx)
+                });
                 self.search.resource = None;
                 self.artist.resource = None;
                 self.playlist.resource = None;
@@ -863,7 +873,10 @@ impl BrowserView {
     }
 
     pub(super) fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = NavigationPage::Settings;
+        let target = NavigationPage::Settings {
+            tab: SettingsTab::Appearance,
+            scroll_offset: px(0.),
+        };
         let current = self.current_navigation_page(cx);
         self.record_navigation(current, &target, window, cx);
         cx.emit(super::browser::BrowserEvent::CloseAccountMenu);

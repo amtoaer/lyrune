@@ -18,8 +18,8 @@ use crate::http::{BLURRED_COVER_SIZE, blurred_image_source, cached_image_source}
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::player::AudioPlayer;
 use crate::settings::{
-    DEFAULT_LYRIC_BACKGROUND_CHROMA, DEFAULT_LYRIC_BACKGROUND_CONTRAST,
-    DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, FrameRate,
+    DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
+    DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, FrameRate,
 };
 
 const LYRIC_ANCHOR_SPACING_EM: f32 = 3.;
@@ -924,6 +924,7 @@ pub(super) struct LyricsInput {
     pub(super) background_min_overlay_percent: u32,
     pub(super) background_chroma: f32,
     pub(super) background_contrast: f32,
+    pub(super) background_blur_percent: u32,
     pub(super) highlight_frame_rate: FrameRate,
     pub(super) scroll_frame_rate: FrameRate,
     pub(super) advancing: bool,
@@ -970,6 +971,7 @@ impl LyricsView {
                 background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
                 background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
                 background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+                background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
                 highlight_frame_rate: FrameRate::Fps60,
                 scroll_frame_rate: FrameRate::Fps60,
                 advancing: false,
@@ -1519,6 +1521,7 @@ impl LyricsView {
                                         self.input.background_min_overlay_percent,
                                         self.input.background_chroma,
                                         self.input.background_contrast,
+                                        self.input.background_blur_percent,
                                     ))
                                     .size_full()
                                     .object_fit(ObjectFit::Cover),
@@ -1541,6 +1544,7 @@ impl LyricsView {
                                     self.input.background_min_overlay_percent,
                                     self.input.background_chroma,
                                     self.input.background_contrast,
+                                    self.input.background_blur_percent,
                                 ))
                                 .size_full()
                                 .object_fit(ObjectFit::Cover),
@@ -1662,8 +1666,8 @@ impl Render for LyricsView {
 mod tests {
     use super::{LYRIC_TRACK_SWITCH_DURATION, LyricsContent, LyricsInput, LyricsView, lyrics};
     use crate::settings::{
-        DEFAULT_LYRIC_BACKGROUND_CHROMA, DEFAULT_LYRIC_BACKGROUND_CONTRAST,
-        DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, FrameRate,
+        DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
+        DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, FrameRate,
     };
     use gpui::{AppContext as _, TestAppContext, VisualTestContext, font, px, white};
     use std::sync::Arc;
@@ -1810,6 +1814,7 @@ mod tests {
             background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
             background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
             background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+            background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
             highlight_frame_rate: FrameRate::Display,
             scroll_frame_rate: FrameRate::Display,
             advancing: false,

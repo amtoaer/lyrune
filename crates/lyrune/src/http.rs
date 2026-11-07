@@ -97,6 +97,7 @@ struct BlurredCoverSource {
     min_overlay_percent: u32,
     chroma_bits: u32,
     contrast_bits: u32,
+    blur_percent: u32,
 }
 
 pub struct CachedImageCache {
@@ -241,6 +242,7 @@ impl BlurredCoverImage {
                 source.min_overlay_percent,
                 f32::from_bits(source.chroma_bits),
                 f32::from_bits(source.contrast_bits),
+                source.blur_percent,
             )?
             .to_image_data(svg_renderer)
         });
@@ -280,6 +282,7 @@ pub fn blurred_image_source(
     min_overlay_percent: u32,
     chroma: f32,
     contrast: f32,
+    blur_percent: u32,
 ) -> ImageSource {
     (move |window: &mut Window, cx: &mut App| {
         let path = match window.use_asset::<CachedImageFile>(&url, cx)? {
@@ -294,6 +297,7 @@ pub fn blurred_image_source(
                 min_overlay_percent,
                 chroma_bits: chroma.to_bits(),
                 contrast_bits: contrast.to_bits(),
+                blur_percent,
             },
             window,
             cx,
@@ -320,6 +324,7 @@ fn generate_blurred_cover(
     min_overlay_percent: u32,
     chroma: f32,
     contrast: f32,
+    blur_percent: u32,
 ) -> anyhow::Result<Arc<Image>> {
     let image = image::ImageReader::open(path)
         .context("无法打开待模糊的封面")?
@@ -329,7 +334,7 @@ fn generate_blurred_cover(
         .context("无法解码待模糊的封面")?;
     let blurred = image
         .resize_to_fill(BLURRED_COVER_SIZE, BLURRED_COVER_SIZE, FilterType::Triangle)
-        .blur(10.);
+        .blur((BLURRED_COVER_SIZE * blur_percent) as f32 / 100.);
     let blurred = tone_blurred_cover(
         blurred,
         background,
@@ -711,8 +716,8 @@ mod tests {
 
     use super::*;
     use crate::settings::{
-        DEFAULT_LYRIC_BACKGROUND_CHROMA, DEFAULT_LYRIC_BACKGROUND_CONTRAST,
-        DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+        DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
+        DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
     };
 
     const LYRIC_TARGET_CONTRAST: f32 = DEFAULT_LYRIC_BACKGROUND_CONTRAST;
@@ -777,6 +782,7 @@ mod tests {
             min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
             chroma_bits: DEFAULT_LYRIC_BACKGROUND_CHROMA.to_bits(),
             contrast_bits: DEFAULT_LYRIC_BACKGROUND_CONTRAST.to_bits(),
+            blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
         };
         let second_path = root.join("second.png");
         std::fs::copy(&path, &second_path).unwrap();
@@ -1125,6 +1131,7 @@ mod tests {
             DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
             DEFAULT_LYRIC_BACKGROUND_CHROMA,
             DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+            DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
         )
         .unwrap();
         let decoded = image::load_from_memory(&blurred.bytes).unwrap();

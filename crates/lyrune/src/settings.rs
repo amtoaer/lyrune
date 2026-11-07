@@ -28,6 +28,8 @@ pub const MAX_LYRIC_SCALE_PERCENT: u32 = 300;
 pub const DEFAULT_LYRIC_BACKGROUND_CHROMA: f32 = 0.12;
 pub const DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT: u32 = 40;
 pub const DEFAULT_LYRIC_BACKGROUND_CONTRAST: f32 = 4.;
+pub const DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT: u32 = 8;
+pub const MAX_LYRIC_BACKGROUND_BLUR_PERCENT: u32 = 20;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PersistedPlayback {
@@ -285,6 +287,7 @@ pub struct AppSettings {
     pub lyric_background_min_overlay_percent: u32,
     pub lyric_background_chroma: f32,
     pub lyric_background_contrast: f32,
+    pub lyric_background_blur_percent: u32,
     pub audio_cache_limit_gb: u64,
     pub image_cache_capacity: usize,
     pub navigation_history_limit: usize,
@@ -322,6 +325,7 @@ impl Default for AppSettings {
             lyric_background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
             lyric_background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
             lyric_background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+            lyric_background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
             audio_cache_limit_gb: DEFAULT_AUDIO_CACHE_LIMIT_GB,
             image_cache_capacity: DEFAULT_IMAGE_CACHE_CAPACITY,
             navigation_history_limit: DEFAULT_NAVIGATION_HISTORY_LIMIT,
@@ -374,6 +378,9 @@ impl AppSettings {
         } else {
             DEFAULT_LYRIC_BACKGROUND_CONTRAST
         };
+        self.lyric_background_blur_percent = self
+            .lyric_background_blur_percent
+            .clamp(1, MAX_LYRIC_BACKGROUND_BLUR_PERCENT);
         self.audio_cache_limit_gb = self.audio_cache_limit_gb.max(1);
         self.image_cache_capacity = self.image_cache_capacity.clamp(1, MAX_IMAGE_CACHE_CAPACITY);
         self.navigation_history_limit = self
@@ -708,6 +715,7 @@ mod tests {
         assert_eq!(settings.lyric_background_chroma, 0.12);
         assert_eq!(settings.lyric_background_min_overlay_percent, 40);
         assert_eq!(settings.lyric_background_contrast, 4.);
+        assert_eq!(settings.lyric_background_blur_percent, 8);
         assert_eq!(settings.audio_cache_limit_gb, DEFAULT_AUDIO_CACHE_LIMIT_GB);
         assert_eq!(settings.image_cache_capacity, 80);
         assert_eq!(
@@ -806,6 +814,7 @@ mod tests {
             lyric_background_min_overlay_percent: 120,
             lyric_background_chroma: 0.5,
             lyric_background_contrast: 30.,
+            lyric_background_blur_percent: 0,
             audio_cache_limit_gb: 0,
             image_cache_capacity: 0,
             navigation_history_limit: usize::MAX,
@@ -829,6 +838,7 @@ mod tests {
         assert_eq!(settings.lyric_background_chroma, 0.4);
         assert_eq!(settings.lyric_background_min_overlay_percent, 100);
         assert_eq!(settings.lyric_background_contrast, 21.);
+        assert_eq!(settings.lyric_background_blur_percent, 1);
         assert_eq!(settings.audio_cache_limit_gb, 1);
         assert_eq!(settings.image_cache_capacity, 1);
         assert_eq!(
@@ -874,6 +884,7 @@ mod tests {
             lyric_background_min_overlay_percent: 25,
             lyric_background_chroma: 0.16,
             lyric_background_contrast: 4.5,
+            lyric_background_blur_percent: 12,
             audio_cache_limit_gb: 24,
             image_cache_capacity: 72,
             navigation_history_limit: 16,
@@ -944,6 +955,10 @@ mod tests {
         assert_eq!(
             restored.lyric_background_contrast,
             expected.lyric_background_contrast
+        );
+        assert_eq!(
+            restored.lyric_background_blur_percent,
+            expected.lyric_background_blur_percent
         );
         assert_eq!(restored.audio_cache_limit_gb, expected.audio_cache_limit_gb);
         assert_eq!(restored.image_cache_capacity, expected.image_cache_capacity);

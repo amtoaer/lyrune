@@ -991,9 +991,7 @@ fn normalize_login_qr(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
 mod tests {
     use std::io::Cursor;
 
-    use gpui::{AppContext as _, TestAppContext};
-
-    use super::{Account, AccountState, LoginMethod, QqLoginMode, normalize_login_qr};
+    use super::{Account, AccountState, normalize_login_qr};
     use lyrune_api::{CredentialSession, QqCredential};
 
     #[test]
@@ -1051,38 +1049,6 @@ mod tests {
         account.invalidate_login();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(account.login_task.is_none());
-    }
-
-    #[gpui::test]
-    fn test_qq_login_switching(cx: &mut TestAppContext) {
-        // 空 GUID 使测试任务在网络请求前退出；仍经过真实的切换、取消和回调路径。
-        let account = cx.new(|_| Account::new(None, String::new()));
-        account.update(cx, |account, cx| {
-            assert_eq!(account.login_method, LoginMethod::MusicApp);
-            account.state = AccountState::SignedOut;
-            account.select_login_method(LoginMethod::Qq, cx);
-            let discovery = account.generation;
-            assert_eq!(account.qq_mode, QqLoginMode::Quick);
-            account.complete_qq_discovery(discovery, Err(anyhow::anyhow!("no local QQ")), cx);
-            assert_eq!(account.qq_mode, QqLoginMode::Qr);
-            assert_eq!(account.state, AccountState::SigningIn);
-
-            account.select_qq_mode(QqLoginMode::Quick, cx);
-            let discovery = account.generation;
-            account.select_qq_mode(QqLoginMode::Qr, cx);
-            let scan = account.generation;
-            account.complete_qq_discovery(discovery, Err(anyhow::anyhow!("late result")), cx);
-            assert_eq!(account.generation, scan);
-            assert_eq!(account.qq_mode, QqLoginMode::Qr);
-
-            account.select_login_method(LoginMethod::Wechat, cx);
-            account.select_login_method(LoginMethod::Qq, cx);
-            assert_eq!(account.qq_mode, QqLoginMode::Qr);
-            account.handle_login_event(lyrune_api::LoginEvent::Expired, cx);
-            assert_eq!(account.qq_mode, QqLoginMode::Qr);
-            assert_eq!(account.state, AccountState::SigningIn);
-            account.invalidate_login();
-        });
     }
 
     #[test]

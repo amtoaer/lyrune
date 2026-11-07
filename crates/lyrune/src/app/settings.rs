@@ -18,10 +18,10 @@ use super::{LyruneView, home_content_width, page_horizontal_padding};
 use crate::cache::audio_cache_limit_bytes;
 use crate::design::{self, ColorTheme};
 use crate::settings::{
-    AppSettings, ColorThemeMode, FrameRate, MAX_IMAGE_CACHE_CAPACITY, MAX_LYRIC_SCALE_PERCENT,
-    MAX_NAVIGATION_HISTORY_LIMIT, MIN_SCALE_PERCENT, TrayIconStyle, WindowDecoration,
-    default_lyric_font_families, default_monospace_font_families, default_ui_font_families,
-    parse_font_families,
+    AppSettings, ColorThemeMode, FrameRate, MAX_IMAGE_CACHE_CAPACITY,
+    MAX_LYRIC_BACKGROUND_BLUR_PERCENT, MAX_LYRIC_SCALE_PERCENT, MAX_NAVIGATION_HISTORY_LIMIT,
+    MIN_SCALE_PERCENT, TrayIconStyle, WindowDecoration, default_lyric_font_families,
+    default_monospace_font_families, default_ui_font_families, parse_font_families,
 };
 
 struct SettingsInputs {
@@ -36,6 +36,7 @@ struct SettingsInputs {
     lyric_background_min_overlay: Entity<InputState>,
     lyric_background_chroma: Entity<InputState>,
     lyric_background_contrast: Entity<InputState>,
+    lyric_background_blur: Entity<InputState>,
 }
 
 impl SettingsInputs {
@@ -132,6 +133,17 @@ impl SettingsInputs {
                 .min(1.)
                 .max(21.)
         });
+        let lyric_background_blur_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.lyric_background_blur_percent.to_string())
+                .mask_pattern(MaskPattern::Number {
+                    separator: None,
+                    fraction: None,
+                })
+                .validate(|value, _| value.parse::<u32>().is_ok())
+                .min(1.)
+                .max(MAX_LYRIC_BACKGROUND_BLUR_PERCENT as f64)
+        });
         Self {
             ui_font: ui_font_input,
             monospace_font: monospace_font_input,
@@ -144,6 +156,7 @@ impl SettingsInputs {
             lyric_background_min_overlay: lyric_background_min_overlay_input,
             lyric_background_chroma: lyric_background_chroma_input,
             lyric_background_contrast: lyric_background_contrast_input,
+            lyric_background_blur: lyric_background_blur_input,
         }
     }
 
@@ -191,6 +204,7 @@ pub(super) enum SettingsAction {
         min_overlay_percent: u32,
         chroma: f32,
         contrast: f32,
+        blur_percent: u32,
     },
     Fonts {
         ui: Vec<String>,
@@ -280,11 +294,12 @@ impl SettingsPage {
             &self.settings_inputs.lyric_background_min_overlay,
             &self.settings_inputs.lyric_background_chroma,
             &self.settings_inputs.lyric_background_contrast,
+            &self.settings_inputs.lyric_background_blur,
         ] {
             input.update(cx, |input, cx| input.attach_window(window, cx));
         }
         type ApplyNumberSetting = fn(&mut SettingsPage, &mut Window, &mut Context<SettingsPage>);
-        let numeric_inputs: [(_, _, _, ApplyNumberSetting); 8] = [
+        let numeric_inputs: [(_, _, _, ApplyNumberSetting); 9] = [
             (
                 &self.settings_inputs.audio_cache_limit,
                 1.,
@@ -330,6 +345,12 @@ impl SettingsPage {
             (
                 &self.settings_inputs.lyric_background_contrast,
                 0.1,
+                1.,
+                Self::apply_lyric_background_settings,
+            ),
+            (
+                &self.settings_inputs.lyric_background_blur,
+                1.,
                 1.,
                 Self::apply_lyric_background_settings,
             ),
@@ -486,6 +507,14 @@ impl SettingsPage {
             .filter(|value| value.is_finite())
             .unwrap_or(settings.lyric_background_contrast)
             .clamp(1., 21.);
+        let blur_percent = self
+            .settings_inputs
+            .lyric_background_blur
+            .read(cx)
+            .value()
+            .parse::<u32>()
+            .unwrap_or(settings.lyric_background_blur_percent)
+            .clamp(1, MAX_LYRIC_BACKGROUND_BLUR_PERCENT);
         for (input, value) in [
             (
                 &self.settings_inputs.lyric_background_min_overlay,
@@ -499,6 +528,10 @@ impl SettingsPage {
                 &self.settings_inputs.lyric_background_contrast,
                 contrast.to_string(),
             ),
+            (
+                &self.settings_inputs.lyric_background_blur,
+                blur_percent.to_string(),
+            ),
         ] {
             input.update(cx, |input, cx| input.set_value(value, window, cx));
         }
@@ -506,6 +539,7 @@ impl SettingsPage {
             min_overlay_percent,
             chroma,
             contrast,
+            blur_percent,
         });
     }
 
@@ -585,7 +619,8 @@ impl Render for SettingsPage {
                               detail: &'static str,
                               input: &Entity<InputState>,
                               suffix: &'static str,
-                              divided: bool| {
+                              divided: bool,
+                              grouped: bool| {
             h_flex()
                 .w_full()
                 .items_center()
@@ -599,7 +634,12 @@ impl Render for SettingsPage {
                         .flex_1()
                         .min_w_0()
                         .gap_1()
-                        .child(div().font_medium().child(label))
+                        .child(
+                            div()
+                                .when(grouped, |this| this.text_sm())
+                                .font_medium()
+                                .child(label),
+                        )
                         .child(
                             div()
                                 .text_xs()
@@ -632,13 +672,21 @@ impl Render for SettingsPage {
                         .child(detail),
                 )
         };
+        let setting_group = || {
+            v_flex()
+                .gap_4()
+                .p_4()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+        };
         let frame_rate_setting = |label: &'static str, buttons: Vec<Button>| {
             h_flex()
                 .w_full()
                 .items_center()
                 .justify_between()
                 .gap_6()
-                .child(div().flex_1().min_w_0().child(label))
+                .child(div().flex_1().min_w_0().text_sm().child(label))
                 .child(h_flex().flex_none().w(px(320.)).gap_1().children(buttons))
         };
         let theme_picker = |prefix: &'static str, selected: ColorTheme, light: bool| {
@@ -951,6 +999,7 @@ impl Render for SettingsPage {
                                     &self.settings_inputs.audio_cache_limit,
                                     "GB",
                                     false,
+                                    false,
                                 )))
                                 .when(tab == SettingsTab::Playback, |this| this.child(
                                     v_flex()
@@ -963,42 +1012,70 @@ impl Render for SettingsPage {
                                 ))
                                 .when(tab == SettingsTab::Lyrics, |this| this.child(
                                     v_flex()
-                                        .gap_4()
-                                        .child(number_setting(
-                                            "歌词字号缩放",
-                                            "缩放主歌词、翻译与注音的文字大小，行高随之等比例调整",
-                                            &self.settings_inputs.lyric_font_scale,
-                                            "%",
-                                            false,
-                                        ))
-                                        .child(number_setting(
-                                            "歌词行间距",
-                                            "调整相邻歌词之间的留白",
-                                            &self.settings_inputs.lyric_line_spacing,
-                                            "%",
-                                            true,
-                                        ))
-                                        .child(number_setting(
-                                            "封面背景混色下限",
-                                            "为封面背景引入主题色调，封面背景至少会混入该比例的主题背景色",
-                                            &self.settings_inputs.lyric_background_min_overlay,
-                                            "%",
-                                            true,
-                                        ))
-                                        .child(number_setting(
-                                            "封面背景彩度上限",
-                                            "封面背景的最高彩度，如果最低混色后彩度高于上限会继续增加混合比例",
-                                            &self.settings_inputs.lyric_background_chroma,
-                                            "",
-                                            true,
-                                        ))
-                                        .child(number_setting(
-                                            "歌词文字对比度下限",
-                                            "混色后若歌词文字对比度低于此值则调整背景明度；实际可达值受主题颜色限制",
-                                            &self.settings_inputs.lyric_background_contrast,
-                                            "∶1",
-                                            true,
-                                        )),
+                                        .gap_3()
+                                        .child(setting_heading("歌词文字", "调整歌词的文字大小与排列"))
+                                        .child(
+                                            setting_group()
+                                                .child(number_setting(
+                                                    "字号缩放",
+                                                    "缩放主歌词、翻译与注音的文字大小，行高随之等比例调整",
+                                                    &self.settings_inputs.lyric_font_scale,
+                                                    "%",
+                                                    false,
+                                                    true,
+                                                ))
+                                                .child(number_setting(
+                                                    "行间距",
+                                                    "调整相邻歌词之间的留白",
+                                                    &self.settings_inputs.lyric_line_spacing,
+                                                    "%",
+                                                    false,
+                                                    true,
+                                                )),
+                                        ),
+                                ))
+                                .when(tab == SettingsTab::Lyrics, |this| this.child(
+                                    v_flex()
+                                        .gap_3()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(setting_heading("封面背景", "由当前封面模糊并调色生成，以下参数按顺序作用"))
+                                        .child(
+                                            setting_group()
+                                                .child(number_setting(
+                                                    "模糊程度",
+                                                    "高斯模糊半径占封面边长的比例，数值越大封面细节越少",
+                                                    &self.settings_inputs.lyric_background_blur,
+                                                    "%",
+                                                    false,
+                                                    true,
+                                                ))
+                                                .child(number_setting(
+                                                    "混色下限",
+                                                    "为封面背景引入主题色调，封面背景至少会混入该比例的主题背景色",
+                                                    &self.settings_inputs.lyric_background_min_overlay,
+                                                    "%",
+                                                    false,
+                                                    true,
+                                                ))
+                                                .child(number_setting(
+                                                    "彩度上限",
+                                                    "封面背景的最高彩度，如果最低混色后彩度高于上限会继续增加混合比例",
+                                                    &self.settings_inputs.lyric_background_chroma,
+                                                    "",
+                                                    false,
+                                                    true,
+                                                ))
+                                                .child(number_setting(
+                                                    "文字对比度下限",
+                                                    "混色后若歌词文字对比度低于此值则调整背景明度；实际可达值受主题颜色限制",
+                                                    &self.settings_inputs.lyric_background_contrast,
+                                                    "∶1",
+                                                    false,
+                                                    true,
+                                                )),
+                                        ),
                                 ))
                                 .when(tab == SettingsTab::Performance, |this| this.child(
                                     v_flex()
@@ -1009,6 +1086,7 @@ impl Render for SettingsPage {
                                             &self.settings_inputs.image_cache_capacity,
                                             "张",
                                             false,
+                                            false,
                                         ))
                                         .child(number_setting(
                                             "页面历史上限",
@@ -1016,6 +1094,7 @@ impl Render for SettingsPage {
                                             &self.settings_inputs.navigation_history_limit,
                                             "页",
                                             true,
+                                            false,
                                         )),
                                 ))
                                 .when(tab == SettingsTab::Performance, |this| this.child(
@@ -1111,11 +1190,13 @@ impl LyruneView {
                 min_overlay_percent,
                 chroma,
                 contrast,
+                blur_percent,
             } => {
                 let settings = &self.preferences.read(cx).settings;
                 if settings.lyric_background_min_overlay_percent == *min_overlay_percent
                     && settings.lyric_background_chroma == *chroma
                     && settings.lyric_background_contrast == *contrast
+                    && settings.lyric_background_blur_percent == *blur_percent
                 {
                     return;
                 }
@@ -1124,6 +1205,7 @@ impl LyruneView {
                         *min_overlay_percent;
                     preferences.settings.lyric_background_chroma = *chroma;
                     preferences.settings.lyric_background_contrast = *contrast;
+                    preferences.settings.lyric_background_blur_percent = *blur_percent;
                     cx.notify();
                 });
                 self.preferences.read(cx).save();
@@ -1578,11 +1660,15 @@ mod tests {
                     min_overlay_percent,
                     chroma,
                     contrast,
+                    blur_percent,
                 } = event
                 {
-                    received
-                        .borrow_mut()
-                        .push((*min_overlay_percent, *chroma, *contrast));
+                    received.borrow_mut().push((
+                        *min_overlay_percent,
+                        *chroma,
+                        *contrast,
+                        *blur_percent,
+                    ));
                 }
             })
         });
@@ -1590,15 +1676,19 @@ mod tests {
             [
                 (
                     page.settings_inputs.lyric_background_min_overlay.clone(),
-                    (45, 0.12, 4.),
+                    (45, 0.12, 4., 8),
                 ),
                 (
                     page.settings_inputs.lyric_background_chroma.clone(),
-                    (45, 0.13, 4.),
+                    (45, 0.13, 4., 8),
                 ),
                 (
                     page.settings_inputs.lyric_background_contrast.clone(),
-                    (45, 0.13, 4.1),
+                    (45, 0.13, 4.1, 8),
+                ),
+                (
+                    page.settings_inputs.lyric_background_blur.clone(),
+                    (45, 0.13, 4.1, 9),
                 ),
             ]
         });
@@ -1615,31 +1705,28 @@ mod tests {
         }
         actions.borrow_mut().clear();
         cx.simulate_keystrokes("ctrl-a");
-        cx.simulate_input("3.2");
+        cx.simulate_input("3");
         assert!(actions.borrow().is_empty());
         cx.simulate_keystrokes("enter");
-        assert_eq!(actions.borrow().last(), Some(&(45, 0.13, 3.2)));
+        assert_eq!(actions.borrow().last(), Some(&(45, 0.13, 4.1, 3)));
         cx.simulate_keystrokes("ctrl-a");
-        cx.simulate_input("6.5");
+        cx.simulate_input("6");
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let min_overlay = page.read_with(cx, |page, cx| {
             assert_eq!(
-                page.settings_inputs
-                    .lyric_background_contrast
-                    .read(cx)
-                    .value(),
-                "6.5"
+                page.settings_inputs.lyric_background_blur.read(cx).value(),
+                "6"
             );
             page.settings_inputs.lyric_background_min_overlay.clone()
         });
         cx.update(|window, cx| min_overlay.update(cx, |input, cx| input.focus(window, cx)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.run_until_parked();
-        assert_eq!(actions.borrow().last(), Some(&(45, 0.13, 6.5)));
+        assert_eq!(actions.borrow().last(), Some(&(45, 0.13, 4.1, 6)));
         cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("0");
         cx.simulate_keystrokes("enter");
-        assert_eq!(actions.borrow().last(), Some(&(0, 0.13, 6.5)));
+        assert_eq!(actions.borrow().last(), Some(&(0, 0.13, 4.1, 6)));
     }
 
     #[gpui::test]

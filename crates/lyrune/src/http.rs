@@ -97,6 +97,7 @@ struct BlurredCoverSource {
     min_overlay_percent: u32,
     chroma_bits: u32,
     contrast_bits: u32,
+    blur_percent: u32,
 }
 
 pub struct CachedImageCache {
@@ -241,6 +242,7 @@ impl BlurredCoverImage {
                 source.min_overlay_percent,
                 f32::from_bits(source.chroma_bits),
                 f32::from_bits(source.contrast_bits),
+                source.blur_percent,
             )?
             .to_image_data(svg_renderer)
         });
@@ -280,6 +282,7 @@ pub fn blurred_image_source(
     min_overlay_percent: u32,
     chroma: f32,
     contrast: f32,
+    blur_percent: u32,
 ) -> ImageSource {
     (move |window: &mut Window, cx: &mut App| {
         let path = match window.use_asset::<CachedImageFile>(&url, cx)? {
@@ -294,6 +297,7 @@ pub fn blurred_image_source(
                 min_overlay_percent,
                 chroma_bits: chroma.to_bits(),
                 contrast_bits: contrast.to_bits(),
+                blur_percent,
             },
             window,
             cx,
@@ -320,6 +324,7 @@ fn generate_blurred_cover(
     min_overlay_percent: u32,
     chroma: f32,
     contrast: f32,
+    blur_percent: u32,
 ) -> anyhow::Result<Arc<Image>> {
     let image = image::ImageReader::open(path)
         .context("无法打开待模糊的封面")?
@@ -329,7 +334,7 @@ fn generate_blurred_cover(
         .context("无法解码待模糊的封面")?;
     let blurred = image
         .resize_to_fill(BLURRED_COVER_SIZE, BLURRED_COVER_SIZE, FilterType::Triangle)
-        .blur(10.);
+        .blur((BLURRED_COVER_SIZE * blur_percent) as f32 / 100.);
     let blurred = tone_blurred_cover(
         blurred,
         background,
@@ -401,9 +406,10 @@ fn tone_blurred_cover(
             }
         }
     }
-    // 各通道的上下界同时覆盖局部亮斑和窗口裁剪变化，不依赖歌词当前所在的位置。
+    // 全图像素的亮度界同时覆盖局部亮斑和窗口裁剪变化，不依赖歌词当前所在的位置。
     let render = |amount: f32| {
-        let mut bounds = [[1_f32; 3], [0_f32; 3]];
+        let mut max_luminance = 0_f32;
+        let mut min_gray = 1_f32;
         let mut result = image::RgbImage::new(image.width(), image.height());
         for (pixel, color) in result.pixels_mut().zip(&colors) {
             let mut color = *color;
@@ -415,30 +421,22 @@ fn tone_blurred_cover(
             };
             let rgb = oklch_to_srgb(color);
             pixel.0 = [rgb.red, rgb.green, rgb.blue];
-            for (channel, value) in pixel.0.into_iter().enumerate() {
-                let value = f32::from(value) / 255.;
-                bounds[0][channel] = bounds[0][channel].min(value);
-                bounds[1][channel] = bounds[1][channel].max(value);
-            }
+            let [r, g, b] = pixel.0.map(|channel| f32::from(channel) / 255.);
+            max_luminance = max_luminance.max(relative_luminance(Rgba { r, g, b, a: 1. }));
+            min_gray = min_gray.min(0.2126 * r + 0.7152 * g + 0.0722 * b);
         }
-        let [r, g, b] = bounds[usize::from(light_foreground)];
-        let mut displayed = Rgba { r, g, b, a: 1. };
-        if !light_foreground {
+        let readable = if light_foreground {
+            max_luminance <= luminance_limit
+        } else {
             // sRGB 混色不是线性亮度混色。用加权灰阶的亮度下界约束浅色背景，
             // 使不同色相的封面在交叉渐变时仍有足够亮度承托深色文字。
-            let gray = 0.2126 * displayed.r + 0.7152 * displayed.g + 0.0722 * displayed.b;
-            displayed = Rgba {
-                r: gray,
-                g: gray,
-                b: gray,
+            let gray = Rgba {
+                r: min_gray,
+                g: min_gray,
+                b: min_gray,
                 a: 1.,
             };
-        }
-        let luminance = relative_luminance(displayed);
-        let readable = if light_foreground {
-            luminance <= luminance_limit
-        } else {
-            luminance >= luminance_limit
+            relative_luminance(gray) >= luminance_limit
         };
         (result, readable)
     };
@@ -718,8 +716,8 @@ mod tests {
 
     use super::*;
     use crate::settings::{
-        DEFAULT_LYRIC_BACKGROUND_CHROMA, DEFAULT_LYRIC_BACKGROUND_CONTRAST,
-        DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+        DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
+        DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
     };
 
     const LYRIC_TARGET_CONTRAST: f32 = DEFAULT_LYRIC_BACKGROUND_CONTRAST;
@@ -784,6 +782,7 @@ mod tests {
             min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
             chroma_bits: DEFAULT_LYRIC_BACKGROUND_CHROMA.to_bits(),
             contrast_bits: DEFAULT_LYRIC_BACKGROUND_CONTRAST.to_bits(),
+            blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
         };
         let second_path = root.join("second.png");
         std::fs::copy(&path, &second_path).unwrap();
@@ -1132,6 +1131,7 @@ mod tests {
             DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
             DEFAULT_LYRIC_BACKGROUND_CHROMA,
             DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+            DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
         )
         .unwrap();
         let decoded = image::load_from_memory(&blurred.bytes).unwrap();
@@ -1255,6 +1255,35 @@ mod tests {
             });
             assert_ne!(results[0], results[1]);
             assert_ne!(results[1], results[2]);
+        }
+    }
+
+    #[test]
+    fn test_blurred_cover_contrast_bound() {
+        for (background, foreground) in [(0x1f1f28, 0xdcd7ba), (0xf2ecbc, 0x545464)] {
+            let foreground = gpui::rgb(foreground);
+            let original = image::RgbImage::from_fn(2, 1, |x, _| {
+                image::Rgb(if x == 0 { [255, 0, 0] } else { [0, 0, 255] })
+            });
+            let toned = tone_blurred_cover(
+                original.into(),
+                gpui::rgb(background).into(),
+                foreground.into(),
+                0,
+                0.4,
+                6.,
+            );
+            let foreground_luminance = relative_luminance(foreground);
+            let contrast = toned
+                .pixels()
+                .map(|pixel| {
+                    let [r, g, b] = pixel.0.map(|channel| f32::from(channel) / 255.);
+                    let luminance = relative_luminance(Rgba { r, g, b, a: 1. });
+                    (foreground_luminance.max(luminance) + 0.05)
+                        / (foreground_luminance.min(luminance) + 0.05)
+                })
+                .fold(f32::INFINITY, f32::min);
+            assert!((6. ..6.3).contains(&contrast), "{contrast}");
         }
     }
 

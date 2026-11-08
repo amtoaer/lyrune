@@ -50,7 +50,7 @@ use self::{
     playback::{Playback, PlaybackEvent, PlaybackState},
     player_view::{PlayerAction, PlayerControlsView},
     preferences::Preferences,
-    progress_view::{PlaybackProgressView, SeekTo},
+    progress_view::PlaybackProgressView,
     settings::{SettingsAction, SettingsPage},
 };
 use crate::cache::{AudioCache, audio_cache_limit_bytes};
@@ -70,6 +70,9 @@ const ARTIST_ALBUM_PAGE_SIZE: u64 = 10;
 const SEARCH_PAGE_SIZE: usize = 20;
 const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
+
+/// 歌词行和进度滑块共用的跳转请求，由根视图转交播放实体。
+pub(super) struct SeekTo(pub(super) Duration);
 
 fn page_horizontal_padding(narrow: bool) -> Pixels {
     if narrow { px(20.) } else { px(24.) }
@@ -237,6 +240,10 @@ impl LyruneView {
                 this.handle_account_event(event, cx)
             }),
             cx.subscribe(&progress, |this, _, event: &SeekTo, cx| {
+                this.playback
+                    .update(cx, |playback, cx| playback.seek_to(event.0, cx));
+            }),
+            cx.subscribe(&lyrics_view, |this, _, event: &SeekTo, cx| {
                 this.playback
                     .update(cx, |playback, cx| playback.seek_to(event.0, cx));
             }),

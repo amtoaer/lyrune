@@ -13,6 +13,7 @@ use gpui_component::{
     slider::{SliderEvent, SliderState},
 };
 
+use super::SeekTo;
 use super::animation::frame_is_due;
 use super::progress_fraction;
 use crate::player::AudioPlayer;
@@ -27,8 +28,6 @@ pub(super) struct ProgressInput {
     pub(super) font: Font,
     pub(super) foreground: Hsla,
 }
-
-pub(super) struct SeekTo(pub(super) Duration);
 
 pub(super) struct PlaybackProgressView {
     slider: Entity<SliderState>,
@@ -453,7 +452,8 @@ mod tests {
     use gpui::{AppContext as _, MouseButton, TestAppContext, font, point, px};
     use gpui_component::{ActiveTheme as _, slider::SliderEvent};
 
-    use super::{PlaybackProgressView, ProgressInput, SeekTo};
+    use super::{PlaybackProgressView, ProgressInput};
+    use crate::app::SeekTo;
     use crate::settings::FrameRate;
 
     #[gpui::test]

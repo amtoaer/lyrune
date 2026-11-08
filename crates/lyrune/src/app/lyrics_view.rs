@@ -10,6 +10,7 @@ use gpui_component::{
 };
 
 use super::PLAYER_BAR_HEIGHT;
+use super::SeekTo;
 use super::animation::frame_is_due;
 #[cfg(test)]
 use super::lyrics;
@@ -89,6 +90,7 @@ pub(super) struct LyricLayoutCache {
 
 #[derive(Clone)]
 struct PreparedLyricRow {
+    start: Duration,
     top: Pixels,
     height: Pixels,
     normal: Arc<PreparedLyricLine>,
@@ -119,8 +121,9 @@ struct PreparedLyricsElement {
 pub(super) struct LyricMotionState {
     mid: String,
     scroll_from: f32,
+    scroll_target: f32,
     style_from: f32,
-    target: f32,
+    style_target: f32,
     started_at: Instant,
 }
 
@@ -133,21 +136,29 @@ impl LyricMotionState {
             .clamp(0., 1.)
     }
 
-    fn sample(&self, from: f32, progress: f32) -> f32 {
-        if from == self.target || progress >= 1. {
-            return self.target;
+    fn sample(from: f32, target: f32, progress: f32) -> f32 {
+        if from == target || progress >= 1. {
+            return target;
         }
-        from + (self.target - from) * progress
+        from + (target - from) * progress
     }
 
     fn scroll_anchor(&self, now: Instant) -> f32 {
         let progress = self.progress(LYRIC_SCROLL_DURATION, now);
-        self.sample(self.scroll_from, 1. - (1. - progress).powi(3))
+        Self::sample(
+            self.scroll_from,
+            self.scroll_target,
+            1. - (1. - progress).powi(3),
+        )
     }
 
     fn style_anchor(&self, now: Instant) -> f32 {
         let progress = self.progress(LYRIC_STYLE_DURATION, now);
-        self.sample(self.style_from, progress * progress * (3. - 2. * progress))
+        Self::sample(
+            self.style_from,
+            self.style_target,
+            progress * progress * (3. - 2. * progress),
+        )
     }
 }
 
@@ -944,6 +955,7 @@ pub(super) struct LyricsView {
     lyric_layout_cache: LyricLayoutCache,
     lyric_motion_state: Option<LyricMotionState>,
     cached_lyrics_panel: Option<CachedLyricsPanel>,
+    lyric_scroll_browse: Option<f32>,
     lyric_highlight_frame_pending: bool,
     lyric_scroll_frame_pending: bool,
     pending_lyric_reveal_mid: Option<String>,
@@ -956,6 +968,8 @@ pub(super) struct LyricsView {
 }
 
 impl EventEmitter<CollapseLyrics> for LyricsView {}
+
+impl EventEmitter<SeekTo> for LyricsView {}
 
 impl LyricsView {
     pub(super) fn new(audio: Option<Arc<AudioPlayer>>, font: Font) -> Self {
@@ -986,6 +1000,7 @@ impl LyricsView {
             lyric_layout_cache: LyricLayoutCache::default(),
             lyric_motion_state: None,
             cached_lyrics_panel: None,
+            lyric_scroll_browse: None,
             lyric_highlight_frame_pending: true,
             lyric_scroll_frame_pending: true,
             pending_lyric_reveal_mid: None,
@@ -1018,6 +1033,9 @@ impl LyricsView {
         {
             self.reset_lyric_animation_frames();
         }
+        if input.advancing && !self.input.advancing {
+            self.lyric_scroll_browse = None;
+        }
         let changed = self.input != input;
         self.input = input;
         self.position = position;
@@ -1036,6 +1054,7 @@ impl LyricsView {
 
     pub(super) fn start_track(&mut self, mid: &str, expanded: bool, cx: &mut Context<Self>) {
         self.lyric_motion_state = None;
+        self.lyric_scroll_browse = None;
         self.pending_lyric_reveal_mid = expanded.then(|| mid.to_owned());
         cx.notify();
     }
@@ -1061,7 +1080,7 @@ impl LyricsView {
         };
         // 动画时间结束后仍需采样最终位置，不能丢掉下一个限帧截止点的末帧。
         self.cached_lyrics_panel.as_ref().is_none_or(|cache| {
-            cache.scroll_anchor != state.target || cache.style_anchor != state.target
+            cache.scroll_anchor != state.scroll_target || cache.style_anchor != state.style_target
         })
     }
 
@@ -1117,14 +1136,14 @@ impl LyricsView {
     fn lyric_motion_anchors(
         &mut self,
         mid: &str,
-        target: usize,
+        scroll_target: f32,
+        style_target: f32,
         motion_enabled: bool,
         now: Instant,
     ) -> (f32, f32) {
-        let target = target as f32;
         if !motion_enabled {
             self.lyric_motion_state = None;
-            return (target, target);
+            return (scroll_target, style_target);
         }
 
         if self
@@ -1134,21 +1153,23 @@ impl LyricsView {
         {
             self.lyric_motion_state = Some(LyricMotionState {
                 mid: mid.to_owned(),
-                scroll_from: target,
-                style_from: target,
-                target,
+                scroll_from: scroll_target,
+                scroll_target,
+                style_from: style_target,
+                style_target,
                 started_at: now,
             });
-            return (target, target);
+            return (scroll_target, style_target);
         }
 
         let Some(state) = self.lyric_motion_state.as_mut() else {
-            return (target, target);
+            return (scroll_target, style_target);
         };
-        if state.target != target {
+        if state.scroll_target != scroll_target || state.style_target != style_target {
             state.scroll_from = state.scroll_anchor(now);
             state.style_from = state.style_anchor(now);
-            state.target = target;
+            state.scroll_target = scroll_target;
+            state.style_target = style_target;
             state.started_at = now;
         }
         (state.scroll_anchor(now), state.style_anchor(now))
@@ -1180,6 +1201,37 @@ impl LyricsView {
             });
         }
         true
+    }
+
+    fn scroll_lyrics(&mut self, delta: ScrollDelta, cx: &mut Context<Self>) {
+        let Some(cache) = self.cached_lyrics_panel.as_ref() else {
+            return;
+        };
+        let rows = &self.lyric_layout_cache.rows;
+        if rows.len() < 2 {
+            return;
+        }
+        let browse = self.lyric_scroll_browse.unwrap_or(cache.scroll_anchor);
+        let index = (browse.round() as usize).min(rows.len() - 2);
+        let pitch = (rows[index + 1].top - rows[index].top).max(px(1.));
+        let lines = match delta {
+            ScrollDelta::Pixels(delta) => -delta.y / pitch,
+            ScrollDelta::Lines(delta) => -delta.y,
+        };
+        let last = (rows.len() - 1) as f32;
+        let target = (browse + lines).clamp(0., last);
+        // 手动滚动期间不跟随播放行，滚回当前行附近才恢复，避免两个滚动互相拉扯。
+        let anchor = match &self.input.content {
+            LyricsContent::Ready(lyrics) => lyrics.active_index(self.position).unwrap_or(0) as f32,
+            _ => 0.,
+        };
+        self.lyric_scroll_browse = if (target - anchor).abs() < 1. {
+            None
+        } else {
+            Some(target)
+        };
+        self.lyric_scroll_frame_pending = true;
+        cx.notify();
     }
 
     fn render_lyrics_panel(
@@ -1241,6 +1293,7 @@ impl LyricsView {
         );
         if layout_changed {
             self.lyric_motion_state = None;
+            self.lyric_scroll_browse = None;
         }
 
         let render_distance = window.viewport_size().height * 0.65;
@@ -1256,8 +1309,10 @@ impl LyricsView {
             let active = Some(anchor);
             let now = cx.background_executor().now();
             let motion_enabled = self.input.visible && self.input.advancing && !cx.reduce_motion();
+            let scroll_target = self.lyric_scroll_browse.unwrap_or(anchor as f32);
+            // 浏览时滚动跟随手的位置，强调和高亮仍留在正在播放的那一行。
             let (scroll_anchor, style_anchor) =
-                self.lyric_motion_anchors(mid, anchor, motion_enabled, now);
+                self.lyric_motion_anchors(mid, scroll_target, anchor as f32, motion_enabled, now);
             // 一个通道到期只更新自己的采样；不能因另一通道更快而越过其帧率上限。
             let (scroll_anchor, style_anchor) =
                 if let Some(cache) = self.cached_lyrics_panel.as_ref().filter(|_| {
@@ -1299,7 +1354,8 @@ impl LyricsView {
                 .take(render_end - render_start)
                 .map(|(index, line)| {
                     let current = active == Some(index);
-                    let opacity = interpolated_lyric_line_opacity(style_anchor, index);
+                    let opacity = interpolated_lyric_line_opacity(scroll_anchor, index)
+                        .max(interpolated_lyric_line_opacity(style_anchor, index));
                     let emphasis = active.map_or(0., |_| {
                         (1. - (index as f32 - style_anchor).abs()).clamp(0., 1.)
                     });
@@ -1344,6 +1400,7 @@ impl LyricsView {
                         window,
                     );
                     PreparedLyricRow {
+                        start: line.start,
                         top: self.lyric_layout_cache.rows[index].top - render_offset,
                         height: self.lyric_layout_cache.rows[index].height,
                         normal,
@@ -1373,18 +1430,43 @@ impl LyricsView {
             .as_ref()
             .expect("lyrics panel cache initialized");
 
-        div()
+        let mut panel = div()
             .absolute()
             .top(relative(0.44))
             .left_0()
             .right_0()
             .mt(cached.render_offset - cached.scroll_offset)
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                this.scroll_lyrics(event.delta, cx)
+            }))
             .child(PreparedLyricsElement {
                 rows: cached.rows.clone(),
                 foreground,
                 position: cached.highlight_position,
-            })
-            .into_any_element()
+            });
+        // 点击层盖在自绘歌词上，并阻止冒泡，避免触发展开层根部的窗口拖动。
+        for (index, row) in cached.rows.iter().enumerate() {
+            let start = row.start;
+            panel = panel.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(row.top)
+                    .h(row.height)
+                    .cursor_pointer()
+                    .debug_selector(move || format!("lyric-seek-{index}"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.lyric_scroll_browse = None;
+                            cx.stop_propagation();
+                            cx.emit(SeekTo(start));
+                        }),
+                    ),
+            );
+        }
+        panel.into_any_element()
     }
 
     pub(super) fn render_cover_backdrop(
@@ -1665,6 +1747,7 @@ impl Render for LyricsView {
 #[cfg(test)]
 mod tests {
     use super::{LYRIC_TRACK_SWITCH_DURATION, LyricsContent, LyricsInput, LyricsView, lyrics};
+    use crate::app::SeekTo;
     use crate::settings::{
         DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
         DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, FrameRate,
@@ -1936,5 +2019,266 @@ mod tests {
                 assert_eq!(cache.scroll_anchor, 0.);
             });
         });
+    }
+
+    #[gpui::test]
+    fn test_clicking_lyric_line_seeks(cx: &mut TestAppContext) {
+        use std::{cell::RefCell, rc::Rc};
+
+        struct PanelHost(gpui::Entity<LyricsView>);
+        impl gpui::Render for PanelHost {
+            fn render(
+                &mut self,
+                window: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                self.0.update(cx, |view, cx| {
+                    view.render_lyrics_panel("test", white(), false, false, window, cx)
+                })
+            }
+        }
+
+        cx.update(gpui_component::init);
+        let view = cx.new(|_| LyricsView::new(None, font(".SystemUIFont")));
+        let seeks = Rc::new(RefCell::new(Vec::new()));
+        let received = seeks.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &SeekTo, _| {
+                received.borrow_mut().push(event.0)
+            })
+        });
+        let (_, cx) = cx.add_window_view(|_, _| PanelHost(view.clone()));
+        view.update(cx, |view, cx| {
+            view.set_input(
+                LyricsInput {
+                    mid: "test".into(),
+                    cover_url: None,
+                    duration: Some(Duration::from_secs(20)),
+                    content: LyricsContent::Ready(Arc::new(lyrics::parse_lyrics(
+                        "[00:00.00]first\n[00:10.00]second",
+                        None,
+                        None,
+                    ))),
+                    font: font(".SystemUIFont"),
+                    font_scale: 100,
+                    line_spacing: 100,
+                    background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+                    background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
+                    background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+                    background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
+                    highlight_frame_rate: FrameRate::Display,
+                    scroll_frame_rate: FrameRate::Display,
+                    advancing: false,
+                    expanded: true,
+                    visible: true,
+                },
+                Duration::ZERO,
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx.debug_bounds("lyric-seek-1").unwrap();
+        cx.simulate_click(row.center(), Default::default());
+        assert_eq!(*seeks.borrow(), [Duration::from_secs(10)]);
+    }
+
+    #[gpui::test]
+    fn test_wheel_scrolls_lyrics(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point};
+
+        struct PanelHost(gpui::Entity<LyricsView>);
+        impl gpui::Render for PanelHost {
+            fn render(
+                &mut self,
+                window: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                self.0.update(cx, |view, cx| {
+                    view.render_lyrics_panel("test", white(), false, false, window, cx)
+                })
+            }
+        }
+
+        cx.update(gpui_component::init);
+        let view = cx.new(|_| LyricsView::new(None, font(".SystemUIFont")));
+        let (_, cx) = cx.add_window_view(|_, _| PanelHost(view.clone()));
+        view.update(cx, |view, cx| {
+            view.set_input(
+                LyricsInput {
+                    mid: "test".into(),
+                    cover_url: None,
+                    duration: Some(Duration::from_secs(60)),
+                    content: LyricsContent::Ready(Arc::new(lyrics::parse_lyrics(
+                        "[00:00.00]first\n[00:10.00]second\n[00:20.00]third\n[00:30.00]fourth\n[00:40.00]fifth\n[00:50.00]sixth",
+                        None,
+                        None,
+                    ))),
+                    font: font(".SystemUIFont"),
+                    font_scale: 100,
+                    line_spacing: 100,
+                    background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+                    background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
+                    background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+                    background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
+                    highlight_frame_rate: FrameRate::Display,
+                    scroll_frame_rate: FrameRate::Display,
+                    advancing: false,
+                    expanded: true,
+                    visible: true,
+                },
+                Duration::ZERO,
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let before = view.read_with(cx, |view, _| {
+            view.cached_lyrics_panel.as_ref().unwrap().scroll_offset
+        });
+        let row = cx.debug_bounds("lyric-seek-2").unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: row.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.read_with(cx, |view, _| {
+            let cache = view.cached_lyrics_panel.as_ref().unwrap();
+            assert!(cache.scroll_offset > before);
+            assert_eq!(cache.scroll_offset, view.lyric_layout_cache.rows[5].anchor);
+        });
+    }
+
+    #[gpui::test]
+    fn test_wheel_scroll_toggles_following(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point};
+
+        struct PanelHost(gpui::Entity<LyricsView>);
+        impl gpui::Render for PanelHost {
+            fn render(
+                &mut self,
+                window: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                self.0.update(cx, |view, cx| {
+                    view.render_lyrics_panel("test", white(), false, false, window, cx)
+                })
+            }
+        }
+
+        cx.update(gpui_component::init);
+        let view = cx.new(|_| LyricsView::new(None, font(".SystemUIFont")));
+        let (_, cx) = cx.add_window_view(|_, _| PanelHost(view.clone()));
+        view.update(cx, |view, cx| {
+            view.set_input(
+                LyricsInput {
+                    mid: "test".into(),
+                    cover_url: None,
+                    duration: Some(Duration::from_secs(60)),
+                    content: LyricsContent::Ready(Arc::new(lyrics::parse_lyrics(
+                        "[00:00.00]first\n[00:10.00]second\n[00:20.00]third\n[00:30.00]fourth",
+                        None,
+                        None,
+                    ))),
+                    font: font(".SystemUIFont"),
+                    font_scale: 100,
+                    line_spacing: 100,
+                    background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+                    background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
+                    background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+                    background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
+                    highlight_frame_rate: FrameRate::Display,
+                    scroll_frame_rate: FrameRate::Display,
+                    advancing: true,
+                    expanded: true,
+                    visible: true,
+                },
+                Duration::from_secs(20),
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx.debug_bounds("lyric-seek-2").unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: row.center(),
+            delta: ScrollDelta::Lines(point(0., -3.)),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        view.read_with(cx, |view, _| assert_eq!(view.lyric_scroll_browse, Some(3.)));
+        cx.simulate_event(ScrollWheelEvent {
+            position: row.center(),
+            delta: ScrollDelta::Lines(point(0., 1.)),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        view.read_with(cx, |view, _| assert!(view.lyric_scroll_browse.is_none()));
+    }
+
+    #[gpui::test]
+    fn test_browsing_keeps_playing_line_emphasized(cx: &mut TestAppContext) {
+        use gpui::{ScrollDelta, point};
+
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, _| LyricsView::new(None, font(".SystemUIFont")));
+        view.update(cx, |view, cx| {
+            view.set_input(
+                LyricsInput {
+                    mid: "test".into(),
+                    cover_url: None,
+                    duration: Some(Duration::from_secs(60)),
+                    content: LyricsContent::Ready(Arc::new(lyrics::parse_lyrics(
+                        "[00:00.00]first\n[00:10.00]second\n[00:20.00]third\n[00:30.00]fourth",
+                        None,
+                        None,
+                    ))),
+                    font: font(".SystemUIFont"),
+                    font_scale: 100,
+                    line_spacing: 100,
+                    background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+                    background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
+                    background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
+                    background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
+                    highlight_frame_rate: FrameRate::Display,
+                    scroll_frame_rate: FrameRate::Display,
+                    advancing: true,
+                    expanded: true,
+                    visible: true,
+                },
+                Duration::from_secs(21),
+                cx,
+            );
+        });
+        let render = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                view.update(cx, |view, cx| {
+                    view.advance_lyric_frames(cx.background_executor().now(), false);
+                    let _ = view.render_lyrics_panel("test", white(), true, false, window, cx);
+                    view.cached_lyrics_panel
+                        .as_ref()
+                        .unwrap()
+                        .rows
+                        .iter()
+                        .map(|row| (row.start, row.emphasis, row.opacity))
+                        .collect::<Vec<_>>()
+                })
+            })
+        };
+        render(cx);
+        view.update(cx, |view, cx| {
+            view.scroll_lyrics(ScrollDelta::Lines(point(0., -3.)), cx)
+        });
+        render(cx);
+        cx.cx.executor().advance_clock(Duration::from_millis(400));
+        let rows = render(cx);
+        let row = |secs: u64| {
+            *rows
+                .iter()
+                .find(|(start, _, _)| *start == Duration::from_secs(secs))
+                .unwrap()
+        };
+        assert_eq!(row(20).1, 1.);
+        assert_eq!(row(30).1, 0.);
+        assert_eq!(row(30).2, 1.);
     }
 }

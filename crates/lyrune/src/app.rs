@@ -328,6 +328,11 @@ impl LyruneView {
                 this.preferences
                     .update(cx, |preferences, cx| preferences.apply_theme(window, cx))
             }),
+            cx.observe_window_visibility(window, |this, visibility, _, cx| {
+                this.lyrics_view.update(cx, |view, cx| {
+                    view.set_window_visible(visibility.is_visible(), cx)
+                });
+            }),
             cx.observe_window_bounds(window, |this, window, cx| {
                 let size = window.window_bounds().get_bounds().size;
                 let width = f32::from(size.width).round() as u32;

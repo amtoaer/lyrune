@@ -938,14 +938,51 @@ pub(super) struct LyricsInput {
 
 pub(super) struct CollapseLyrics;
 
+#[derive(Default)]
+struct BackdropSwitch {
+    current: Option<String>,
+    previous: Option<String>,
+    pending: Option<String>,
+    pending_animate: bool,
+    skip_animation: bool,
+    watching: bool,
+    crossfade_phase: bool,
+}
+
+impl BackdropSwitch {
+    fn watch(&mut self, watching: bool) {
+        if !watching {
+            self.skip_animation = true;
+        }
+        self.watching = watching;
+    }
+
+    fn request(&mut self, url: String) {
+        if self.current.as_ref() == Some(&url) {
+            return;
+        }
+        self.pending_animate = self.watching && !self.skip_animation;
+        self.pending = Some(url);
+    }
+
+    fn commit(&mut self) -> Option<bool> {
+        let url = self.pending.take()?;
+        let animate = self.current.is_some() && self.pending_animate;
+        self.previous = self.current.replace(url).filter(|_| animate);
+        if animate {
+            self.crossfade_phase = !self.crossfade_phase;
+        }
+        self.skip_animation = false;
+        Some(animate)
+    }
+}
+
 pub(super) struct LyricsView {
     input: LyricsInput,
     audio: Option<Arc<AudioPlayer>>,
     position: Duration,
-    backdrop_current_url: Option<String>,
-    backdrop_previous_url: Option<String>,
-    backdrop_pending_url: Option<String>,
-    backdrop_crossfade_phase: bool,
+    backdrop: BackdropSwitch,
+    window_visible: bool,
     lyric_layout_cache: LyricLayoutCache,
     lyric_motion_state: Option<LyricMotionState>,
     cached_lyrics_panel: Option<CachedLyricsPanel>,
@@ -985,10 +1022,8 @@ impl LyricsView {
             },
             audio,
             position: Duration::ZERO,
-            backdrop_current_url: None,
-            backdrop_previous_url: None,
-            backdrop_pending_url: None,
-            backdrop_crossfade_phase: false,
+            backdrop: BackdropSwitch::default(),
+            window_visible: true,
             lyric_layout_cache: LyricLayoutCache::default(),
             lyric_motion_state: None,
             cached_lyrics_panel: None,
@@ -1010,17 +1045,9 @@ impl LyricsView {
         position: Duration,
         cx: &mut Context<Self>,
     ) {
-        if let Some(url) = &input.cover_url
-            && self.backdrop_current_url.as_ref() != Some(url)
-        {
-            self.backdrop_pending_url = Some(url.clone());
-        }
-        // 展开时直接显示当前背景，不播放过渡。
-        if input.visible && !self.input.visible {
-            if let Some(url) = self.backdrop_pending_url.take() {
-                self.backdrop_current_url = Some(url);
-            }
-            self.backdrop_previous_url = None;
+        self.backdrop.watch(input.visible && self.window_visible);
+        if let Some(url) = &input.cover_url {
+            self.backdrop.request(url.clone());
         }
         let position_changed = self.position != position && !input.advancing;
         if position_changed
@@ -1038,14 +1065,11 @@ impl LyricsView {
         }
     }
 
-    fn promote_pending_backdrop(&mut self) {
-        let Some(url) = self.backdrop_pending_url.take() else {
-            return;
-        };
-        let crossfade = self.backdrop_current_url.is_some();
-        self.backdrop_previous_url = self.backdrop_current_url.replace(url);
-        if crossfade {
-            self.backdrop_crossfade_phase = !self.backdrop_crossfade_phase;
+    pub(super) fn set_window_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.window_visible = visible;
+        self.backdrop.watch(visible && self.input.visible);
+        if visible {
+            cx.notify();
         }
     }
 
@@ -1437,19 +1461,17 @@ impl LyricsView {
         };
 
         // 就绪后才切换，避免中途褪到主题底色。
-        if let Some(url) = self.backdrop_pending_url.clone()
-            && self.input.visible
-            && blurred_cover_image(&url, backdrop_style, window, cx).is_some()
+        if let Some(url) = self.backdrop.pending.clone()
+            && (!self.backdrop.watching
+                || blurred_cover_image(&url, backdrop_style, window, cx).is_some())
         {
-            self.promote_pending_backdrop();
+            self.backdrop.commit();
         }
 
         match self.input.cover_url.clone() {
             Some(url) => {
-                let current_backdrop_url = self
-                    .backdrop_current_url
-                    .clone()
-                    .unwrap_or_else(|| url.clone());
+                let current_backdrop_url =
+                    self.backdrop.current.clone().unwrap_or_else(|| url.clone());
                 let track_transition_duration = if self.input.expanded {
                     LYRIC_TRACK_SWITCH_DURATION
                 } else {
@@ -1457,7 +1479,7 @@ impl LyricsView {
                 };
                 let crossfade = transition(
                     ("cover-backdrop", "track-crossfade"),
-                    if self.backdrop_crossfade_phase {
+                    if self.backdrop.crossfade_phase {
                         1.
                     } else {
                         0.
@@ -1466,16 +1488,16 @@ impl LyricsView {
                     window,
                     cx,
                 );
-                let current_backdrop_opacity = if self.backdrop_crossfade_phase {
+                let current_backdrop_opacity = if self.backdrop.crossfade_phase {
                     crossfade
                 } else {
                     1. - crossfade
                 };
                 let previous_backdrop_opacity = 1. - current_backdrop_opacity;
                 if previous_backdrop_opacity == 0. {
-                    self.backdrop_previous_url = None;
+                    self.backdrop.previous = None;
                 }
-                let previous_backdrop_url = self.backdrop_previous_url.clone();
+                let previous_backdrop_url = self.backdrop.previous.clone();
                 let cover_url = url.clone();
                 let lyrics = if defer_new_lyrics {
                     div().into_any_element()
@@ -1688,128 +1710,42 @@ impl Render for LyricsView {
 
 #[cfg(test)]
 mod tests {
-    use super::{LYRIC_TRACK_SWITCH_DURATION, LyricsContent, LyricsInput, LyricsView, lyrics};
+    use super::{BackdropSwitch, LyricsContent, LyricsInput, LyricsView, lyrics};
     use crate::settings::{
         DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
         DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, FrameRate,
     };
-    use gpui::{AppContext as _, TestAppContext, VisualTestContext, font, px, white};
+    use gpui::{TestAppContext, VisualTestContext, font, px, white};
     use std::sync::Arc;
     use std::time::Duration;
 
-    #[gpui::test]
-    fn test_backdrop_crossfade(cx: &mut TestAppContext) {
-        struct BackdropHost(gpui::Entity<LyricsView>);
-        impl gpui::Render for BackdropHost {
-            fn render(
-                &mut self,
-                window: &mut gpui::Window,
-                cx: &mut gpui::Context<Self>,
-            ) -> impl gpui::IntoElement {
-                self.0.update(cx, |view, cx| {
-                    let _ = view.render_cover_backdrop(window, cx);
-                });
-                gpui::div()
-            }
-        }
-        cx.update(gpui_component::init);
-        let (host, cx) = cx.add_window_view(|_, cx| {
-            BackdropHost(cx.new(|_| LyricsView::new(None, font(".SystemUIFont"))))
-        });
-        let view = cx.update(|_, cx| host.read(cx).0.clone());
-        let switch = |url: &str, expanded, cx: &mut VisualTestContext| {
-            view.update(cx, |view, cx| {
-                view.set_input(
-                    LyricsInput {
-                        cover_url: Some(url.into()),
-                        expanded,
-                        ..LyricsView::new(None, font(".SystemUIFont")).input
-                    },
-                    Duration::ZERO,
-                    cx,
-                );
-            });
-        };
-        let frame = |cx: &mut VisualTestContext| {
-            cx.update(|window, _| window.refresh());
-            cx.run_until_parked();
-        };
-        let backdrop = |cx: &mut VisualTestContext| {
-            cx.update(|_, cx| {
-                let view = view.read(cx);
-                (
-                    view.backdrop_previous_url.clone(),
-                    view.backdrop_pending_url.clone(),
-                )
-            })
-        };
-        let promote = |cx: &mut VisualTestContext| {
-            view.update(cx, |view, _| view.promote_pending_backdrop());
-            frame(cx);
-        };
-        let current_backdrop = |cx: &mut VisualTestContext| {
-            cx.update(|_, cx| view.read(cx).backdrop_current_url.clone())
-        };
-        let show = |url: &str, cx: &mut VisualTestContext| {
-            view.update(cx, |view, cx| {
-                view.set_input(
-                    LyricsInput {
-                        cover_url: Some(url.into()),
-                        visible: true,
-                        ..LyricsView::new(None, font(".SystemUIFont")).input
-                    },
-                    Duration::ZERO,
-                    cx,
-                );
-            });
-        };
+    #[test]
+    fn test_backdrop_switch() {
+        let mut backdrop = BackdropSwitch::default();
+        backdrop.watch(true);
 
-        switch("first", true, cx);
-        assert_eq!(backdrop(cx), (None, Some("first".to_owned())));
-        switch("first", true, cx);
-        assert_eq!(backdrop(cx), (None, Some("first".to_owned())));
+        backdrop.request("first".to_owned());
+        assert_eq!(backdrop.commit(), Some(false));
 
-        promote(cx);
-        assert_eq!(backdrop(cx), (None, None));
-        assert!(!cx.update(|_, cx| view.read(cx).backdrop_crossfade_phase));
-        cx.cx.executor().advance_clock(LYRIC_TRACK_SWITCH_DURATION);
-        frame(cx);
+        backdrop.request("second".to_owned());
+        assert_eq!(backdrop.commit(), Some(true));
+        assert_eq!(backdrop.previous.as_deref(), Some("first"));
+        assert_eq!(backdrop.current.as_deref(), Some("second"));
 
-        for (previous, current) in [("first", "second"), ("second", "third")] {
-            switch(current, true, cx);
-            assert_eq!(backdrop(cx), (None, Some(current.to_owned())));
-            promote(cx);
-            assert_eq!(backdrop(cx).0.as_deref(), Some(previous));
-            cx.cx
-                .executor()
-                .advance_clock(LYRIC_TRACK_SWITCH_DURATION / 2);
-            frame(cx);
-            assert_eq!(backdrop(cx).0.as_deref(), Some(previous));
-            cx.cx
-                .executor()
-                .advance_clock(LYRIC_TRACK_SWITCH_DURATION / 2);
-            frame(cx);
-            assert_eq!(backdrop(cx), (None, None));
-        }
+        backdrop.watch(false);
+        backdrop.request("third".to_owned());
+        backdrop.watch(true);
+        assert_eq!(backdrop.commit(), Some(false));
+        assert_eq!(backdrop.previous, None);
 
-        switch("fourth", true, cx);
-        promote(cx);
-        assert_eq!(backdrop(cx).0.as_deref(), Some("third"));
-        cx.cx
-            .executor()
-            .advance_clock(LYRIC_TRACK_SWITCH_DURATION / 2);
-        frame(cx);
+        backdrop.watch(false);
+        backdrop.watch(true);
+        backdrop.request("fourth".to_owned());
+        assert_eq!(backdrop.commit(), Some(false));
+        assert_eq!(backdrop.previous, None);
 
-        switch("fourth", false, cx);
-        promote(cx);
-        assert_eq!(backdrop(cx), (None, None));
-
-        switch("fifth", false, cx);
-        assert_eq!(backdrop(cx), (None, Some("fifth".to_owned())));
-        show("fifth", cx);
-        frame(cx);
-        assert_eq!(backdrop(cx), (None, None));
-        assert_eq!(current_backdrop(cx).as_deref(), Some("fifth"));
+        backdrop.request("fourth".to_owned());
+        assert_eq!(backdrop.commit(), None);
     }
 
     #[gpui::test]

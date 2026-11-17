@@ -279,35 +279,44 @@ pub fn cached_image_source(url: String, size: Pixels, scale_factor: f32) -> Imag
     }
 }
 
-pub fn blurred_image_source(
-    url: String,
-    background: Hsla,
-    foreground: Hsla,
-    min_overlay_percent: u32,
-    chroma: f32,
-    contrast: f32,
-    blur_percent: u32,
-) -> ImageSource {
-    (move |window: &mut Window, cx: &mut App| {
-        let path = match window.use_asset::<CachedImageFile>(&url, cx)? {
-            Ok(path) => path,
-            Err(error) => return Some(Err(error)),
-        };
-        blurred_cover(
-            BlurredCoverSource {
-                path,
-                background,
-                foreground,
-                min_overlay_percent,
-                chroma_bits: chroma.to_bits(),
-                contrast_bits: contrast.to_bits(),
-                blur_percent,
-            },
-            window,
-            cx,
-        )
-    })
-    .into()
+#[derive(Clone, Copy)]
+pub struct BlurredCoverStyle {
+    pub background: Hsla,
+    pub foreground: Hsla,
+    pub min_overlay_percent: u32,
+    pub chroma: f32,
+    pub contrast: f32,
+    pub blur_percent: u32,
+}
+
+pub fn blurred_image_source(url: String, style: BlurredCoverStyle) -> ImageSource {
+    (move |window: &mut Window, cx: &mut App| blurred_cover_image(&url, style, window, cx)).into()
+}
+
+/// 取模糊背景图：`None` 表示仍在生成，`Some(Err)` 表示无法生成。
+pub(crate) fn blurred_cover_image(
+    url: &str,
+    style: BlurredCoverStyle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+    let path = match window.use_asset::<CachedImageFile>(&url.to_owned(), cx)? {
+        Ok(path) => path,
+        Err(error) => return Some(Err(error)),
+    };
+    blurred_cover(
+        BlurredCoverSource {
+            path,
+            background: style.background,
+            foreground: style.foreground,
+            min_overlay_percent: style.min_overlay_percent,
+            chroma_bits: style.chroma.to_bits(),
+            contrast_bits: style.contrast.to_bits(),
+            blur_percent: style.blur_percent,
+        },
+        window,
+        cx,
+    )
 }
 
 fn blurred_cover(

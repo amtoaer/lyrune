@@ -289,10 +289,6 @@ pub struct BlurredCoverStyle {
     pub blur_percent: u32,
 }
 
-pub fn blurred_image_source(url: String, style: BlurredCoverStyle) -> ImageSource {
-    (move |window: &mut Window, cx: &mut App| blurred_cover_image(&url, style, window, cx)).into()
-}
-
 /// 取模糊背景图：`None` 表示仍在生成，`Some(Err)` 表示无法生成。
 pub(crate) fn blurred_cover_image(
     url: &str,
@@ -378,20 +374,9 @@ fn resize_cover(
     height: u32,
     options: &ResizeOptions,
 ) -> anyhow::Result<image::DynamicImage> {
-    let mut resizer = Resizer::new();
-    match image {
-        image::DynamicImage::ImageRgb8(source) => {
-            let mut target = image::RgbImage::new(width, height);
-            resizer.resize(source, &mut target, options)?;
-            Ok(image::DynamicImage::ImageRgb8(target))
-        }
-        source => {
-            let source = source.to_rgba8();
-            let mut target = image::RgbaImage::new(width, height);
-            resizer.resize(&source, &mut target, options)?;
-            Ok(image::DynamicImage::ImageRgba8(target))
-        }
-    }
+    let mut target = image::DynamicImage::new(width, height, image.color());
+    Resizer::new().resize(image, &mut target, options)?;
+    Ok(target)
 }
 
 fn cover_options() -> ResizeOptions {

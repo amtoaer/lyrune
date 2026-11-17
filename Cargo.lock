@@ -1883,6 +1883,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
 
 [[package]]
+name = "fast_image_resize"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9c50201dc184ba6553da1695aac20a042efffbe2d84542cee31917c86c3ab1e"
+dependencies = [
+ "bytemuck",
+ "cfg-if",
+ "document-features",
+ "image",
+ "num-traits",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3954,6 +3968,7 @@ dependencies = [
  "ashpd",
  "bytes",
  "directories",
+ "fast_image_resize",
  "futures-util",
  "gpui-base",
  "gpui-component",
@@ -3979,6 +3994,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "smallvec",
  "stream-download",
  "symphonia",
  "tokio",

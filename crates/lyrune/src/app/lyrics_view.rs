@@ -281,8 +281,11 @@ impl PreparedLyricLine {
     ) -> Self {
         let active = style == LyricLayoutStyle::Active;
         let font_size = lyric_font_size(style, compact, scale);
-        let ruby_font_size = (if narrow { px(11.) } else { px(12.) }) * scale;
-        let ruby_line_height = ruby_line_height(line, narrow, scale);
+        // ruby 尺寸以当前行为基准，随正文字号等比缩放。
+        let ruby_scale = scale * f32::from(font_size)
+            / f32::from(lyric_font_size(LyricLayoutStyle::Active, compact, scale));
+        let ruby_font_size = (if narrow { px(11.) } else { px(12.) }) * ruby_scale;
+        let ruby_line_height = ruby_line_height(line, narrow, ruby_scale);
         let mut font = configured_font.clone();
         font.weight = if active {
             FontWeight::BOLD
@@ -390,7 +393,7 @@ impl PreparedLyricLine {
         fragment
             .ruby_layout
             .as_ref()
-            .map_or(text_width, |ruby| text_width.max(ruby.width))
+            .map_or(text_width, |ruby| text_width.max(ruby.width * scale))
     }
 
     fn width(&self, scale: f32) -> Pixels {
@@ -637,9 +640,10 @@ impl PreparedLyricsElement {
 
         let scale = f32::from(target_font_size) / f32::from(line.font_size);
         let line_height = line.line_height * scale;
-        let height = line.ruby_line_height + line_height;
+        let ruby_line_height = line.ruby_line_height * scale;
+        let height = ruby_line_height + line_height;
         let origin = point(origin.x, origin.y + (bounds.size.height - height) / 2.);
-        let base_origin_y = origin.y + line.ruby_line_height;
+        let base_origin_y = origin.y + ruby_line_height;
         let base_color = foreground.opacity(
             opacity
                 * if style == LyricLayoutStyle::Active && line.has_word_timing {
@@ -654,10 +658,7 @@ impl PreparedLyricsElement {
 
         for fragment in &line.fragments {
             let text_width = fragment.layout.width * scale;
-            let fragment_width = fragment
-                .ruby_layout
-                .as_ref()
-                .map_or(text_width, |ruby| text_width.max(ruby.width));
+            let fragment_width = PreparedLyricLine::fragment_width(fragment, scale);
             let text_origin = point(x + (fragment_width - text_width) / 2., base_origin_y);
             if style == LyricLayoutStyle::Active && line.has_word_timing {
                 if let Some((start, end)) = fragment.timing {
@@ -733,10 +734,10 @@ impl PreparedLyricsElement {
             if let Some(ruby) = &fragment.ruby_layout {
                 Self::paint_layout(
                     ruby,
-                    point(x + (fragment_width - ruby.width) / 2., origin.y),
-                    line.ruby_line_height,
+                    point(x + (fragment_width - ruby.width * scale) / 2., origin.y),
+                    ruby_line_height,
                     ruby_color,
-                    1.,
+                    scale,
                     window,
                 )?;
             }

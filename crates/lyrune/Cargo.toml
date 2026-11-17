@@ -35,6 +35,7 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 stream-download.workspace = true
+symphonia.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 wana_kana.workspace = true

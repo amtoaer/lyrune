@@ -29,8 +29,10 @@ const LYRIC_EDGE_FADE_DISTANCE: f32 = 48.;
 const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
 // 跨多行的跳转按距离延长动画，一行仍是基准时长。
-const LYRIC_DISTANCE_SCALE_PER_LINE: f32 = 0.1;
-const LYRIC_MAX_DURATION_SCALE: f32 = 1.6;
+const LYRIC_DISTANCE_SCALE_PER_LINE: f32 = 0.04;
+const LYRIC_MAX_DURATION_SCALE: f32 = 1.2;
+// 超过这个行数的跳转改用先加速后减速的缓动，避免起步阶段一下冲出去很远。
+const LYRIC_EASE_IN_OUT_LINES: f32 = 2.;
 pub(super) const LYRIC_EXPANSION_DURATION: Duration = Duration::from_millis(480);
 const LYRIC_TRACK_SWITCH_DURATION: Duration = Duration::from_millis(420);
 const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
@@ -152,7 +154,12 @@ impl LyricMotionState {
 
     fn scroll_anchor(&self, now: Instant) -> f32 {
         let progress = self.progress(LYRIC_SCROLL_DURATION.mul_f32(self.duration_scale()), now);
-        self.sample(self.scroll_from, 1. - (1. - progress).powi(3))
+        let eased = if (self.target - self.scroll_from).abs() > LYRIC_EASE_IN_OUT_LINES {
+            progress * progress * (3. - 2. * progress)
+        } else {
+            1. - (1. - progress).powi(3)
+        };
+        self.sample(self.scroll_from, eased)
     }
 
     fn style_anchor(&self, now: Instant) -> f32 {
@@ -1928,6 +1935,14 @@ mod tests {
             &state(0., 100.),
             LYRIC_SCROLL_DURATION.mul_f32(LYRIC_MAX_DURATION_SCALE)
         ));
+
+        // 远距离跳转起步不再比平均速度快；近距离仍然起步最快。
+        let early = started_at + LYRIC_SCROLL_DURATION.mul_f32(LYRIC_MAX_DURATION_SCALE / 10.);
+        let far = state(0., 100.);
+        assert!(far.scroll_anchor(early) < far.target / 10.);
+        let near = state(0., 1.);
+        let early = started_at + LYRIC_SCROLL_DURATION / 10;
+        assert!(near.scroll_anchor(early) > near.target / 10.);
     }
 
     #[gpui::test]

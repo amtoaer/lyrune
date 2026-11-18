@@ -1,19 +1,17 @@
-use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use directories::ProjectDirs;
+use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 use futures_util::{AsyncReadExt as _, future::BoxFuture};
 use gpui::http_client::{self, AsyncBody, HttpClient, Request, Response, Url};
 use gpui::{
-    App, AppContext as _, Asset, Context, Entity, Hsla, Image, ImageCache, ImageCacheError,
-    ImageCacheItem, ImageFormat, ImageSource, Pixels, RenderImage, Resource, Rgba, Task, Window,
-    hash,
+    App, AppContext as _, Asset, Context, Entity, Hsla, ImageCache, ImageCacheError,
+    ImageCacheItem, ImageSource, Pixels, RenderImage, Resource, Rgba, Task, Window, hash,
 };
-use image::imageops::FilterType;
 use lru::LruCache;
 use palette::{
     FromColor, IsWithinBounds, LinSrgb, Oklab, Oklch, Srgb, convert::FromColorUnclamped,
@@ -25,6 +23,14 @@ use crate::runtime::RUNTIME;
 const IMAGE_CACHE_DIR: &str = "images-v1";
 const THUMBNAIL_CACHE_DIR: &str = "thumbnails-v1";
 pub(crate) const BLURRED_COVER_SIZE: u32 = 128;
+
+static SRGB_TO_LINEAR: LazyLock<[f32; 256]> = LazyLock::new(|| {
+    let mut table = [0_f32; 256];
+    for (value, entry) in table.iter_mut().enumerate() {
+        *entry = srgb_to_linear(value as f32 / 255.);
+    }
+    table
+});
 
 #[derive(Clone)]
 enum CachedImageFile {}
@@ -233,7 +239,6 @@ impl ImageCache for CachedImageCache {
 
 impl BlurredCoverImage {
     fn new(source: BlurredCoverSource, cx: &mut Context<Self>) -> Self {
-        let svg_renderer = cx.svg_renderer();
         let task = cx.background_executor().spawn(async move {
             generate_blurred_cover(
                 &source.path,
@@ -243,8 +248,7 @@ impl BlurredCoverImage {
                 f32::from_bits(source.chroma_bits),
                 f32::from_bits(source.contrast_bits),
                 source.blur_percent,
-            )?
-            .to_image_data(svg_renderer)
+            )
         });
         let task = cx.spawn(async move |this, cx| {
             let image = task.await.map_err(ImageCacheError::from);
@@ -275,35 +279,40 @@ pub fn cached_image_source(url: String, size: Pixels, scale_factor: f32) -> Imag
     }
 }
 
-pub fn blurred_image_source(
-    url: String,
-    background: Hsla,
-    foreground: Hsla,
-    min_overlay_percent: u32,
-    chroma: f32,
-    contrast: f32,
-    blur_percent: u32,
-) -> ImageSource {
-    (move |window: &mut Window, cx: &mut App| {
-        let path = match window.use_asset::<CachedImageFile>(&url, cx)? {
-            Ok(path) => path,
-            Err(error) => return Some(Err(error)),
-        };
-        blurred_cover(
-            BlurredCoverSource {
-                path,
-                background,
-                foreground,
-                min_overlay_percent,
-                chroma_bits: chroma.to_bits(),
-                contrast_bits: contrast.to_bits(),
-                blur_percent,
-            },
-            window,
-            cx,
-        )
-    })
-    .into()
+#[derive(Clone, Copy)]
+pub struct BlurredCoverStyle {
+    pub background: Hsla,
+    pub foreground: Hsla,
+    pub min_overlay_percent: u32,
+    pub chroma: f32,
+    pub contrast: f32,
+    pub blur_percent: u32,
+}
+
+/// 取模糊背景图：`None` 表示仍在生成，`Some(Err)` 表示无法生成。
+pub(crate) fn blurred_cover_image(
+    url: &str,
+    style: BlurredCoverStyle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+    let path = match window.use_asset::<CachedImageFile>(&url.to_owned(), cx)? {
+        Ok(path) => path,
+        Err(error) => return Some(Err(error)),
+    };
+    blurred_cover(
+        BlurredCoverSource {
+            path,
+            background: style.background,
+            foreground: style.foreground,
+            min_overlay_percent: style.min_overlay_percent,
+            chroma_bits: style.chroma.to_bits(),
+            contrast_bits: style.contrast.to_bits(),
+            blur_percent: style.blur_percent,
+        },
+        window,
+        cx,
+    )
 }
 
 fn blurred_cover(
@@ -325,16 +334,20 @@ fn generate_blurred_cover(
     chroma: f32,
     contrast: f32,
     blur_percent: u32,
-) -> anyhow::Result<Arc<Image>> {
+) -> anyhow::Result<Arc<RenderImage>> {
     let image = image::ImageReader::open(path)
         .context("无法打开待模糊的封面")?
         .with_guessed_format()
         .context("无法识别封面格式")?
         .decode()
         .context("无法解码待模糊的封面")?;
-    let blurred = image
-        .resize_to_fill(BLURRED_COVER_SIZE, BLURRED_COVER_SIZE, FilterType::Triangle)
-        .blur((BLURRED_COVER_SIZE * blur_percent) as f32 / 100.);
+    let cover = resize_cover(
+        &image,
+        BLURRED_COVER_SIZE,
+        BLURRED_COVER_SIZE,
+        &cover_options(),
+    )?;
+    let blurred = cover.blur((BLURRED_COVER_SIZE * blur_percent) as f32 / 100.);
     let blurred = tone_blurred_cover(
         blurred,
         background,
@@ -343,14 +356,34 @@ fn generate_blurred_cover(
         chroma,
         contrast,
     );
-    let mut bytes = Cursor::new(Vec::new());
-    blurred
-        .write_to(&mut bytes, image::ImageFormat::Png)
-        .context("无法编码模糊封面")?;
-    Ok(Arc::new(Image::from_bytes(
-        ImageFormat::Png,
-        bytes.into_inner(),
-    )))
+    let frame = image::Frame::new(to_bgra(blurred));
+    Ok(Arc::new(RenderImage::new(smallvec::smallvec![frame])))
+}
+
+fn to_bgra(image: image::RgbImage) -> image::RgbaImage {
+    let mut bgra = image::RgbaImage::new(image.width(), image.height());
+    for (target, source) in bgra.pixels_mut().zip(image.pixels()) {
+        target.0 = [source[2], source[1], source[0], 255];
+    }
+    bgra
+}
+
+fn resize_cover(
+    image: &image::DynamicImage,
+    width: u32,
+    height: u32,
+    options: &ResizeOptions,
+) -> anyhow::Result<image::DynamicImage> {
+    let mut target = image::DynamicImage::new(width, height, image.color());
+    Resizer::new().resize(image, &mut target, options)?;
+    Ok(target)
+}
+
+fn cover_options() -> ResizeOptions {
+    ResizeOptions::default()
+        .fit_into_destination(None)
+        .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
+        .use_alpha(false)
 }
 
 fn tone_blurred_cover(
@@ -376,92 +409,114 @@ fn tone_blurred_cover(
     // 混色只能收敛到主题底色；给后续 8 位量化留少量彩度余量。
     let chroma_limit = (chroma - 0.002).max(background_chroma);
     let pixels = image.to_rgba8();
-    let mix = |amount: f32| {
-        pixels
-            .pixels()
-            .map(|pixel| {
-                let alpha = f32::from(pixel[3]) / 255. * (1. - amount);
-                Oklch::from_color(Srgb::new(
-                    f32::from(pixel[0]) / 255. * alpha + background.r * (1. - alpha),
-                    f32::from(pixel[1]) / 255. * alpha + background.g * (1. - alpha),
-                    f32::from(pixel[2]) / 255. * alpha + background.b * (1. - alpha),
-                ))
-            })
-            .collect::<Vec<Oklch>>()
+    let blend = |amount: f32, pixel: &image::Rgba<u8>| {
+        let alpha = f32::from(pixel[3]) / 255. * (1. - amount);
+        Oklab::from_color(Srgb::new(
+            f32::from(pixel[0]) / 255. * alpha + background.r * (1. - alpha),
+            f32::from(pixel[1]) / 255. * alpha + background.g * (1. - alpha),
+            f32::from(pixel[2]) / 255. * alpha + background.b * (1. - alpha),
+        ))
+    };
+    let within_chroma = |amount: f32| {
+        pixels.pixels().all(|pixel| {
+            let color = blend(amount, pixel);
+            color.a.hypot(color.b) <= chroma_limit
+        })
     };
     let min_overlay = min_overlay_percent as f32 / 100.;
-    let mut colors = mix(min_overlay);
-    if colors.iter().any(|color| color.chroma > chroma_limit) {
+    let mut amount = min_overlay;
+    if !within_chroma(min_overlay) {
         let mut lower = min_overlay;
         let mut upper = 1.;
-        colors = mix(1.);
+        amount = 1.;
         for _ in 0..12 {
-            let amount = (lower + upper) / 2.;
-            let candidate = mix(amount);
-            if candidate.iter().all(|color| color.chroma <= chroma_limit) {
-                upper = amount;
-                colors = candidate;
+            let middle = (lower + upper) / 2.;
+            if within_chroma(middle) {
+                upper = middle;
+                amount = middle;
             } else {
-                lower = amount;
+                lower = middle;
             }
         }
     }
+    let colors = pixels
+        .pixels()
+        .map(|pixel| blend(amount, pixel))
+        .collect::<Vec<Oklab>>();
     // 全图像素的亮度界同时覆盖局部亮斑和窗口裁剪变化，不依赖歌词当前所在的位置。
-    let render = |amount: f32| {
-        let mut max_luminance = 0_f32;
-        let mut min_gray = 1_f32;
-        let mut result = image::RgbImage::new(image.width(), image.height());
-        for (pixel, color) in result.pixels_mut().zip(&colors) {
-            let mut color = *color;
-            // 整张图采用同一明度变换，避免逐像素截断造成大块平坦色阶。
-            color.l = if light_foreground {
-                color.l * (1. - amount)
-            } else {
-                color.l + (1. - color.l) * amount
-            };
-            let rgb = oklch_to_srgb(color);
-            pixel.0 = [rgb.red, rgb.green, rgb.blue];
-            let [r, g, b] = pixel.0.map(|channel| f32::from(channel) / 255.);
-            max_luminance = max_luminance.max(relative_luminance(Rgba { r, g, b, a: 1. }));
-            min_gray = min_gray.min(0.2126 * r + 0.7152 * g + 0.0722 * b);
-        }
-        let readable = if light_foreground {
-            max_luminance <= luminance_limit
-        } else {
-            // sRGB 混色不是线性亮度混色。用加权灰阶的亮度下界约束浅色背景，
-            // 使不同色相的封面在交叉渐变时仍有足够亮度承托深色文字。
-            let gray = Rgba {
-                r: min_gray,
-                g: min_gray,
-                b: min_gray,
-                a: 1.,
-            };
-            relative_luminance(gray) >= luminance_limit
-        };
-        (result, readable)
-    };
-    let (image, readable) = render(0.);
-    if readable {
-        return image;
+    let mut result = image::RgbImage::new(image.width(), image.height());
+    if render_pass(&colors, 0., light_foreground, luminance_limit, &mut result) {
+        return result;
     }
-    let mut result = render(1.);
+    let mut probe = image::RgbImage::new(image.width(), image.height());
+    render_pass(&colors, 1., light_foreground, luminance_limit, &mut result);
     let mut lower = 0.;
     let mut upper = 1.;
     for _ in 0..12 {
         let amount = (lower + upper) / 2.;
-        let candidate = render(amount);
-        if candidate.1 {
+        if render_pass(
+            &colors,
+            amount,
+            light_foreground,
+            luminance_limit,
+            &mut probe,
+        ) {
             upper = amount;
-            result = candidate;
+            std::mem::swap(&mut probe, &mut result);
         } else {
             lower = amount;
         }
     }
-    result.0
+    result
 }
 
-fn oklch_to_srgb(color: Oklch) -> Srgb<u8> {
-    let color = Oklab::from_color(color);
+fn render_pass(
+    colors: &[Oklab],
+    amount: f32,
+    light_foreground: bool,
+    luminance_limit: f32,
+    image: &mut image::RgbImage,
+) -> bool {
+    let mut max_luminance = 0_f32;
+    let mut min_gray = 1_f32;
+    for (pixel, color) in image.pixels_mut().zip(colors) {
+        let mut color = *color;
+        // 整张图采用同一明度变换，避免逐像素截断造成大块平坦色阶。
+        color.l = if light_foreground {
+            color.l * (1. - amount)
+        } else {
+            color.l + (1. - color.l) * amount
+        };
+        let rgb = oklab_to_srgb(color);
+        pixel.0 = [rgb.red, rgb.green, rgb.blue];
+        let [red, green, blue] = pixel.0;
+        max_luminance = max_luminance.max(
+            0.2126 * SRGB_TO_LINEAR[usize::from(red)]
+                + 0.7152 * SRGB_TO_LINEAR[usize::from(green)]
+                + 0.0722 * SRGB_TO_LINEAR[usize::from(blue)],
+        );
+        min_gray = min_gray.min(
+            0.2126 * f32::from(red) / 255.
+                + 0.7152 * f32::from(green) / 255.
+                + 0.0722 * f32::from(blue) / 255.,
+        );
+    }
+    if light_foreground {
+        max_luminance <= luminance_limit
+    } else {
+        // sRGB 混色不是线性亮度混色。用加权灰阶的亮度下界约束浅色背景，
+        // 使不同色相的封面在交叉渐变时仍有足够亮度承托深色文字。
+        let gray = Rgba {
+            r: min_gray,
+            g: min_gray,
+            b: min_gray,
+            a: 1.,
+        };
+        relative_luminance(gray) >= luminance_limit
+    }
+}
+
+fn oklab_to_srgb(color: Oklab) -> Srgb<u8> {
     let mut rgb = LinSrgb::from_color_unclamped(color);
     if !rgb.is_within_bounds() {
         // 沿同一色相降低彩度进入 sRGB 色域，直接截断 RGB 会改变色相。
@@ -487,14 +542,17 @@ fn oklch_to_srgb(color: Oklch) -> Srgb<u8> {
 }
 
 fn relative_luminance(color: Rgba) -> f32 {
-    let linearize = |channel: f32| {
-        if channel <= 0.04045 {
-            channel / 12.92
-        } else {
-            ((channel + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    0.2126 * linearize(color.r) + 0.7152 * linearize(color.g) + 0.0722 * linearize(color.b)
+    0.2126 * srgb_to_linear(color.r)
+        + 0.7152 * srgb_to_linear(color.g)
+        + 0.0722 * srgb_to_linear(color.b)
+}
+
+fn srgb_to_linear(channel: f32) -> f32 {
+    if channel <= 0.04045 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 async fn cache_image_file(client: Arc<dyn HttpClient>, url: String) -> anyhow::Result<PathBuf> {
@@ -542,8 +600,15 @@ fn cache_thumbnail_file_at(root: &Path, source: ThumbnailSource) -> anyhow::Resu
         .with_guessed_format()
         .context("无法识别待缩放图片格式")?
         .decode()
-        .context("无法解码待缩放图片")?
-        .resize(target_size, target_size, FilterType::Triangle);
+        .context("无法解码待缩放图片")?;
+    let ratio =
+        (f64::from(target_size) / f64::from(width)).min(f64::from(target_size) / f64::from(height));
+    let fitted_width = ((f64::from(width) * ratio).round() as u32).max(1);
+    let fitted_height = ((f64::from(height) * ratio).round() as u32).max(1);
+    let options = ResizeOptions::default()
+        .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
+        .use_alpha(false);
+    let image = resize_cover(&image, fitted_width, fitted_height, &options)?;
     let temporary = root.join(format!(".{}.{}.tmp", source.cache_key, std::process::id()));
     image
         .save_with_format(&temporary, image::ImageFormat::Png)
@@ -1134,10 +1199,10 @@ mod tests {
             DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
         )
         .unwrap();
-        let decoded = image::load_from_memory(&blurred.bytes).unwrap();
 
-        assert_eq!(blurred.format, ImageFormat::Png);
-        assert_eq!((decoded.width(), decoded.height()), (128, 128));
+        assert_eq!(blurred.size(0).width, 128.into());
+        assert_eq!(blurred.size(0).height, 128.into());
+        assert_eq!(blurred.as_bytes(0).map(<[u8]>::len), Some(128 * 128 * 4));
         assert_eq!(
             image::open(&source).unwrap().to_rgba8().get_pixel(0, 0).0,
             [120, 80, 200, 255]

@@ -170,8 +170,6 @@ impl PlaybackProgressView {
         self.input.duration = Some(duration);
         self.input.advancing = false;
         self.next_frame = None;
-        self.hovered = false;
-        self.hover_fraction = None;
         self.slider.update(cx, |slider, cx| {
             *slider = progress_slider_state(progress_fraction(position, duration));
             cx.notify();
@@ -247,7 +245,8 @@ impl Render for PlaybackProgressView {
         let interactive = self.input.interactive;
         let bar_color = theme.slider_bar;
         let thumb_color = theme.slider_thumb;
-        let hover_fraction = interactive.then_some(self.hover_fraction).flatten();
+        // seek 加载期间 interactive 会暂时为 false；提示只取决于有没有曲目，避免闪烁。
+        let hover_fraction = has_track.then_some(self.hover_fraction).flatten();
         let hover_visible =
             (self.hovered || self.seek_preview.is_some()) && hover_fraction.is_some();
         let hover_opacity = transition(
@@ -356,27 +355,24 @@ impl Render for PlaybackProgressView {
             .left_0()
             .right_0()
             .h(px(20.))
-            .when(interactive, |layer| {
-                layer
-                    .cursor_pointer()
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                        let bounds = this.slider.read(cx).bounds();
-                        if bounds.size.width <= px(0.) {
-                            return;
-                        }
-                        let inner =
-                            (event.position.x - bounds.left()).clamp(px(0.), bounds.size.width);
-                        this.hover_fraction = Some(inner / bounds.size.width);
-                        this.hovered = true;
-                        cx.notify();
-                    }))
-                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                        if !hovered && this.hovered {
-                            this.hovered = false;
-                            cx.notify();
-                        }
-                    }))
-            })
+            .when(interactive, |layer| layer.cursor_pointer())
+            // 悬停状态始终跟踪光标，否则 seek 加载期间光标离开会留下过期的 hovered。
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                let bounds = this.slider.read(cx).bounds();
+                if bounds.size.width <= px(0.) {
+                    return;
+                }
+                let inner = (event.position.x - bounds.left()).clamp(px(0.), bounds.size.width);
+                this.hover_fraction = Some(inner / bounds.size.width);
+                this.hovered = true;
+                cx.notify();
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !hovered && this.hovered {
+                    this.hovered = false;
+                    cx.notify();
+                }
+            }))
             .child(control)
             .when_some(hover_fraction, |layer, fraction| {
                 let tooltip = div()
@@ -483,6 +479,38 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(*seeks.borrow(), [Duration::from_secs(50)]);
         progress.read_with(cx, |view, _| assert_eq!(view.seek_preview, None));
+    }
+
+    #[gpui::test]
+    fn test_hover_survives_seek(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (progress, cx) =
+            cx.add_window_view(|_, cx| PlaybackProgressView::new(None, font(".SystemUIFont"), cx));
+        progress.update(cx, |view, cx| {
+            view.start_track(Duration::from_secs(10), Duration::from_secs(100), cx);
+            view.input.interactive = true;
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = progress.read_with(cx, |view, cx| view.slider.read(cx).bounds());
+        cx.simulate_mouse_move(bounds.center(), None, Default::default());
+        // seek 同样会触发 TrackStarted，光标不动时时间提示不应消失。
+        progress.update(cx, |view, cx| {
+            view.start_track(Duration::from_secs(50), Duration::from_secs(100), cx);
+            // 加载期间不可交互：提示仍应保留，且光标离开仍能正确清除。
+            view.input.interactive = false;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        progress.read_with(cx, |view, _| {
+            assert!(view.hovered);
+            assert!(view.hover_fraction.is_some());
+        });
+        cx.simulate_mouse_move(
+            point(bounds.center().x, bounds.top() - px(80.)),
+            None,
+            Default::default(),
+        );
+        progress.read_with(cx, |view, _| assert!(!view.hovered));
     }
 
     #[gpui::test]

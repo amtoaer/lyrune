@@ -381,7 +381,7 @@ fn test_shuffle_short_queue() {
         .queue
         .as_mut()
         .unwrap()
-        .append_tracks([Arc::new(track("A"))]);
+        .append_tracks([Arc::new(track("A"))], None);
     playback.current_track = Some(0);
     assert_eq!(playback.next_track(true), None);
     assert_eq!(playback.previous_track(), None);
@@ -1253,30 +1253,34 @@ fn queue_append_preserves_order_and_existing_tracks() {
     let mut repeated_new = track("C");
     repeated_new.title = "later duplicate".to_owned();
 
-    let first_added = queue.append_tracks([
-        Arc::new(duplicate),
-        Arc::new(track("C")),
-        Arc::new(repeated_new),
-        Arc::new(track("D")),
-    ]);
+    let first_added = queue.append_tracks(
+        [
+            Arc::new(duplicate),
+            Arc::new(track("C")),
+            Arc::new(repeated_new),
+            Arc::new(track("D")),
+        ],
+        Some(1),
+    );
 
     assert_eq!(first_added, Some(2));
     assert_eq!(mids(&queue.tracks), ["A", "B", "C", "D"]);
     assert_eq!(queue.tracks[1].title, "B");
     assert_eq!(queue.tracks[2].title, "C");
     let order = queue.shuffle_order.as_ref().unwrap().clone();
-    assert_eq!(&order[..2], [1, 0]);
-    let mut appended = order[2..].to_vec();
-    appended.sort_unstable();
-    assert_eq!(appended, [2, 3]);
+    // 当前歌曲及之前已播的部分不变，新增歌曲与未播部分混合洗牌。
+    assert_eq!(order[0], 1);
+    let mut unplayed = order[1..].to_vec();
+    unplayed.sort_unstable();
+    assert_eq!(unplayed, [0, 2, 3]);
     assert_eq!(
         canonical_queue_track_index(&queue, &UserPlaylistId::Liked, &queue.tracks, "D"),
         Some(3)
     );
 
     // 重复批次没有续播起点，也不能改变已有歌曲的顺序。
-    assert_eq!(queue.append_tracks([Arc::new(track("C"))]), None);
-    assert_eq!(queue.append_tracks([]), None);
+    assert_eq!(queue.append_tracks([Arc::new(track("C"))], Some(1)), None);
+    assert_eq!(queue.append_tracks([], Some(1)), None);
     assert_eq!(mids(&queue.tracks), ["A", "B", "C", "D"]);
     assert_eq!(queue.shuffle_order.as_ref().unwrap(), &order);
 }

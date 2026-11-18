@@ -158,6 +158,7 @@ impl PlaybackQueue {
     pub(super) fn append_tracks(
         &mut self,
         tracks: impl IntoIterator<Item = Arc<Track>>,
+        current: Option<usize>,
     ) -> Option<usize> {
         let tracks = tracks.into_iter().collect::<Vec<_>>();
         if tracks.is_empty() {
@@ -177,9 +178,15 @@ impl PlaybackQueue {
             pending
         };
         self.tracks.extend(pending);
-        if let Some(order) = &mut self.shuffle_order {
+        if let Some(order) = &mut self.shuffle_order
+            && self.tracks.len() > first_added
+        {
             order.extend(first_added..self.tracks.len());
-            order[first_added..].shuffle(&mut rand::rng());
+            // 新增歌曲与当前歌曲之后尚未播放的部分一起重洗，已播部分保持不变。
+            let unplayed = current
+                .and_then(|current| order.iter().position(|&index| index == current))
+                .map_or(0, |position| position + 1);
+            order[unplayed..].shuffle(&mut rand::rng());
         }
         (self.tracks.len() > first_added).then_some(first_added)
     }
@@ -401,7 +408,10 @@ impl Playback {
                         let mut first_added = None;
                         if let Some(queue) = &mut this.state.queue {
                             queue.continuation = continuation;
-                            first_added = queue.append_tracks(tracks.into_iter().map(Arc::new));
+                            first_added = queue.append_tracks(
+                                tracks.into_iter().map(Arc::new),
+                                this.state.current_track,
+                            );
                             queue.set_shuffle(this.state.shuffle, this.state.current_track);
                             this.state.queue_version = this.state.queue_version.wrapping_add(1);
                         }
@@ -514,7 +524,7 @@ impl Playback {
                     return;
                 }
                 if let (Some(queue), Ok(tracks)) = (&mut this.state.queue, result) {
-                    queue.append_tracks(tracks);
+                    queue.append_tracks(tracks, this.state.current_track);
                     this.state.queue_version = this.state.queue_version.wrapping_add(1);
                     if let Some(resource) = playlist_resource {
                         cx.emit(PlaybackEvent::PlaylistLoaded(resource));

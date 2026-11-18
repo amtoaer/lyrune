@@ -2,10 +2,9 @@
 name = "lyrune-api"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 description = "Lyrune 内部使用的 QQ 音乐协议与登录实现"
-readme = "README.md"
-license = "MIT"
 
 [dependencies]
 anyhow.workspace = true

@@ -48,7 +48,7 @@ jobs:
           pkgdesc='Fast native QQ Music desktop client built with Rust and GPUI (prebuilt binary)'
           arch=('x86_64' 'aarch64')
           url='https://github.com/amtoaer/lyrune'
-          license=('LicenseRef-Unknown')
+          license=('GPL-3.0-only')
           options=('!debug' '!strip')
           depends=(
             'alsa-lib'
@@ -96,10 +96,8 @@ jobs:
               "${pkgdir}/usr/share/icons/hicolor/scalable/apps/${_pkgname}.svg"
             install -Dm644 "${archive_root}/README.md" \
               "${pkgdir}/usr/share/doc/${_pkgname}/README.md"
-            install -Dm644 "${archive_root}/THIRD_PARTY_NOTICES.md" \
-              "${pkgdir}/usr/share/doc/${_pkgname}/THIRD_PARTY_NOTICES.md"
-            install -Dm644 "${archive_root}/license-unknown.txt" \
-              "${pkgdir}/usr/share/licenses/${pkgname}/license-unknown.txt"
+            install -Dm644 "${archive_root}/LICENSE" \
+              "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
           }
           PKGBUILD
           sed -i "s/__VERSION__/$version/" "$staging_dir/PKGBUILD"

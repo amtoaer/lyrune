@@ -42,7 +42,7 @@
 
 工作区现由三个内部 crate 组成：`crates/lyrune` 是桌面应用，`crates/lyrune-api` 是 QQ 音乐协议实现，`crates/lyrune-decrypt` 负责 QMC 音频解密。包名与目录名一致。
 
-`lyrune-api` 仅供 Lyrune 内部使用，根入口选择性导出应用需要的能力，各领域模块直接实现 `ProtocolClient` 的方法。登录、播放和 CDN 使用的标识各有协议含义，不能因外形相似而合并；`QqCredential` 和 `LyricResult` 是持久化兼容面。协议库入口与来源说明见 [API README](../crates/lyrune-api/README.md)。
+`lyrune-api` 仅供 Lyrune 内部使用，根入口选择性导出应用需要的能力，各领域模块直接实现 `ProtocolClient` 的方法。登录、播放和 CDN 使用的标识各有协议含义，不能因外形相似而合并；`QqCredential` 和 `LyricResult` 是持久化兼容面。
 
 ### API 响应与领域边界
 

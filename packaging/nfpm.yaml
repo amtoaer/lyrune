@@ -7,7 +7,7 @@ maintainer: amtoaer <amtoaer@gmail.com>
 description: Fast native QQ Music desktop client built with Rust and GPUI
 vendor: Lyrune
 homepage: https://github.com/amtoaer/lyrune
-license: LicenseRef-Unknown
+license: GPL-3.0-only
 section: sound
 priority: optional
 overrides:
@@ -61,7 +61,5 @@ contents:
     dst: /usr/share/icons/hicolor/scalable/apps/lyrune.svg
   - src: ${BINARY_DIR}/README.md
     dst: /usr/share/doc/lyrune/README.md
-  - src: ${BINARY_DIR}/THIRD_PARTY_NOTICES.md
-    dst: /usr/share/doc/lyrune/THIRD_PARTY_NOTICES.md
-  - src: ${BINARY_DIR}/license-unknown.txt
-    dst: /usr/share/licenses/lyrune/license-unknown.txt
+  - src: ${BINARY_DIR}/LICENSE
+    dst: /usr/share/licenses/lyrune/LICENSE

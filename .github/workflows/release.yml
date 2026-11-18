@@ -120,8 +120,7 @@ jobs:
           mkdir -p "$archive_root"
           install -m755 "$binary" "$archive_root/lyrune"
           install -m644 README.md "$archive_root/README.md"
-          install -m644 THIRD_PARTY_NOTICES.md "$archive_root/THIRD_PARTY_NOTICES.md"
-          install -m644 packaging/linux/license-unknown.txt "$archive_root/license-unknown.txt"
+          install -m644 LICENSE "$archive_root/LICENSE"
           tar -C dist -czf "dist/$archive_name.tar.gz" "$archive_name"
 
       - name: Install nFPM

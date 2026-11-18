@@ -26,7 +26,6 @@ pub(crate) fn hash33(s: &str) -> u64 {
 /// 计算 QQ 网关签名字段。
 ///
 /// 根据最终 JSON 请求体计算；修改参数后必须重新签名。
-// Adapted from netease-qq-music-api (MIT); see THIRD_PARTY_NOTICES.md.
 pub(crate) fn sign(request: &Value) -> String {
     let payload = serde_json::to_vec(request).expect("serialize qq request body");
     let hash = hex::encode_upper(Sha1::digest(payload));

@@ -28,11 +28,8 @@ const LYRIC_ANCHOR_SPACING_EM: f32 = 3.;
 const LYRIC_EDGE_FADE_DISTANCE: f32 = 48.;
 const LYRIC_SCROLL_DURATION: Duration = Duration::from_millis(360);
 const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
-// 跨多行的跳转按距离延长动画，一行仍是基准时长。
-const LYRIC_DISTANCE_SCALE_PER_LINE: f32 = 0.04;
-const LYRIC_MAX_DURATION_SCALE: f32 = 1.2;
-// 超过这个行数的跳转改用先加速后减速的缓动，避免起步阶段一下冲出去很远。
-const LYRIC_EASE_IN_OUT_LINES: f32 = 2.;
+// 跑得太远的跳转会快到分不清方向：动画起点最多离目标这么多行，再按正常速度滚过去。
+const LYRIC_MAX_MOTION_LINES: f32 = 8.;
 pub(super) const LYRIC_EXPANSION_DURATION: Duration = Duration::from_millis(480);
 const LYRIC_TRACK_SWITCH_DURATION: Duration = Duration::from_millis(420);
 const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
@@ -147,23 +144,13 @@ impl LyricMotionState {
         from + (self.target - from) * progress
     }
 
-    fn duration_scale(&self) -> f32 {
-        let extra_lines = ((self.target - self.scroll_from).abs() - 1.).max(0.);
-        (1. + extra_lines * LYRIC_DISTANCE_SCALE_PER_LINE).min(LYRIC_MAX_DURATION_SCALE)
-    }
-
     fn scroll_anchor(&self, now: Instant) -> f32 {
-        let progress = self.progress(LYRIC_SCROLL_DURATION.mul_f32(self.duration_scale()), now);
-        let eased = if (self.target - self.scroll_from).abs() > LYRIC_EASE_IN_OUT_LINES {
-            progress * progress * (3. - 2. * progress)
-        } else {
-            1. - (1. - progress).powi(3)
-        };
-        self.sample(self.scroll_from, eased)
+        let progress = self.progress(LYRIC_SCROLL_DURATION, now);
+        self.sample(self.scroll_from, 1. - (1. - progress).powi(3))
     }
 
     fn style_anchor(&self, now: Instant) -> f32 {
-        let progress = self.progress(LYRIC_STYLE_DURATION.mul_f32(self.duration_scale()), now);
+        let progress = self.progress(LYRIC_STYLE_DURATION, now);
         self.sample(self.style_from, progress * progress * (3. - 2. * progress))
     }
 }
@@ -1228,8 +1215,9 @@ impl LyricsView {
             return (target, target);
         };
         if state.target != target {
-            state.scroll_from = state.scroll_anchor(now);
-            state.style_from = state.style_anchor(now);
+            let range = target - LYRIC_MAX_MOTION_LINES..=target + LYRIC_MAX_MOTION_LINES;
+            state.scroll_from = state.scroll_anchor(now).clamp(*range.start(), *range.end());
+            state.style_from = state.style_anchor(now).clamp(*range.start(), *range.end());
             state.target = target;
             state.started_at = now;
         }
@@ -1761,9 +1749,8 @@ impl Render for LyricsView {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackdropSwitch, LYRIC_MAX_DURATION_SCALE, LYRIC_SCROLL_DURATION,
-        LYRIC_TRACK_SWITCH_DURATION, LyricMotionState, LyricsContent, LyricsInput, LyricsView,
-        lyrics,
+        BackdropSwitch, LYRIC_MAX_MOTION_LINES, LYRIC_SCROLL_DURATION, LYRIC_TRACK_SWITCH_DURATION,
+        LyricsContent, LyricsInput, LyricsView, lyrics,
     };
     use crate::settings::{
         DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
@@ -1771,7 +1758,7 @@ mod tests {
     };
     use gpui::{TestAppContext, VisualTestContext, font, px, white};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     #[test]
     fn test_backdrop_switch() {
@@ -1915,34 +1902,25 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_lyric_motion_duration_scales_with_distance() {
-        let started_at = Instant::now();
-        let state = |from, target| LyricMotionState {
-            mid: String::new(),
-            scroll_from: from,
-            style_from: from,
-            target,
-            started_at,
-        };
-        let settled = |state: &LyricMotionState, duration: Duration| {
-            state.scroll_anchor(started_at + duration) == state.target
-        };
-
-        assert!(settled(&state(0., 1.), LYRIC_SCROLL_DURATION));
-        assert!(!settled(&state(0., 4.), LYRIC_SCROLL_DURATION));
-        assert!(settled(
-            &state(0., 100.),
-            LYRIC_SCROLL_DURATION.mul_f32(LYRIC_MAX_DURATION_SCALE)
-        ));
-
-        // 远距离跳转起步不再比平均速度快；近距离仍然起步最快。
-        let early = started_at + LYRIC_SCROLL_DURATION.mul_f32(LYRIC_MAX_DURATION_SCALE / 10.);
-        let far = state(0., 100.);
-        assert!(far.scroll_anchor(early) < far.target / 10.);
-        let near = state(0., 1.);
-        let early = started_at + LYRIC_SCROLL_DURATION / 10;
-        assert!(near.scroll_anchor(early) > near.target / 10.);
+    #[gpui::test]
+    fn test_long_lyric_jump_starts_near_target(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, _| LyricsView::new(None, font(".SystemUIFont")));
+        view.update(cx, |view, cx| {
+            let now = cx.background_executor().now();
+            view.lyric_motion_anchors("test", 0, true, now);
+            for (target, expected_start) in [(2, 0.), (100, 100. - LYRIC_MAX_MOTION_LINES)] {
+                let (scroll, style) = view.lyric_motion_anchors("test", target, true, now);
+                // 起点最多离目标 N 行；近距离跳转仍从原位置开始。
+                assert_eq!((scroll, style), (expected_start, expected_start));
+                // 动画结束后落在目标行。
+                let later = now + LYRIC_SCROLL_DURATION;
+                assert_eq!(
+                    view.lyric_motion_anchors("test", target, true, later).0,
+                    target as f32
+                );
+            }
+        });
     }
 
     #[gpui::test]

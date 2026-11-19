@@ -412,7 +412,7 @@ fn tone_blurred_cover(
     let background = style.background.to_rgb();
     let theme_lab = Oklab::from_color(Srgb::new(background.r, background.g, background.b));
     // 给后续 8 位量化留少量彩度余量。
-    let chroma_limit = (style.chroma - 0.002).max(0.);
+    let chroma_limit = (style.chroma - 0.003).max(0.);
     let pixels = image.to_rgba8();
     let blend = |amount: f32, pixel: &image::Rgba<u8>| {
         let alpha = f32::from(pixel[3]) / 255. * (1. - amount);
@@ -1430,6 +1430,7 @@ mod tests {
     fn test_blurred_cover_contrast_margin() {
         let style = BlurredCoverStyle {
             tint_percent: 0,
+            contrast: 55.,
             ..cover_style(0x282c34, 0xabb2bf)
         };
         let source = rgb8(style.background.to_rgb());

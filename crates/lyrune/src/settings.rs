@@ -29,9 +29,9 @@ pub const DEFAULT_LYRIC_BACKGROUND_CHROMA: f32 = 0.12;
 pub const DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT: u32 = 40;
 pub const DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E: f32 = 0.25;
 pub const DEFAULT_LYRIC_TINT_PERCENT: u32 = 50;
-pub const DEFAULT_LYRIC_BACKGROUND_CONTRAST: f32 = 55.;
+pub const DEFAULT_LYRIC_BACKGROUND_CONTRAST: f32 = 45.;
 pub const MAX_LYRIC_BACKGROUND_CONTRAST_LC: f32 = 108.;
-pub const DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT: u32 = 8;
+pub const DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT: u32 = 10;
 pub const MAX_LYRIC_BACKGROUND_BLUR_PERCENT: u32 = 20;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -118,8 +118,8 @@ pub enum TrayIconStyle {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WindowDecoration {
-    #[default]
     Ssd,
+    #[default]
     Csd,
 }
 
@@ -717,7 +717,7 @@ mod tests {
         assert_eq!(settings.light_color_theme, ColorTheme::RosePineDawn);
         assert_eq!(settings.dark_color_theme, ColorTheme::RosePineMoon);
         assert_eq!(settings.tray_icon_style, TrayIconStyle::Auto);
-        assert_eq!(settings.window_decoration, WindowDecoration::Ssd);
+        assert_eq!(settings.window_decoration, WindowDecoration::Csd);
         assert_eq!(settings.ui_font_families, [".SystemUIFont"]);
         assert_eq!(
             settings.monospace_font_families,
@@ -730,8 +730,8 @@ mod tests {
         assert_eq!(settings.lyric_background_min_overlay_percent, 40);
         assert_eq!(settings.lyric_background_max_delta_e, 0.25);
         assert_eq!(settings.lyric_tint_percent, 50);
-        assert_eq!(settings.lyric_background_contrast_lc, 55.);
-        assert_eq!(settings.lyric_background_blur_percent, 8);
+        assert_eq!(settings.lyric_background_contrast_lc, 45.);
+        assert_eq!(settings.lyric_background_blur_percent, 10);
         assert_eq!(settings.audio_cache_limit_gb, DEFAULT_AUDIO_CACHE_LIMIT_GB);
         assert_eq!(settings.image_cache_capacity, 80);
         assert_eq!(
@@ -901,7 +901,7 @@ mod tests {
             dark_color_theme: ColorTheme::EverforestDark,
             legacy_color_theme: None,
             tray_icon_style: TrayIconStyle::Dark,
-            window_decoration: WindowDecoration::Csd,
+            window_decoration: WindowDecoration::Ssd,
             ui_font_families: vec!["Inter".to_owned(), "Noto Sans CJK SC".to_owned()],
             monospace_font_families: vec!["JetBrains Mono".to_owned()],
             lyric_font_families: vec!["LXGW WenKai".to_owned(), "Noto Sans JP".to_owned()],

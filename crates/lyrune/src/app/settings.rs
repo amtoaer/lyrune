@@ -1771,24 +1771,24 @@ mod tests {
             [
                 (
                     inputs.lyric_background_blur.clone(),
-                    (9, 40, 0.25, 0.12, 50, 55.),
+                    (11, 40, 0.25, 0.12, 50, 45.),
                 ),
                 (
                     inputs.lyric_background_min_overlay.clone(),
-                    (9, 45, 0.25, 0.12, 50, 55.),
+                    (11, 45, 0.25, 0.12, 50, 45.),
                 ),
                 (
                     inputs.lyric_background_max_delta_e.clone(),
-                    (9, 45, 0.26, 0.12, 50, 55.),
+                    (11, 45, 0.26, 0.12, 50, 45.),
                 ),
                 (
                     inputs.lyric_background_chroma.clone(),
-                    (9, 45, 0.26, 0.13, 50, 55.),
+                    (11, 45, 0.26, 0.13, 50, 45.),
                 ),
-                (inputs.lyric_tint.clone(), (9, 45, 0.26, 0.13, 55, 55.)),
+                (inputs.lyric_tint.clone(), (11, 45, 0.26, 0.13, 55, 45.)),
                 (
                     inputs.lyric_background_contrast_lc.clone(),
-                    (9, 45, 0.26, 0.13, 55, 56.),
+                    (11, 45, 0.26, 0.13, 55, 46.),
                 ),
             ]
         });
@@ -1814,7 +1814,7 @@ mod tests {
         cx.simulate_input("3");
         assert!(actions.borrow().is_empty());
         cx.simulate_keystrokes("enter");
-        assert_eq!(actions.borrow().last(), Some(&(3, 45, 0.26, 0.13, 55, 56.)));
+        assert_eq!(actions.borrow().last(), Some(&(3, 45, 0.26, 0.13, 55, 46.)));
         cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("6");
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1828,11 +1828,11 @@ mod tests {
         cx.update(|window, cx| min_overlay.update(cx, |input, cx| input.focus(window, cx)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.run_until_parked();
-        assert_eq!(actions.borrow().last(), Some(&(6, 45, 0.26, 0.13, 55, 56.)));
+        assert_eq!(actions.borrow().last(), Some(&(6, 45, 0.26, 0.13, 55, 46.)));
         cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("0");
         cx.simulate_keystrokes("enter");
-        assert_eq!(actions.borrow().last(), Some(&(6, 0, 0.26, 0.13, 55, 56.)));
+        assert_eq!(actions.borrow().last(), Some(&(6, 0, 0.26, 0.13, 55, 46.)));
     }
 
     #[gpui::test]

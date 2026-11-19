@@ -776,8 +776,18 @@ impl LyruneView {
                 .read(cx)
                 .settings
                 .lyric_background_min_overlay_percent,
+            background_max_delta_e: self
+                .preferences
+                .read(cx)
+                .settings
+                .lyric_background_max_delta_e,
             background_chroma: self.preferences.read(cx).settings.lyric_background_chroma,
-            background_contrast: self.preferences.read(cx).settings.lyric_background_contrast,
+            tint_percent: self.preferences.read(cx).settings.lyric_tint_percent,
+            background_contrast: self
+                .preferences
+                .read(cx)
+                .settings
+                .lyric_background_contrast_lc,
             background_blur_percent: self
                 .preferences
                 .read(cx)

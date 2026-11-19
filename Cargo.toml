@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1.0"
+apcach-rs = "0.1.0"
 arc-swap = "1.9"
 async-tungstenite = { version = "0.35", default-features = false, features = [
     "tokio-runtime",

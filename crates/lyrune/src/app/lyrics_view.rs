@@ -19,7 +19,8 @@ use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::player::AudioPlayer;
 use crate::settings::{
     DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
-    DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, FrameRate,
+    DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
+    DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, DEFAULT_LYRIC_TINT_PERCENT, FrameRate,
 };
 
 const LYRIC_ANCHOR_SPACING_EM: f32 = 3.;
@@ -939,7 +940,9 @@ pub(super) struct LyricsInput {
     pub(super) font_scale: u32,
     pub(super) line_spacing: u32,
     pub(super) background_min_overlay_percent: u32,
+    pub(super) background_max_delta_e: f32,
     pub(super) background_chroma: f32,
+    pub(super) tint_percent: u32,
     pub(super) background_contrast: f32,
     pub(super) background_blur_percent: u32,
     pub(super) highlight_frame_rate: FrameRate,
@@ -1041,7 +1044,9 @@ impl LyricsView {
                 font_scale: 100,
                 line_spacing: 100,
                 background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+                background_max_delta_e: DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
                 background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
+                tint_percent: DEFAULT_LYRIC_TINT_PERCENT,
                 background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
                 background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
                 highlight_frame_rate: FrameRate::Fps60,
@@ -1477,7 +1482,9 @@ impl LyricsView {
             background: theme.background,
             foreground: theme.foreground,
             min_overlay_percent: self.input.background_min_overlay_percent,
+            max_delta_e: self.input.background_max_delta_e,
             chroma: self.input.background_chroma,
+            tint_percent: self.input.tint_percent,
             contrast: self.input.background_contrast,
             blur_percent: self.input.background_blur_percent,
         };
@@ -1535,9 +1542,18 @@ impl LyricsView {
                 let previous_backdrop = self.backdrop.previous.clone().and_then(|url| {
                     blurred_cover_image(&url, backdrop_style, window, cx).and_then(Result::ok)
                 });
+                let mut lyric_foreground = previous_backdrop
+                    .as_ref()
+                    .map_or(theme.foreground, |cover| cover.foreground);
+                if let Some(cover) = &current_backdrop {
+                    lyric_foreground = lyric_foreground
+                        .to_rgb()
+                        .blend(cover.foreground.to_rgb().opacity(current_backdrop_opacity))
+                        .into();
+                }
                 let lyrics = self.render_lyrics_panel(
                     &track_mid,
-                    theme.foreground,
+                    lyric_foreground,
                     compact,
                     narrow,
                     window,
@@ -1626,7 +1642,7 @@ impl LyricsView {
                                 .bottom(-backdrop_padding)
                                 .left(-backdrop_padding)
                                 .child(
-                                    img(previous_backdrop)
+                                    img(previous_backdrop.image)
                                         .size_full()
                                         .object_fit(ObjectFit::Cover),
                                 ),
@@ -1642,7 +1658,7 @@ impl LyricsView {
                                 .left(-backdrop_padding)
                                 .opacity(current_backdrop_opacity)
                                 .child(
-                                    img(current_backdrop)
+                                    img(current_backdrop.image)
                                         .size_full()
                                         .object_fit(ObjectFit::Cover),
                                 ),
@@ -1797,7 +1813,8 @@ mod tests {
     };
     use crate::settings::{
         DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
-        DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, FrameRate,
+        DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
+        DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, DEFAULT_LYRIC_TINT_PERCENT, FrameRate,
     };
     use gpui::{RenderImage, TestAppContext, VisualTestContext, font, px, white};
     use std::sync::Arc;
@@ -2061,7 +2078,9 @@ mod tests {
             font_scale: 100,
             line_spacing: 100,
             background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
+            background_max_delta_e: DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
             background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
+            tint_percent: DEFAULT_LYRIC_TINT_PERCENT,
             background_contrast: DEFAULT_LYRIC_BACKGROUND_CONTRAST,
             background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
             highlight_frame_rate: FrameRate::Display,

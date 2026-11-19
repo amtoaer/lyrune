@@ -37,7 +37,7 @@ use gpui_component::{
     notification::{Notification, NotificationList},
     v_flex,
 };
-use lyrune_api::ProtocolClient;
+use lyrune_api::{ProtocolClient, Track};
 
 use self::{
     account::{Account, AccountEvent, AccountState},
@@ -45,10 +45,10 @@ use self::{
     lyrics_loading::LyricsCache,
     lyrics_view::{
         CollapseLyrics, LYRIC_EXPANSION_DURATION, LyricsContent, LyricsInput, LyricsView,
-        combined_lyric_frame_interval,
+        combined_lyric_frame_interval, lyrics_cover_size,
     },
     playback::{Playback, PlaybackEvent, PlaybackState},
-    player_view::{PlayerAction, PlayerControlsView},
+    player_view::{PlayerAction, PlayerControlsView, player_cover_size},
     preferences::Preferences,
     progress_view::{PlaybackProgressView, SeekTo},
     settings::{SettingsAction, SettingsPage},
@@ -118,6 +118,7 @@ pub struct LyruneView {
     cover_backdrop_expanded: bool,
     cover_backdrop_visible: bool,
     cover_backdrop_fully_expanded: bool,
+    displayed_track: Option<Arc<Track>>,
     lyrics: Entity<LyricsCache>,
     lyrics_view: Entity<LyricsView>,
     preferences: Entity<Preferences>,
@@ -212,7 +213,21 @@ impl LyruneView {
                 cx,
             )
         });
+        let view = cx.weak_entity();
         let subscriptions = vec![
+            cx.on_window_closed(move |cx, window_id| {
+                let _ = view.update(cx, |this, cx| {
+                    if this.window_handle.window_id() == window_id {
+                        this.playback.update(cx, |playback, _| {
+                            if let Some((generation, _)) =
+                                playback.state.load.pending_presentation()
+                            {
+                                playback.state.load.present(generation);
+                            }
+                        });
+                    }
+                });
+            }),
             cx.observe(&browser, |_, _, cx| cx.notify()),
             cx.subscribe(&browser, |this, _, event: &BrowserEvent, cx| {
                 match event {
@@ -257,6 +272,7 @@ impl LyruneView {
             cover_backdrop_expanded: false,
             cover_backdrop_visible: false,
             cover_backdrop_fully_expanded: false,
+            displayed_track: None,
             lyrics,
             lyrics_view,
             preferences,
@@ -329,9 +345,17 @@ impl LyruneView {
                     .update(cx, |preferences, cx| preferences.apply_theme(window, cx))
             }),
             cx.observe_window_visibility(window, |this, visibility, _, cx| {
-                this.lyrics_view.update(cx, |view, cx| {
-                    view.set_window_visible(visibility.is_visible(), cx)
-                });
+                let visible = visibility.is_visible();
+                this.lyrics_view
+                    .update(cx, |view, cx| view.set_window_visible(visible, cx));
+                if !visible {
+                    this.playback.update(cx, |playback, _| {
+                        if let Some((generation, _)) = playback.state.load.pending_presentation() {
+                            playback.state.load.present(generation);
+                        }
+                    });
+                }
+                cx.notify();
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
                 let size = window.window_bounds().get_bounds().size;
@@ -372,15 +396,43 @@ impl LyruneView {
                 mid,
                 duration,
                 position,
-                same_track,
+                generation,
             } => {
-                if !same_track {
-                    self.lyrics_view.update(cx, |view, cx| {
-                        view.start_track(mid, self.cover_backdrop_expanded, cx)
-                    });
+                let Some((pending, deadline)) =
+                    self.playback.read(cx).state.load.pending_presentation()
+                else {
+                    return;
+                };
+                if pending != *generation {
+                    return;
                 }
-                self.progress
-                    .update(cx, |view, cx| view.start_track(*position, *duration, cx));
+                let visible = self
+                    .window_handle
+                    .update(cx, |_, window, _| window.is_visible())
+                    .unwrap_or(false);
+                let already_displayed = self
+                    .displayed_track
+                    .as_ref()
+                    .is_some_and(|track| track.mid == *mid);
+                if !visible || already_displayed {
+                    self.progress
+                        .update(cx, |view, cx| view.start_track(*position, *duration, cx));
+                    self.playback
+                        .update(cx, |playback, _| playback.state.load.present(pending));
+                } else {
+                    cx.spawn(async move |this, cx| {
+                        let executor = cx.background_executor();
+                        executor
+                            .timer(deadline.saturating_duration_since(executor.now()))
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this.playback.read(cx).state.load.is_current(pending) {
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }
             }
             #[cfg(target_os = "linux")]
             PlaybackEvent::Stopped => self.progress.update(cx, |view, cx| view.stop(cx)),
@@ -618,8 +670,87 @@ impl LyruneView {
         progress
     }
 
-    fn sync_lyrics_view(&mut self, cx: &mut Context<Self>) {
-        let track = self.playback.read(cx).state.track();
+    fn sync_track_presentation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (bool, Option<Arc<RenderImage>>) {
+        let state = &self.playback.read(cx).state;
+        let track = state.track_arc().cloned();
+        let pending = state.load.pending_presentation();
+        let position = state.position;
+        let duration = state.duration();
+        let show_lyrics = window.is_visible() && self.cover_backdrop_visible;
+        let small_size = player_cover_size(window);
+        let large_size = show_lyrics.then(|| lyrics_cover_size(window)).flatten();
+        let load_covers = |track: Option<&Track>, window: &mut Window, cx: &mut Context<Self>| {
+            let Some(url) = window
+                .is_visible()
+                .then_some(track)
+                .flatten()
+                .and_then(|track| track.cover_url.as_deref())
+            else {
+                return (Some(None), Some(None));
+            };
+            self.image_cache.update(cx, |cache, cx| {
+                let small = cache.cover(url, small_size, window, cx).map(Result::ok);
+                let large = match large_size {
+                    Some(size) => cache.cover(url, size, window, cx).map(Result::ok),
+                    None => Some(None),
+                };
+                (small, large)
+            })
+        };
+        let (small, large) = load_covers(track.as_deref(), window, cx);
+        if let Some((generation, deadline)) = pending {
+            let lyrics_waiting = show_lyrics
+                && track.as_ref().is_some_and(|track| {
+                    let lyrics = self.lyrics.read(cx);
+                    lyrics.loading.contains(&track.mid) && !lyrics.adopted.contains_key(&track.mid)
+                });
+            let like_waiting = track.as_ref().is_some_and(|track| {
+                let browser = self.browser.read(cx);
+                browser.liked_state_loading.contains(&track.mid)
+                    && !browser.liked_tracks.contains_key(&track.mid)
+            });
+            if window.is_visible()
+                && cx.background_executor().now() < deadline
+                && (small.is_none() || large.is_none() || lyrics_waiting || like_waiting)
+            {
+                let (old_small, old_large) = window
+                    .with_element_namespace("displayed-track", |window| {
+                        load_covers(self.displayed_track.as_deref(), window, cx)
+                    });
+                self.sync_lyrics_view(
+                    true,
+                    old_large.flatten(),
+                    track.and_then(|track| track.cover_url.clone()),
+                    cx,
+                );
+                return (true, old_small.flatten());
+            }
+            if let Some(duration) = duration {
+                self.progress
+                    .update(cx, |view, cx| view.start_track(position, duration, cx));
+            }
+            let playback = self.playback.clone();
+            cx.defer(move |cx| {
+                playback.update(cx, |playback, _| playback.state.load.present(generation))
+            });
+        }
+        self.displayed_track = track;
+        self.sync_lyrics_view(false, large.flatten(), None, cx);
+        (false, small.flatten())
+    }
+
+    fn sync_lyrics_view(
+        &mut self,
+        waiting: bool,
+        cover_image: Option<Arc<RenderImage>>,
+        preload_cover_url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let track = self.displayed_track.as_deref();
         let mid = track.map(|track| track.mid.clone()).unwrap_or_default();
         let content = if let Some(lyrics) = self.lyrics.read(cx).adopted.get(&mid) {
             LyricsContent::Ready(lyrics.parsed.clone())
@@ -633,7 +764,9 @@ impl LyruneView {
         let input = LyricsInput {
             mid,
             cover_url: track.and_then(|track| track.cover_url.clone()),
-            duration: self.playback.read(cx).state.duration(),
+            cover_image,
+            preload_cover_url,
+            duration: track.map(|track| Duration::from_secs(track.duration_seconds)),
             content,
             font: self.preferences.read(cx).fonts.lyrics.clone(),
             font_scale: self.preferences.read(cx).settings.lyric_font_scale,
@@ -656,13 +789,17 @@ impl LyruneView {
                 .settings
                 .lyric_highlight_frame_rate,
             scroll_frame_rate: self.preferences.read(cx).settings.lyric_scroll_frame_rate,
-            advancing: self.playback.read(cx).state.is_advancing(),
+            advancing: !waiting && self.playback.read(cx).state.is_advancing(),
             expanded: self.cover_backdrop_expanded,
             visible: self.cover_backdrop_visible,
         };
-        self.lyrics_view.update(cx, |view, cx| {
-            view.set_input(input, self.playback.read(cx).state.position, cx)
-        });
+        let position = if waiting {
+            self.progress.read(cx).position()
+        } else {
+            self.playback.read(cx).state.position
+        };
+        self.lyrics_view
+            .update(cx, |view, cx| view.set_input(input, position, cx));
     }
 
     fn render_lyrics_layer(
@@ -671,14 +808,7 @@ impl LyruneView {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
-        if self
-            .playback
-            .read(cx)
-            .state
-            .track()
-            .and_then(|track| track.cover_url.as_ref())
-            .is_none()
-        {
+        if self.displayed_track.is_none() && self.playback.read(cx).state.track().is_none() {
             return div().into_any_element();
         }
         let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
@@ -790,6 +920,8 @@ impl LyruneView {
     fn render_main(
         &mut self,
         expansion_progress: f32,
+        waiting: bool,
+        small_cover: Option<Arc<RenderImage>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -815,7 +947,7 @@ impl LyruneView {
                 browser::browsing_area(&self.browser, window, cx)
             })
             .child(self.render_lyrics_layer(expansion_progress, window, cx))
-            .child(self.render_player_bar(window, cx))
+            .child(self.render_player_bar(waiting, small_cover, window, cx))
             .when(popover_open, |this| {
                 this.child(
                     deferred(
@@ -855,7 +987,7 @@ impl Render for LyruneView {
         }
 
         let expansion_progress = self.lyrics_expansion_progress(window, cx);
-        self.sync_lyrics_view(cx);
+        let (waiting, small_cover) = self.sync_track_presentation(window, cx);
         // 自己持有通知列表，使其继续位于歌词之上、延后绘制的菜单之下。
         let notification_layer = div()
             .absolute()
@@ -867,7 +999,7 @@ impl Render for LyruneView {
             div()
                 .relative()
                 .size_full()
-                .child(self.render_main(expansion_progress, window, cx))
+                .child(self.render_main(expansion_progress, waiting, small_cover, window, cx))
                 .child(notification_layer)
                 .into_any_element()
         } else {

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use gpui::{Context, Entity, EventEmitter};
 use lyrune_api::{CredentialSession, PlaybackOption, PlaylistPage, ProtocolClient, Quality, Track};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::cache::{AudioCache, PreparedStream};
@@ -29,6 +29,7 @@ use crate::singleflight::SingleFlight;
 use crate::{inhibit::InhibitHandle, mpris::MprisHandle};
 
 const CDN_REFRESH_RETRY: Duration = Duration::from_secs(60);
+const TRACK_PRESENTATION_TIMEOUT: Duration = Duration::from_millis(450);
 
 pub(crate) struct Playback {
     pub(super) state: PlaybackState,
@@ -54,7 +55,7 @@ pub(super) enum PlaybackEvent {
         mid: String,
         duration: Duration,
         position: Duration,
-        same_track: bool,
+        generation: u64,
     },
     #[cfg(target_os = "linux")]
     Stopped,
@@ -266,11 +267,11 @@ impl PlaybackState {
     }
 
     pub(super) fn track(&self) -> Option<&Track> {
-        self.queue
-            .as_ref()?
-            .tracks
-            .get(self.current_track?)
-            .map(Arc::as_ref)
+        self.track_arc().map(Arc::as_ref)
+    }
+
+    pub(super) fn track_arc(&self) -> Option<&Arc<Track>> {
+        self.queue.as_ref()?.tracks.get(self.current_track?)
     }
 
     pub(super) fn set_shuffle(&mut self, enabled: bool) {
@@ -347,6 +348,7 @@ impl PlaybackState {
 #[derive(Default)]
 pub(super) struct PlaybackLoad {
     generation: u64,
+    presentation: Option<(Instant, oneshot::Sender<()>)>,
     // 属于播放队列，不是当前页面表格中的行号。
     pub(super) track: Option<usize>,
     // 加载中再次切换音质时沿用原来的播放意图，此时不能从已停止的音频设备推断。
@@ -357,12 +359,33 @@ impl PlaybackLoad {
     // 只使旧结果失效，不取消任务或清除加载标记。
     // 停止和退出需要先失效，再停止设备，最后清除加载标记。
     pub(super) fn invalidate(&mut self) -> u64 {
+        self.presentation = None;
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
 
     pub(super) fn is_current(&self, generation: u64) -> bool {
         self.generation == generation
+    }
+
+    pub(super) fn wait_for_presentation(&mut self, now: Instant) -> oneshot::Receiver<()> {
+        let (ready, presented) = oneshot::channel();
+        self.presentation = Some((now + TRACK_PRESENTATION_TIMEOUT, ready));
+        presented
+    }
+
+    pub(super) fn pending_presentation(&self) -> Option<(u64, Instant)> {
+        self.presentation
+            .as_ref()
+            .map(|(deadline, _)| (self.generation, *deadline))
+    }
+
+    pub(super) fn present(&mut self, generation: u64) {
+        if self.is_current(generation)
+            && let Some((_, ready)) = self.presentation.take()
+        {
+            let _ = ready.send(());
+        }
     }
 
     pub(super) fn clear(&mut self) {
@@ -561,6 +584,10 @@ impl Playback {
             );
         });
         let generation = self.state.load.invalidate();
+        let presentation = self
+            .state
+            .load
+            .wait_for_presentation(cx.background_executor().now());
         self.state.current_track = Some(index);
         self.state.set_shuffle(self.state.shuffle);
         self.state.load.track = Some(index);
@@ -572,7 +599,7 @@ impl Playback {
             mid: track.mid.clone(),
             duration: Duration::from_secs(track.duration_seconds),
             position: resume_at,
-            same_track,
+            generation,
         });
         self.state.waiting_for_recommendation = false;
         self.persist_current_playback(cx);
@@ -611,8 +638,15 @@ impl Playback {
         }));
 
         cx.spawn(async move |this, cx| {
+            let mut presentation = Some(presentation);
             while let Some(event) = receiver.recv().await {
                 let finished = matches!(&event, PlaybackLoadEvent::Finished(_));
+                if finished
+                    && let Some(presented) = presentation.take()
+                    && presented.await.is_err()
+                {
+                    break;
+                }
                 #[cfg(target_os = "linux")]
                 let seeked = matches!(&event, PlaybackLoadEvent::Finished(Ok(_)));
                 let _ = this.update(cx, |this, cx| {

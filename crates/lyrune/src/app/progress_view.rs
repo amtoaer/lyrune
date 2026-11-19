@@ -92,6 +92,10 @@ impl PlaybackProgressView {
         }
     }
 
+    pub(super) fn position(&self) -> Duration {
+        self.position
+    }
+
     pub(super) fn set_input(
         &mut self,
         input: ProgressInput,

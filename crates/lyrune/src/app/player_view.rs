@@ -17,7 +17,6 @@ use lyrune_api::{Quality, SearchAlbum, SearchArtist, Track};
 use super::progress_view::{PlaybackProgressView, ProgressInput};
 use super::{LyruneView, PLAYER_BAR_HEIGHT};
 use crate::design::ColorTheme;
-use crate::http::cached_image_source;
 use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
 use crate::library::format_duration;
 use crate::settings::RepeatMode;
@@ -25,6 +24,7 @@ use crate::settings::RepeatMode;
 #[derive(PartialEq)]
 pub(super) struct PlayerInput {
     pub(super) liked: Option<bool>,
+    pub(super) cover: Option<Arc<RenderImage>>,
     pub(super) active_quality: Quality,
     pub(super) available_qualities: Vec<Quality>,
     pub(super) loading: bool,
@@ -98,6 +98,7 @@ impl PlayerControlsView {
             track: None,
             input: PlayerInput {
                 liked: None,
+                cover: None,
                 active_quality: quality,
                 available_qualities: Vec::new(),
                 loading: false,
@@ -382,6 +383,14 @@ impl PlayerControlsView {
     }
 }
 
+pub(super) fn player_cover_size(window: &Window) -> Pixels {
+    if window.viewport_size().width < px(900.) {
+        px(44.)
+    } else {
+        px(52.)
+    }
+}
+
 impl Render for PlayerControlsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
@@ -400,9 +409,9 @@ impl Render for PlayerControlsView {
         let loading = self.input.loading;
         let show_pause = self.input.show_pause;
         let icon_accent = palette.primary;
-        let cover_size = if narrow { px(44.) } else { px(52.) };
-        let cover = match track.as_ref().and_then(|track| track.cover_url.clone()) {
-            Some(url) => div()
+        let cover_size = player_cover_size(window);
+        let cover = match self.input.cover.clone() {
+            Some(cover) => div()
                 .id("player-cover")
                 .relative()
                 .size(cover_size)
@@ -410,7 +419,7 @@ impl Render for PlayerControlsView {
                 .rounded(px(10.))
                 .overflow_hidden()
                 .child(
-                    img(cached_image_source(url, cover_size, window.scale_factor()))
+                    img(cover)
                         .size_full()
                         .rounded(px(10.))
                         .object_fit(ObjectFit::Cover),
@@ -441,6 +450,7 @@ impl Render for PlayerControlsView {
                 )
                 .into_any_element(),
             None => div()
+                .id("player-cover")
                 .size(cover_size)
                 .flex_shrink_0()
                 .rounded(px(10.))
@@ -454,6 +464,11 @@ impl Render for PlayerControlsView {
                     theme.muted_foreground,
                     px(18.),
                 ))
+                .when(has_track, |cover| {
+                    cover.cursor_pointer().on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(PlayerAction::ToggleLyrics);
+                    }))
+                })
                 .into_any_element(),
         };
         let title_text = track
@@ -578,24 +593,24 @@ impl Render for PlayerControlsView {
                                     .child(artists),
                             )
                             .when(has_track, |info| {
+                                let Some(liked) = liked else {
+                                    return info.child(div().size(px(30.)));
+                                };
                                 info.child(
                                     Button::new("like-current-track")
+                                        .debug_selector(|| "like-current-track".to_owned())
                                         .ghost()
                                         .rounded(px(999.))
                                         .size(px(30.))
                                         .p_0()
-                                        .tooltip(if liked == Some(true) {
-                                            "取消喜欢"
-                                        } else {
-                                            "喜欢"
-                                        })
+                                        .tooltip(if liked { "取消喜欢" } else { "喜欢" })
                                         .child(media_icon_hsla(
-                                            if liked == Some(true) {
+                                            if liked {
                                                 MediaIcon::HeartFilled
                                             } else {
                                                 MediaIcon::Heart
                                             },
-                                            if liked == Some(true) {
+                                            if liked {
                                                 theme.danger
                                             } else {
                                                 theme.secondary_foreground
@@ -806,9 +821,19 @@ impl LyruneView {
                     browser.open_search_artist(artist.clone(), window, cx)
                 });
             }
-            PlayerAction::ToggleLike => self
-                .browser
-                .update(cx, |browser, cx| browser.toggle_current_track_liked(cx)),
+            PlayerAction::ToggleLike => {
+                if self
+                    .playback
+                    .read(cx)
+                    .state
+                    .load
+                    .pending_presentation()
+                    .is_none()
+                {
+                    self.browser
+                        .update(cx, |browser, cx| browser.toggle_current_track_liked(cx));
+                }
+            }
             PlayerAction::Shuffle => self.playback.update(cx, |playback, cx| {
                 playback.state.set_shuffle(!playback.state.shuffle);
                 playback.persist_playback_options(cx);
@@ -879,21 +904,12 @@ impl LyruneView {
 
     pub(super) fn render_player_bar(
         &mut self,
+        waiting: bool,
+        cover: Option<Arc<RenderImage>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let track = self
-            .playback
-            .read(cx)
-            .state
-            .queue
-            .as_ref()
-            .and_then(|queue| {
-                queue
-                    .tracks
-                    .get(self.playback.read(cx).state.current_track?)
-                    .cloned()
-            });
+        let track = self.displayed_track.clone();
         let has_track = track.is_some();
         let foreground = if self.cover_backdrop_expanded {
             cx.theme().foreground
@@ -901,27 +917,36 @@ impl LyruneView {
             cx.theme().secondary_foreground
         };
         let input = ProgressInput {
-            duration: self.playback.read(cx).state.duration(),
-            interactive: has_track
+            duration: track
+                .as_ref()
+                .map(|track| Duration::from_secs(track.duration_seconds)),
+            interactive: !waiting
+                && has_track
                 && self.playback.read(cx).state.started
                 && self.playback.read(cx).state.load.track.is_none(),
-            advancing: self.playback.read(cx).state.is_advancing(),
+            advancing: !waiting && self.playback.read(cx).state.is_advancing(),
             frame_rate: self.preferences.read(cx).settings.progress_frame_rate,
             font: self.preferences.read(cx).fonts.monospace.clone(),
             foreground,
         };
+        let position = if waiting {
+            self.progress.read(cx).position()
+        } else {
+            self.playback.read(cx).state.position
+        };
         self.progress.update(cx, |progress, cx| {
-            progress.set_input(input, self.playback.read(cx).state.position, window, cx);
+            progress.set_input(input, position, window, cx)
         });
 
         let input = PlayerInput {
+            cover,
             liked: track
                 .as_ref()
                 .and_then(|track| self.browser.read(cx).liked_tracks.get(&track.mid))
                 .copied(),
             active_quality: self.playback.read(cx).state.active_quality,
             available_qualities: self.playback.read(cx).state.available_qualities.clone(),
-            loading: self.playback.read(cx).state.load.track.is_some(),
+            loading: waiting || self.playback.read(cx).state.load.track.is_some(),
             show_pause: if self.playback.read(cx).state.load.track.is_some() {
                 self.playback.read(cx).state.load.autoplay
             } else {
@@ -1098,6 +1123,36 @@ mod tests {
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("queue-track-0").is_none());
+    }
+
+    #[gpui::test]
+    fn test_hides_unknown_like_state(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let progress = cx.new(|cx| PlaybackProgressView::new(None, font(".SystemUIFont"), cx));
+        let controls = cx
+            .new(|cx| PlayerControlsView::new(0.5, ColorTheme::default(), Quality::default(), cx));
+        let (_, cx) = cx.add_window_view(|_, _| TestPlayerBar {
+            progress,
+            controls: controls.clone(),
+        });
+        controls.update(cx, |view, cx| {
+            let track = serde_json::from_value(serde_json::json!({
+                "mid": "song", "title": "歌曲", "artists": "歌手",
+                "album": "专辑", "album_mid": "", "duration_seconds": 180
+            }))
+            .unwrap();
+            view.track = Some(std::sync::Arc::new(track));
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("like-current-track").is_none());
+
+        controls.update(cx, |view, cx| {
+            view.input.liked = Some(true);
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("like-current-track").is_some());
     }
 
     #[gpui::test]

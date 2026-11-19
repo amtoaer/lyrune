@@ -151,6 +151,21 @@ impl Asset for CachedThumbnailFile {
 }
 
 impl CachedImageCache {
+    pub(crate) fn cover(
+        &mut self,
+        url: &str,
+        size: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        let ImageSource::Resource(resource) =
+            cached_image_source(url.to_owned(), size, window.scale_factor())
+        else {
+            unreachable!();
+        };
+        self.load(&resource, window, cx)
+    }
+
     pub fn new(capacity: usize, cx: &mut App) -> Entity<Self> {
         let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
         cx.new(|_| Self {

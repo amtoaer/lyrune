@@ -542,6 +542,27 @@ fn playback_load_rejects_requests_across_restarts() {
 }
 
 #[test]
+fn test_audio_waits_for_current_track_presentation() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let mut load = PlaybackLoad::default();
+    let old = load.invalidate();
+    let mut superseded = load.wait_for_presentation(Instant::now());
+    assert_eq!(superseded.try_recv(), Err(TryRecvError::Empty));
+
+    let current = load.invalidate();
+    let mut prepared = load.wait_for_presentation(Instant::now());
+    assert_eq!(superseded.try_recv(), Err(TryRecvError::Closed));
+    assert!(!load.is_current(old));
+    load.present(old);
+    assert_eq!(prepared.try_recv(), Err(TryRecvError::Empty));
+
+    load.present(current);
+    assert_eq!(prepared.try_recv(), Ok(()));
+    assert!(load.is_current(current));
+}
+
+#[test]
 fn horizontal_lyric_scroll_starts_at_the_anchor_and_stops_at_the_end() {
     assert_eq!(
         lyric_horizontal_scroll_offset(px(500.), px(600.), px(500.)),

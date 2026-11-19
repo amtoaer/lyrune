@@ -14,9 +14,7 @@ use super::animation::frame_is_due;
 #[cfg(test)]
 use super::lyrics;
 use super::lyrics::{LyricLine, ParsedLyrics};
-use crate::http::{
-    BLURRED_COVER_SIZE, BlurredCoverStyle, blurred_cover_image, cached_image_source,
-};
+use crate::http::{BLURRED_COVER_SIZE, BlurredCoverStyle, blurred_cover_image};
 use crate::icons::{MediaIcon, media_icon_hsla};
 use crate::player::AudioPlayer;
 use crate::settings::{
@@ -32,6 +30,18 @@ const LYRIC_STYLE_DURATION: Duration = Duration::from_millis(240);
 const LYRIC_MAX_MOTION_LINES: f32 = 8.;
 pub(super) const LYRIC_EXPANSION_DURATION: Duration = Duration::from_millis(480);
 const LYRIC_TRACK_SWITCH_DURATION: Duration = Duration::from_millis(420);
+const LYRIC_COVER_SWITCH_DURATION: Duration = Duration::from_millis(300);
+
+pub(super) fn lyrics_cover_size(window: &Window) -> Option<Pixels> {
+    let viewport = window.viewport_size();
+    let width = f32::from(viewport.width);
+    let height = (f32::from(viewport.height) - PLAYER_BAR_HEIGHT).max(0.);
+    (width >= 900.).then(|| {
+        px((width * if width < 1120. { 0.3 } else { 0.28 })
+            .min(height * 0.58)
+            .clamp(280., 520.))
+    })
+}
 const LYRIC_HORIZONTAL_ANCHOR: f32 = 0.42;
 const LYRIC_HORIZONTAL_STEP: f32 = 0.5;
 
@@ -921,6 +931,8 @@ impl PartialEq for LyricsContent {
 pub(super) struct LyricsInput {
     pub(super) mid: String,
     pub(super) cover_url: Option<String>,
+    pub(super) cover_image: Option<Arc<RenderImage>>,
+    pub(super) preload_cover_url: Option<String>,
     pub(super) duration: Option<Duration>,
     pub(super) content: LyricsContent,
     pub(super) font: Font,
@@ -959,6 +971,10 @@ impl BackdropSwitch {
     fn sync(&mut self, watching: bool, url: Option<&String>) {
         if let Some(url) = url {
             self.request(url, watching && self.watching);
+        } else {
+            self.current = None;
+            self.previous = None;
+            self.pending = None;
         }
         if !watching {
             self.hide();
@@ -1000,8 +1016,8 @@ pub(super) struct LyricsView {
     cached_lyrics_panel: Option<CachedLyricsPanel>,
     lyric_highlight_frame_pending: bool,
     lyric_scroll_frame_pending: bool,
-    pending_lyric_reveal_mid: Option<String>,
-    lyric_reveal_frame_pending: bool,
+    previous_cover: Option<Arc<RenderImage>>,
+    cover_fade_phase: bool,
     lyric_animation_frame_pending: bool,
     next_lyric_highlight_frame: Option<Instant>,
     next_lyric_scroll_frame: Option<Instant>,
@@ -1017,6 +1033,8 @@ impl LyricsView {
             input: LyricsInput {
                 mid: String::new(),
                 cover_url: None,
+                cover_image: None,
+                preload_cover_url: None,
                 duration: None,
                 content: LyricsContent::Unloaded,
                 font,
@@ -1041,8 +1059,8 @@ impl LyricsView {
             cached_lyrics_panel: None,
             lyric_highlight_frame_pending: true,
             lyric_scroll_frame_pending: true,
-            pending_lyric_reveal_mid: None,
-            lyric_reveal_frame_pending: false,
+            previous_cover: None,
+            cover_fade_phase: false,
             lyric_animation_frame_pending: false,
             next_lyric_highlight_frame: None,
             next_lyric_scroll_frame: None,
@@ -1061,8 +1079,25 @@ impl LyricsView {
             input.visible && self.window_visible,
             input.cover_url.as_ref(),
         );
+        if self.input.mid != input.mid {
+            self.previous_cover = None;
+            if self.input.expanded
+                && input.expanded
+                && self.window_visible
+                && !cx.reduce_motion()
+                && input.cover_image.is_some()
+                && self.input.cover_image != input.cover_image
+            {
+                self.previous_cover = self.input.cover_image.clone();
+                if self.previous_cover.is_some() {
+                    self.cover_fade_phase = !self.cover_fade_phase;
+                }
+            }
+        } else if !input.visible || input.cover_image.is_none() {
+            self.previous_cover = None;
+        }
         // 与背景一致：初次可见时直接定位，持续可见时位置变化一律滚动。
-        if input.visible && !self.input.visible {
+        if (input.visible && !self.input.visible) || self.input.mid != input.mid {
             self.lyric_motion_state = None;
         }
         let position_changed = self.position != position && !input.advancing;
@@ -1088,6 +1123,7 @@ impl LyricsView {
             cx.notify();
         } else {
             self.backdrop.hide();
+            self.previous_cover = None;
         }
     }
 
@@ -1095,15 +1131,9 @@ impl LyricsView {
         self.window_generation = self.window_generation.wrapping_add(1);
         self.backdrop.hide();
         self.lyric_animation_frame_pending = false;
-        self.lyric_reveal_frame_pending = false;
+        self.previous_cover = None;
         self.reset_lyric_animation_frames();
         self.lyric_motion_state = None;
-        cx.notify();
-    }
-
-    pub(super) fn start_track(&mut self, mid: &str, expanded: bool, cx: &mut Context<Self>) {
-        self.lyric_motion_state = None;
-        self.pending_lyric_reveal_mid = expanded.then(|| mid.to_owned());
         cx.notify();
     }
 
@@ -1222,34 +1252,6 @@ impl LyricsView {
             state.started_at = now;
         }
         (state.scroll_anchor(now), state.style_anchor(now))
-    }
-
-    fn defer_new_lyrics_until_next_frame(
-        &mut self,
-        mid: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.pending_lyric_reveal_mid.as_deref() != Some(mid) {
-            return false;
-        }
-        if !self.lyric_reveal_frame_pending {
-            // 切歌后延迟一帧显示歌词；回调比对 mid，避免连续切歌解除后一首歌的等待。
-            self.lyric_reveal_frame_pending = true;
-            let mid = mid.to_owned();
-            let generation = self.window_generation;
-            cx.on_next_frame(window, move |this, _, cx| {
-                if this.window_generation != generation {
-                    return;
-                }
-                this.lyric_reveal_frame_pending = false;
-                if this.pending_lyric_reveal_mid.as_deref() == Some(mid.as_str()) {
-                    this.pending_lyric_reveal_mid = None;
-                }
-                cx.notify();
-            });
-        }
-        true
     }
 
     fn render_lyrics_panel(
@@ -1464,14 +1466,10 @@ impl LyricsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
-        let track_mid = self.input.mid.clone();
-        let defer_new_lyrics = self.defer_new_lyrics_until_next_frame(&track_mid, window, cx);
         let viewport_width = f32::from(window.viewport_size().width);
         let compact = viewport_width < 1120.;
         let narrow = viewport_width < 900.;
-        let cover_size = px((viewport_width * if compact { 0.3 } else { 0.28 })
-            .min(f32::from(available_height) * 0.58)
-            .clamp(280., 520.));
+        let cover_size = lyrics_cover_size(window);
         let theme = cx.theme().clone();
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
 
@@ -1484,6 +1482,13 @@ impl LyricsView {
             blur_percent: self.input.background_blur_percent,
         };
 
+        if self.input.visible
+            && self.window_visible
+            && let Some(url) = self.input.preload_cover_url.as_deref()
+            && self.input.cover_url.as_deref() != Some(url)
+        {
+            let _ = blurred_cover_image(url, backdrop_style, window, cx);
+        }
         // 就绪后才切换，避免中途褪到主题底色。
         if let Some(url) = self.backdrop.pending.clone()
             && (!self.backdrop.watching
@@ -1492,10 +1497,13 @@ impl LyricsView {
             self.backdrop.commit();
         }
 
-        match self.input.cover_url.clone() {
-            Some(url) => {
-                let current_backdrop_url =
-                    self.backdrop.current.clone().unwrap_or_else(|| url.clone());
+        match (!self.input.mid.is_empty()).then(|| self.input.mid.clone()) {
+            Some(track_mid) => {
+                let current_backdrop_url = self
+                    .input
+                    .cover_url
+                    .as_ref()
+                    .map(|url| self.backdrop.current.as_ref().unwrap_or(url).clone());
                 let track_transition_duration = if self.input.expanded {
                     LYRIC_TRACK_SWITCH_DURATION
                 } else {
@@ -1517,30 +1525,43 @@ impl LyricsView {
                 } else {
                     1. - crossfade
                 };
-                let previous_backdrop_opacity = 1. - current_backdrop_opacity;
-                if previous_backdrop_opacity == 0. {
+                if current_backdrop_opacity == 1. {
                     self.backdrop.previous = None;
                 }
                 // 与上方就绪判断在同一层取图，共用同一份生成结果。
-                let current_backdrop =
-                    blurred_cover_image(&current_backdrop_url, backdrop_style, window, cx)
-                        .and_then(Result::ok);
+                let current_backdrop = current_backdrop_url.and_then(|url| {
+                    blurred_cover_image(&url, backdrop_style, window, cx).and_then(Result::ok)
+                });
                 let previous_backdrop = self.backdrop.previous.clone().and_then(|url| {
                     blurred_cover_image(&url, backdrop_style, window, cx).and_then(Result::ok)
                 });
-                let cover_url = url.clone();
-                let lyrics = if defer_new_lyrics {
-                    div().into_any_element()
+                let lyrics = self.render_lyrics_panel(
+                    &track_mid,
+                    theme.foreground,
+                    compact,
+                    narrow,
+                    window,
+                    cx,
+                );
+                let cover_fade = transition(
+                    ("lyrics-cover", "track-fade"),
+                    if self.cover_fade_phase { 1. } else { 0. },
+                    Transition::new(if self.previous_cover.is_some() && self.input.expanded {
+                        LYRIC_COVER_SWITCH_DURATION
+                    } else {
+                        Duration::ZERO
+                    }),
+                    window,
+                    cx,
+                );
+                let cover_opacity = if self.cover_fade_phase {
+                    cover_fade
                 } else {
-                    self.render_lyrics_panel(
-                        &track_mid,
-                        theme.foreground,
-                        compact,
-                        narrow,
-                        window,
-                        cx,
-                    )
+                    1. - cover_fade
                 };
+                if cover_opacity == 1. {
+                    self.previous_cover = None;
+                }
                 let collapse_button = if client_decorations {
                     div()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1604,7 +1625,6 @@ impl LyricsView {
                                 .right(-backdrop_padding)
                                 .bottom(-backdrop_padding)
                                 .left(-backdrop_padding)
-                                .opacity(previous_backdrop_opacity)
                                 .child(
                                     img(previous_backdrop)
                                         .size_full()
@@ -1649,23 +1669,46 @@ impl LyricsView {
                             .items_center()
                             .justify_center()
                             .gap(if compact { px(64.) } else { px(96.) })
-                            .when(!narrow, |layout| {
+                            .when_some(cover_size, |layout, cover_size| {
+                                let cover_radius = px(20.);
                                 layout.child(
                                     div()
+                                        .relative()
                                         .size(cover_size)
                                         .flex_shrink_0()
-                                        .rounded(px(20.))
+                                        .rounded(cover_radius)
                                         .overflow_hidden()
                                         .shadow_2xl()
-                                        .child(
-                                            img(cached_image_source(
-                                                cover_url,
-                                                cover_size,
-                                                window.scale_factor(),
-                                            ))
-                                            .size_full()
-                                            .rounded(px(20.))
-                                            .object_fit(ObjectFit::Cover),
+                                        .bg(theme.muted)
+                                        .when_some(self.previous_cover.clone(), |cover, image| {
+                                            cover.child(
+                                                img(image)
+                                                    .absolute()
+                                                    .inset_0()
+                                                    .size_full()
+                                                    .rounded(cover_radius)
+                                                    .object_fit(ObjectFit::Cover),
+                                            )
+                                        })
+                                        .when_some(
+                                            self.input.cover_image.clone(),
+                                            |cover, image| {
+                                                cover.child(
+                                                    img(image)
+                                                        .absolute()
+                                                        .inset_0()
+                                                        .size_full()
+                                                        .rounded(cover_radius)
+                                                        .object_fit(ObjectFit::Cover)
+                                                        .opacity(
+                                                            if self.previous_cover.is_some() {
+                                                                cover_opacity
+                                                            } else {
+                                                                1.
+                                                            },
+                                                        ),
+                                                )
+                                            },
                                         ),
                                 )
                             })
@@ -1749,14 +1792,14 @@ impl Render for LyricsView {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackdropSwitch, LYRIC_MAX_MOTION_LINES, LYRIC_SCROLL_DURATION, LYRIC_TRACK_SWITCH_DURATION,
-        LyricsContent, LyricsInput, LyricsView, lyrics,
+        BackdropSwitch, LYRIC_COVER_SWITCH_DURATION, LYRIC_MAX_MOTION_LINES, LYRIC_SCROLL_DURATION,
+        LYRIC_TRACK_SWITCH_DURATION, LyricsContent, LyricsInput, LyricsView, lyrics,
     };
     use crate::settings::{
         DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
         DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, FrameRate,
     };
-    use gpui::{TestAppContext, VisualTestContext, font, px, white};
+    use gpui::{RenderImage, TestAppContext, VisualTestContext, font, px, white};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1793,6 +1836,11 @@ mod tests {
         backdrop.sync(true, url("fifth").as_ref());
         assert_eq!(backdrop.commit(), None);
         assert_eq!(backdrop.current.as_deref(), Some("fifth"));
+
+        backdrop.sync(true, None);
+        backdrop.sync(true, url("sixth").as_ref());
+        assert_eq!(backdrop.commit(), Some(false));
+        assert_eq!(backdrop.previous, None);
     }
 
     #[gpui::test]
@@ -1803,6 +1851,7 @@ mod tests {
         let render = |url: &str, expanded, cx: &mut VisualTestContext| {
             view.update(cx, |view, cx| {
                 let input = LyricsInput {
+                    mid: url.into(),
                     cover_url: Some(url.into()),
                     expanded,
                     visible: true,
@@ -1835,6 +1884,41 @@ mod tests {
             .executor()
             .advance_clock(LYRIC_TRACK_SWITCH_DURATION / 2);
         assert_eq!(render("third", false, cx), None);
+    }
+
+    #[gpui::test]
+    fn test_large_cover_keeps_old_image_until_fade_ends(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, _| LyricsView::new(None, font(".SystemUIFont")));
+        let cover = |gray| {
+            let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([gray, gray, gray, 255]));
+            Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
+                image
+            )]))
+        };
+        let first = cover(64);
+        let second = cover(128);
+        let display = |mid: &str, cover_image, cx: &mut VisualTestContext| {
+            view.update(cx, |view, cx| {
+                let input = LyricsInput {
+                    mid: mid.into(),
+                    cover_image: Some(cover_image),
+                    expanded: true,
+                    visible: true,
+                    ..LyricsView::new(None, font(".SystemUIFont")).input
+                };
+                view.set_input(input, Duration::ZERO, cx);
+            });
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        };
+        display("first", first.clone(), cx);
+        display("second", second.clone(), cx);
+        assert!(view.read_with(cx, |view, _| view.previous_cover.as_ref() == Some(&first)));
+
+        cx.cx.executor().advance_clock(LYRIC_COVER_SWITCH_DURATION);
+        display("second", second, cx);
+        assert!(view.read_with(cx, |view, _| view.previous_cover.is_none()));
     }
 
     #[gpui::test]
@@ -1969,6 +2053,8 @@ mod tests {
         let input = || LyricsInput {
             mid: "test".into(),
             cover_url: None,
+            cover_image: None,
+            preload_cover_url: None,
             duration: Some(Duration::from_secs(10)),
             content: LyricsContent::Ready(lyrics.clone()),
             font: font(".SystemUIFont"),

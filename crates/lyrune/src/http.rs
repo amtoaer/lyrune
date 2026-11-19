@@ -413,7 +413,7 @@ fn tone_blurred_cover(
     let theme_lab = Oklab::from_color(Srgb::new(background.r, background.g, background.b));
     // 给后续 8 位量化留少量彩度余量。
     let chroma_limit = (style.chroma - 0.003).max(0.);
-    let pixels = image.to_rgba8();
+    let pixels = image.into_rgba8();
     let blend = |amount: f32, pixel: &image::Rgba<u8>| {
         let alpha = f32::from(pixel[3]) / 255. * (1. - amount);
         let mut color = Oklab::from_color(Srgb::new(
@@ -430,9 +430,11 @@ fn tone_blurred_cover(
         Oklab::from_color(rgb.into_format::<f32>())
     };
     let max_delta_e_squared = style.max_delta_e.powi(2);
-    let within_delta_e = |amount: f32| {
+    let within_delta_e = |amount: f32, colors: &mut Vec<Oklab>| {
+        colors.clear();
         pixels.pixels().all(|pixel| {
             let color = blend(amount, pixel);
+            colors.push(color);
             (color.l - theme_lab.l).powi(2)
                 + (color.a - theme_lab.a).powi(2)
                 + (color.b - theme_lab.b).powi(2)
@@ -440,24 +442,25 @@ fn tone_blurred_cover(
         })
     };
     let min_overlay = style.min_overlay_percent as f32 / 100.;
-    let mut amount = min_overlay;
-    if !within_delta_e(min_overlay) {
+    let mut colors = Vec::with_capacity(pixels.len() / 4);
+    if !within_delta_e(min_overlay, &mut colors) {
+        let mut probe = Vec::with_capacity(colors.capacity());
         let mut lower = min_overlay;
         let mut upper = 1.;
         for _ in 0..12 {
             let middle = (lower + upper) / 2.;
-            if within_delta_e(middle) {
+            if within_delta_e(middle, &mut probe) {
                 upper = middle;
+                std::mem::swap(&mut colors, &mut probe);
             } else {
                 lower = middle;
             }
         }
-        amount = upper;
+        if upper == 1. {
+            colors.clear();
+            colors.extend(pixels.pixels().map(|pixel| blend(upper, pixel)));
+        }
     }
-    let colors = pixels
-        .pixels()
-        .map(|pixel| blend(amount, pixel))
-        .collect::<Vec<_>>();
     let foreground = if style.tint_percent == 0 {
         style.foreground
     } else {
@@ -502,7 +505,7 @@ fn tone_blurred_cover(
         0.
     };
     // 全图像素的亮度界同时覆盖局部亮斑和窗口裁剪变化，不依赖歌词当前所在的位置。
-    let mut result = image::RgbImage::new(image.width(), image.height());
+    let mut result = image::RgbImage::new(pixels.width(), pixels.height());
     if render_pass(
         &colors,
         0.,
@@ -520,7 +523,7 @@ fn tone_blurred_cover(
     ) {
         return (result, foreground);
     }
-    let mut probe = image::RgbImage::new(image.width(), image.height());
+    let mut probe = image::RgbImage::new(pixels.width(), pixels.height());
     let mut lower = 0.;
     let mut upper = 1.;
     for _ in 0..12 {

@@ -74,6 +74,20 @@
 
 当然如果非常想用，设置里也提供了歌词页的动画帧率限制，可以以牺牲流畅度为代价大幅改善体验。
 
+## 安装
+
+### NixOS
+
+NixOS 用户（`x86_64-linux`）可以通过社区维护的 [Nix Flake](https://github.com/wuyeyou/nix-packages) 直接运行：
+
+```bash
+nix run github:wuyeyou/nix-packages#lyrune
+```
+
+也支持用户 Profile 安装及 NixOS Flake 声明式安装，详见[安装说明](https://github.com/wuyeyou/nix-packages#安装与使用)。
+
+该 Flake 由社区独立维护，使用 Lyrune 官方发布的 Deb 二进制包，并自动跟踪稳定版本。
+
 ## 参考与致谢
 
 该项目实现过程中参考了如下项目的逻辑：

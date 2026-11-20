@@ -771,11 +771,6 @@ impl LyruneView {
             font: self.preferences.read(cx).fonts.lyrics.clone(),
             font_scale: self.preferences.read(cx).settings.lyric_font_scale,
             line_spacing: self.preferences.read(cx).settings.lyric_line_spacing,
-            background_min_overlay_percent: self
-                .preferences
-                .read(cx)
-                .settings
-                .lyric_background_min_overlay_percent,
             background_max_delta_e: self
                 .preferences
                 .read(cx)

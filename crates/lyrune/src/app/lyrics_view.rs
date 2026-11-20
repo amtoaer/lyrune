@@ -20,7 +20,7 @@ use crate::player::AudioPlayer;
 use crate::settings::{
     DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
     DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
-    DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, DEFAULT_LYRIC_TINT_PERCENT, FrameRate,
+    DEFAULT_LYRIC_TINT_PERCENT, FrameRate,
 };
 
 const LYRIC_ANCHOR_SPACING_EM: f32 = 3.;
@@ -939,7 +939,6 @@ pub(super) struct LyricsInput {
     pub(super) font: Font,
     pub(super) font_scale: u32,
     pub(super) line_spacing: u32,
-    pub(super) background_min_overlay_percent: u32,
     pub(super) background_max_delta_e: f32,
     pub(super) background_chroma: f32,
     pub(super) tint_percent: u32,
@@ -1043,7 +1042,6 @@ impl LyricsView {
                 font,
                 font_scale: 100,
                 line_spacing: 100,
-                background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
                 background_max_delta_e: DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
                 background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
                 tint_percent: DEFAULT_LYRIC_TINT_PERCENT,
@@ -1481,7 +1479,6 @@ impl LyricsView {
         let backdrop_style = BlurredCoverStyle {
             background: theme.background,
             foreground: theme.foreground,
-            min_overlay_percent: self.input.background_min_overlay_percent,
             max_delta_e: self.input.background_max_delta_e,
             chroma: self.input.background_chroma,
             tint_percent: self.input.tint_percent,
@@ -1814,7 +1811,7 @@ mod tests {
     use crate::settings::{
         DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
         DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
-        DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, DEFAULT_LYRIC_TINT_PERCENT, FrameRate,
+        DEFAULT_LYRIC_TINT_PERCENT, FrameRate,
     };
     use gpui::{RenderImage, TestAppContext, VisualTestContext, font, px, white};
     use std::sync::Arc;
@@ -2077,7 +2074,6 @@ mod tests {
             font: font(".SystemUIFont"),
             font_scale: 100,
             line_spacing: 100,
-            background_min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
             background_max_delta_e: DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
             background_chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
             tint_percent: DEFAULT_LYRIC_TINT_PERCENT,

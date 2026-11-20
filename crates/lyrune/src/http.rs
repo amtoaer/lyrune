@@ -100,7 +100,6 @@ struct BlurredCoverSource {
     path: Arc<Path>,
     background: Hsla,
     foreground: Hsla,
-    min_overlay_percent: u32,
     max_delta_e_bits: u32,
     chroma_bits: u32,
     tint_percent: u32,
@@ -262,7 +261,6 @@ impl BlurredCoverImage {
                 BlurredCoverStyle {
                     background: source.background,
                     foreground: source.foreground,
-                    min_overlay_percent: source.min_overlay_percent,
                     max_delta_e: f32::from_bits(source.max_delta_e_bits),
                     chroma: f32::from_bits(source.chroma_bits),
                     tint_percent: source.tint_percent,
@@ -304,7 +302,6 @@ pub fn cached_image_source(url: String, size: Pixels, scale_factor: f32) -> Imag
 pub struct BlurredCoverStyle {
     pub background: Hsla,
     pub foreground: Hsla,
-    pub min_overlay_percent: u32,
     pub max_delta_e: f32,
     pub chroma: f32,
     pub tint_percent: u32,
@@ -334,7 +331,6 @@ pub(crate) fn blurred_cover_image(
             path,
             background: style.background,
             foreground: style.foreground,
-            min_overlay_percent: style.min_overlay_percent,
             max_delta_e_bits: style.max_delta_e.to_bits(),
             chroma_bits: style.chroma.to_bits(),
             tint_percent: style.tint_percent,
@@ -441,11 +437,10 @@ fn tone_blurred_cover(
                 <= max_delta_e_squared
         })
     };
-    let min_overlay = style.min_overlay_percent as f32 / 100.;
     let mut colors = Vec::with_capacity(pixels.len() / 4);
-    if !within_delta_e(min_overlay, &mut colors) {
+    if !within_delta_e(0., &mut colors) {
         let mut probe = Vec::with_capacity(colors.capacity());
-        let mut lower = min_overlay;
+        let mut lower = 0.;
         let mut upper = 1.;
         for _ in 0..12 {
             let middle = (lower + upper) / 2.;
@@ -868,14 +863,13 @@ mod tests {
     use crate::settings::{
         DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
         DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
-        DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT, DEFAULT_LYRIC_TINT_PERCENT,
+        DEFAULT_LYRIC_TINT_PERCENT,
     };
 
     fn cover_style(background: u32, foreground: u32) -> BlurredCoverStyle {
         BlurredCoverStyle {
             background: gpui::rgb(background).into(),
             foreground: gpui::rgb(foreground).into(),
-            min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
             max_delta_e: DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
             chroma: DEFAULT_LYRIC_BACKGROUND_CHROMA,
             tint_percent: DEFAULT_LYRIC_TINT_PERCENT,
@@ -944,7 +938,6 @@ mod tests {
             path: Arc::from(path.as_path()),
             background: gpui::rgb(0x1f1f28).into(),
             foreground: gpui::rgb(0xdcd7ba).into(),
-            min_overlay_percent: DEFAULT_LYRIC_BACKGROUND_MIN_OVERLAY_PERCENT,
             max_delta_e_bits: DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E.to_bits(),
             chroma_bits: DEFAULT_LYRIC_BACKGROUND_CHROMA.to_bits(),
             tint_percent: DEFAULT_LYRIC_TINT_PERCENT,
@@ -1012,8 +1005,8 @@ mod tests {
             &images.borrow()[&hash(&second)].upgrade().unwrap()
         ));
 
-        for overlay in [50, 60, 40] {
-            second.min_overlay_percent = overlay;
+        for max_delta_e in [0.2_f32, 0.3, DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E] {
+            second.max_delta_e_bits = max_delta_e.to_bits();
             cover.update(cx, |cover, cx| {
                 cover.sources = vec![second.clone()];
                 cx.notify();
@@ -1331,16 +1324,15 @@ mod tests {
     }
 
     #[test]
-    fn test_blurred_cover_minimum_mix() {
+    fn test_blurred_cover_mixes_only_above_delta_e_limit() {
         let image = image::RgbImage::from_pixel(1, 1, image::Rgb([240; 3]));
         let style = BlurredCoverStyle {
-            min_overlay_percent: 40,
             max_delta_e: 1.,
             contrast: 0.,
             ..cover_style(0x202020, 0xdcd7ba)
         };
         let (loose, _) = tone_blurred_cover(image.clone().into(), style);
-        assert_eq!(loose.get_pixel(0, 0).0, [157; 3]);
+        assert_eq!(loose.get_pixel(0, 0).0, [240; 3]);
         let (tight, _) = tone_blurred_cover(
             image.into(),
             BlurredCoverStyle {
@@ -1357,7 +1349,6 @@ mod tests {
     fn test_blurred_cover_limits_chroma_directly() {
         let image = image::RgbImage::from_pixel(1, 1, image::Rgb([220, 100, 40]));
         let style = BlurredCoverStyle {
-            min_overlay_percent: 0,
             max_delta_e: 0.03,
             chroma: 0.,
             contrast: 0.,
@@ -1374,7 +1365,6 @@ mod tests {
     #[test]
     fn test_blurred_cover_lyric_tint() {
         let style = BlurredCoverStyle {
-            min_overlay_percent: 0,
             max_delta_e: 1.,
             tint_percent: 0,
             contrast: 0.,
@@ -1415,7 +1405,6 @@ mod tests {
     fn test_blurred_cover_contrast_bound() {
         for (background, foreground) in [(0x1f1f28, 0xdcd7ba), (0xf2ecbc, 0x545464)] {
             let style = BlurredCoverStyle {
-                min_overlay_percent: 0,
                 max_delta_e: 1.,
                 chroma: 0.4,
                 tint_percent: 0,

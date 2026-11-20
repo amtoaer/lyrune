@@ -906,16 +906,12 @@ impl LyruneView {
         &mut self,
         waiting: bool,
         cover: Option<Arc<RenderImage>>,
+        foreground: Hsla,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let track = self.displayed_track.clone();
         let has_track = track.is_some();
-        let foreground = if self.cover_backdrop_expanded {
-            cx.theme().foreground
-        } else {
-            cx.theme().secondary_foreground
-        };
         let input = ProgressInput {
             duration: track
                 .as_ref()

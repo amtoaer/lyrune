@@ -15,7 +15,7 @@ use super::animation::frame_is_due;
 use super::lyrics;
 use super::lyrics::{LyricLine, ParsedLyrics};
 use crate::http::{BLURRED_COVER_SIZE, BlurredCoverStyle, blurred_cover_image};
-use crate::icons::{MediaIcon, media_icon_hsla};
+use crate::icons::{MediaIcon, tinted_media_icon};
 use crate::player::AudioPlayer;
 use crate::settings::{
     DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT, DEFAULT_LYRIC_BACKGROUND_CHROMA,
@@ -998,11 +998,19 @@ impl BackdropSwitch {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct BackdropFrame {
+    current: Option<(Arc<RenderImage>, f32)>,
+    previous: Option<Arc<RenderImage>>,
+    foreground: Hsla,
+}
+
 pub(super) struct LyricsView {
     input: LyricsInput,
     audio: Option<Arc<AudioPlayer>>,
     position: Duration,
     backdrop: BackdropSwitch,
+    backdrop_frame: Option<BackdropFrame>,
     window_visible: bool,
     lyric_layout_cache: LyricLayoutCache,
     lyric_motion_state: Option<LyricMotionState>,
@@ -1047,6 +1055,7 @@ impl LyricsView {
             audio,
             position: Duration::ZERO,
             backdrop: BackdropSwitch::default(),
+            backdrop_frame: None,
             window_visible: true,
             lyric_layout_cache: LyricLayoutCache::default(),
             lyric_motion_state: None,
@@ -1454,22 +1463,14 @@ impl LyricsView {
             .into_any_element()
     }
 
-    pub(super) fn render_cover_backdrop(
+    pub(super) fn prepare_backdrop(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
-        let viewport_width = f32::from(window.viewport_size().width);
-        let compact = viewport_width < 1120.;
-        let narrow = viewport_width < 900.;
-        let cover_size = lyrics_cover_size(window);
-        let theme = cx.theme().clone();
-        let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
-
+    ) -> Option<Hsla> {
         let backdrop_style = BlurredCoverStyle {
-            background: theme.background,
-            foreground: theme.foreground,
+            background: cx.theme().background,
+            foreground: cx.theme().foreground,
             max_delta_e: self.input.background_max_delta_e,
             chroma: self.input.background_chroma,
             tint_percent: self.input.tint_percent,
@@ -1492,53 +1493,81 @@ impl LyricsView {
             self.backdrop.commit();
         }
 
+        let frame = (!self.input.mid.is_empty()).then(|| {
+            let current_backdrop_url = self
+                .input
+                .cover_url
+                .as_ref()
+                .map(|url| self.backdrop.current.as_ref().unwrap_or(url).clone());
+            let track_transition_duration = if self.input.expanded {
+                LYRIC_TRACK_SWITCH_DURATION
+            } else {
+                Duration::ZERO
+            };
+            let crossfade = transition(
+                ("cover-backdrop", "track-crossfade"),
+                if self.backdrop.crossfade_phase {
+                    1.
+                } else {
+                    0.
+                },
+                Transition::new(track_transition_duration),
+                window,
+                cx,
+            );
+            let current_backdrop_opacity = if self.backdrop.crossfade_phase {
+                crossfade
+            } else {
+                1. - crossfade
+            };
+            if current_backdrop_opacity == 1. {
+                self.backdrop.previous = None;
+            }
+            // 与上方就绪判断在同一层取图，共用同一份生成结果。
+            let current_backdrop = current_backdrop_url.and_then(|url| {
+                blurred_cover_image(&url, backdrop_style, window, cx).and_then(Result::ok)
+            });
+            let previous_backdrop = self.backdrop.previous.clone().and_then(|url| {
+                blurred_cover_image(&url, backdrop_style, window, cx).and_then(Result::ok)
+            });
+            let mut lyric_foreground = previous_backdrop
+                .as_ref()
+                .map_or(backdrop_style.foreground, |cover| cover.foreground);
+            if let Some(cover) = &current_backdrop {
+                lyric_foreground = lyric_foreground
+                    .to_rgb()
+                    .blend(cover.foreground.to_rgb().opacity(current_backdrop_opacity))
+                    .into();
+            }
+            BackdropFrame {
+                current: current_backdrop.map(|cover| (cover.image, current_backdrop_opacity)),
+                previous: previous_backdrop.map(|cover| cover.image),
+                foreground: lyric_foreground,
+            }
+        });
+        let foreground = frame.as_ref().map(|frame| frame.foreground);
+        if self.backdrop_frame != frame {
+            self.backdrop_frame = frame;
+            cx.notify();
+        }
+        foreground
+    }
+
+    fn render_cover_backdrop(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
+        let viewport_width = f32::from(window.viewport_size().width);
+        let compact = viewport_width < 1120.;
+        let narrow = viewport_width < 900.;
+        let cover_size = lyrics_cover_size(window);
+        let theme = cx.theme().clone();
+        let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
+
         match (!self.input.mid.is_empty()).then(|| self.input.mid.clone()) {
             Some(track_mid) => {
-                let current_backdrop_url = self
-                    .input
-                    .cover_url
+                let frame = self.backdrop_frame.clone();
+                let lyric_foreground = frame
                     .as_ref()
-                    .map(|url| self.backdrop.current.as_ref().unwrap_or(url).clone());
-                let track_transition_duration = if self.input.expanded {
-                    LYRIC_TRACK_SWITCH_DURATION
-                } else {
-                    Duration::ZERO
-                };
-                let crossfade = transition(
-                    ("cover-backdrop", "track-crossfade"),
-                    if self.backdrop.crossfade_phase {
-                        1.
-                    } else {
-                        0.
-                    },
-                    Transition::new(track_transition_duration),
-                    window,
-                    cx,
-                );
-                let current_backdrop_opacity = if self.backdrop.crossfade_phase {
-                    crossfade
-                } else {
-                    1. - crossfade
-                };
-                if current_backdrop_opacity == 1. {
-                    self.backdrop.previous = None;
-                }
-                // 与上方就绪判断在同一层取图，共用同一份生成结果。
-                let current_backdrop = current_backdrop_url.and_then(|url| {
-                    blurred_cover_image(&url, backdrop_style, window, cx).and_then(Result::ok)
-                });
-                let previous_backdrop = self.backdrop.previous.clone().and_then(|url| {
-                    blurred_cover_image(&url, backdrop_style, window, cx).and_then(Result::ok)
-                });
-                let mut lyric_foreground = previous_backdrop
-                    .as_ref()
-                    .map_or(theme.foreground, |cover| cover.foreground);
-                if let Some(cover) = &current_backdrop {
-                    lyric_foreground = lyric_foreground
-                        .to_rgb()
-                        .blend(cover.foreground.to_rgb().opacity(current_backdrop_opacity))
-                        .into();
-                }
+                    .map_or(theme.foreground, |frame| frame.foreground);
                 let lyrics = self.render_lyrics_panel(
                     &track_mid,
                     lyric_foreground,
@@ -1573,15 +1602,15 @@ impl LyricsView {
                             Button::new("collapse-cover-backdrop")
                                 .custom(
                                     ButtonCustomVariant::new(cx)
-                                        .foreground(theme.foreground)
+                                        .foreground(lyric_foreground)
                                         .hover(theme.background.opacity(0.58))
                                         .active(theme.background.opacity(0.58)),
                                 )
                                 .size(px(36.))
                                 .p_0()
-                                .child(media_icon_hsla(
+                                .child(tinted_media_icon(
                                     MediaIcon::ChevronDown,
-                                    theme.foreground,
+                                    lyric_foreground,
                                     px(16.),
                                 ))
                                 .on_click(cx.listener(|_, _, _, cx| {
@@ -1601,9 +1630,9 @@ impl LyricsView {
                         .items_center()
                         .justify_center()
                         .hover(|style| style.bg(theme.background.opacity(0.78)))
-                        .child(media_icon_hsla(
+                        .child(tinted_media_icon(
                             MediaIcon::ChevronDown,
-                            theme.foreground,
+                            lyric_foreground,
                             px(29.),
                         ))
                         .on_click(cx.listener(|_, _, _, cx| {
@@ -1621,37 +1650,35 @@ impl LyricsView {
                     .absolute()
                     .inset_0()
                     .overflow_hidden()
-                    .when_some(previous_backdrop, |images, previous_backdrop| {
-                        images.child(
-                            div()
-                                .absolute()
-                                .top(-backdrop_padding)
-                                .right(-backdrop_padding)
-                                .bottom(-backdrop_padding)
-                                .left(-backdrop_padding)
-                                .child(
-                                    img(previous_backdrop.image)
-                                        .size_full()
-                                        .object_fit(ObjectFit::Cover),
-                                ),
-                        )
-                    })
-                    .when_some(current_backdrop, |images, current_backdrop| {
-                        images.child(
-                            div()
-                                .absolute()
-                                .top(-backdrop_padding)
-                                .right(-backdrop_padding)
-                                .bottom(-backdrop_padding)
-                                .left(-backdrop_padding)
-                                .opacity(current_backdrop_opacity)
-                                .child(
-                                    img(current_backdrop.image)
-                                        .size_full()
-                                        .object_fit(ObjectFit::Cover),
-                                ),
-                        )
-                    });
+                    .when_some(
+                        frame.as_ref().and_then(|frame| frame.previous.clone()),
+                        |images, image| {
+                            images.child(
+                                div()
+                                    .absolute()
+                                    .top(-backdrop_padding)
+                                    .right(-backdrop_padding)
+                                    .bottom(-backdrop_padding)
+                                    .left(-backdrop_padding)
+                                    .child(img(image).size_full().object_fit(ObjectFit::Cover)),
+                            )
+                        },
+                    )
+                    .when_some(
+                        frame.and_then(|frame| frame.current),
+                        |images, (image, opacity)| {
+                            images.child(
+                                div()
+                                    .absolute()
+                                    .top(-backdrop_padding)
+                                    .right(-backdrop_padding)
+                                    .bottom(-backdrop_padding)
+                                    .left(-backdrop_padding)
+                                    .opacity(opacity)
+                                    .child(img(image).size_full().object_fit(ObjectFit::Cover)),
+                            )
+                        },
+                    );
                 let content = h_flex()
                     .absolute()
                     .inset_0()
@@ -1804,7 +1831,10 @@ mod tests {
         DEFAULT_LYRIC_BACKGROUND_CONTRAST, DEFAULT_LYRIC_BACKGROUND_MAX_DELTA_E,
         DEFAULT_LYRIC_TINT_PERCENT, FrameRate,
     };
-    use gpui::{RenderImage, TestAppContext, VisualTestContext, font, px, white};
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, Render, RenderImage, TestAppContext,
+        VisualTestContext, Window, font, px, white,
+    };
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1852,7 +1882,18 @@ mod tests {
     fn test_backdrop_crossfade(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         cx.executor().allow_parking();
-        let (view, cx) = cx.add_window_view(|_, _| LyricsView::new(None, font(".SystemUIFont")));
+
+        struct BackdropTestRoot(Entity<LyricsView>);
+        impl Render for BackdropTestRoot {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0
+                    .update(cx, |view, cx| view.prepare_backdrop(window, cx));
+                self.0.clone()
+            }
+        }
+
+        let view = cx.new(|_| LyricsView::new(None, font(".SystemUIFont")));
+        let (_, cx) = cx.add_window_view(|_, _| BackdropTestRoot(view.clone()));
         let render = |url: &str, expanded, cx: &mut VisualTestContext| {
             view.update(cx, |view, cx| {
                 let input = LyricsInput {

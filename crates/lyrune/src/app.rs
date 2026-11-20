@@ -50,13 +50,13 @@ use self::{
     playback::{Playback, PlaybackEvent, PlaybackState},
     player_view::{PlayerAction, PlayerControlsView, player_cover_size},
     preferences::Preferences,
-    progress_view::{PlaybackProgressView, SeekTo},
+    progress_view::{EDGE_TIME_LABEL_OFFSET, PlaybackProgressView, SeekTo},
     settings::{SettingsAction, SettingsPage},
 };
 use crate::cache::{AudioCache, audio_cache_limit_bytes};
 use crate::design::AppFonts;
 use crate::http::CachedImageCache;
-use crate::icons::{MediaIcon, media_icon_hsla};
+use crate::icons::{MediaIcon, tinted_media_icon};
 use crate::lyrics_cache::LyricDiskCache;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
@@ -70,6 +70,12 @@ const ARTIST_ALBUM_PAGE_SIZE: u64 = 10;
 const SEARCH_PAGE_SIZE: usize = 20;
 const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
+const WINDOW_CONTROL_TOP: f32 = 18.;
+const WINDOW_CONTROL_SIZE: f32 = 36.;
+
+fn backdrop_coverage(backdrop_top: Pixels, top: Pixels, height: Pixels) -> f32 {
+    ((top + height - backdrop_top) / height).clamp(0., 1.)
+}
 
 fn page_horizontal_padding(narrow: bool) -> Pixels {
     if narrow { px(20.) } else { px(24.) }
@@ -651,7 +657,7 @@ impl LyruneView {
     }
 
     fn lyrics_expansion_progress(&mut self, window: &mut Window, cx: &mut Context<Self>) -> f32 {
-        // 裁剪与 CSD 图标取同一条动画；子视图中的同名 transition 会形成独立状态。
+        // 裁剪与 CSD、时长颜色取同一条动画；子视图中的同名 transition 会形成独立状态。
         let progress = transition(
             ("cover-backdrop", "expansion-progress"),
             if self.cover_backdrop_expanded { 1. } else { 0. },
@@ -809,14 +815,13 @@ impl LyruneView {
 
     fn render_lyrics_layer(
         &self,
-        expansion_progress: f32,
-        window: &Window,
+        available_height: Pixels,
+        revealed_height: Pixels,
         cx: &App,
     ) -> AnyElement {
         if self.displayed_track.is_none() && self.playback.read(cx).state.track().is_none() {
             return div().into_any_element();
         }
-        let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
         // 只有已展开的裁剪区域遮挡输入，透明的未展开区域仍交给普通页面。
         div()
             .id("cover-backdrop")
@@ -832,7 +837,7 @@ impl LyruneView {
                     .left_0()
                     .right_0()
                     .bottom_0()
-                    .h(available_height * expansion_progress)
+                    .h(revealed_height)
                     .overflow_hidden()
                     .occlude()
                     .child(
@@ -856,17 +861,22 @@ impl LyruneView {
             .into_any_element()
     }
 
-    fn render_window_controls(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_window_controls(
+        &self,
+        foreground: Hsla,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let lyrics_controls = self.cover_backdrop_expanded;
         let control_hover_background = theme.background.opacity(0.58);
         let control_variant = ButtonCustomVariant::new(cx)
-            .foreground(theme.foreground)
+            .foreground(foreground)
             .hover(control_hover_background)
             .active(control_hover_background);
         h_flex()
             .absolute()
-            .top(px(18.))
+            .top(px(WINDOW_CONTROL_TOP))
             .right(px(16.))
             .children([
                 div()
@@ -875,11 +885,11 @@ impl LyruneView {
                         Button::new("window-minimize")
                             .when(lyrics_controls, |button| button.custom(control_variant))
                             .when(!lyrics_controls, |button| button.ghost())
-                            .size(px(36.))
+                            .size(px(WINDOW_CONTROL_SIZE))
                             .p_0()
-                            .child(media_icon_hsla(
+                            .child(tinted_media_icon(
                                 MediaIcon::WindowMinimize,
-                                theme.foreground,
+                                foreground,
                                 px(16.),
                             ))
                             .on_click(|_, window, _| window.minimize_window()),
@@ -890,15 +900,15 @@ impl LyruneView {
                         Button::new("window-maximize")
                             .when(lyrics_controls, |button| button.custom(control_variant))
                             .when(!lyrics_controls, |button| button.ghost())
-                            .size(px(36.))
+                            .size(px(WINDOW_CONTROL_SIZE))
                             .p_0()
-                            .child(media_icon_hsla(
+                            .child(tinted_media_icon(
                                 if window.is_maximized() {
                                     MediaIcon::WindowRestore
                                 } else {
                                     MediaIcon::WindowMaximize
                                 },
-                                theme.foreground,
+                                foreground,
                                 px(16.),
                             ))
                             .on_click(|_, window, _| window.zoom_window()),
@@ -909,11 +919,11 @@ impl LyruneView {
                         Button::new("window-close")
                             .when(lyrics_controls, |button| button.custom(control_variant))
                             .when(!lyrics_controls, |button| button.ghost())
-                            .size(px(36.))
+                            .size(px(WINDOW_CONTROL_SIZE))
                             .p_0()
-                            .child(media_icon_hsla(
+                            .child(tinted_media_icon(
                                 MediaIcon::WindowClose,
-                                theme.foreground,
+                                foreground,
                                 px(16.),
                             ))
                             .on_click(|_, window, _| window.remove_window()),
@@ -933,6 +943,27 @@ impl LyruneView {
         let theme = cx.theme().clone();
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
         let popover_open = self.account_menu_open || self.quality_menu_open;
+        let lyric_foreground = self
+            .lyrics_view
+            .update(cx, |view, cx| view.prepare_backdrop(window, cx));
+        let available_height = (window.viewport_size().height - px(PLAYER_BAR_HEIGHT)).max(px(0.));
+        let revealed_height = available_height * expansion_progress;
+        let backdrop_top = available_height - revealed_height;
+        let overlay_foreground = |normal: Hsla, top, height| {
+            let Some(lyrics) = lyric_foreground.filter(|_| revealed_height > px(0.)) else {
+                return normal;
+            };
+            match backdrop_coverage(backdrop_top, top, height) {
+                0. => normal,
+                1. => lyrics,
+                amount => Rgba::interpolate(normal.to_rgb(), lyrics.to_rgb(), amount).into(),
+            }
+        };
+        let time_foreground = overlay_foreground(
+            theme.secondary_foreground,
+            available_height - px(EDGE_TIME_LABEL_OFFSET),
+            px(20.),
+        );
         self.browser.update(cx, |browser, cx| {
             if browser.account_menu_open != self.account_menu_open {
                 browser.account_menu_open = self.account_menu_open;
@@ -951,8 +982,8 @@ impl LyruneView {
             } else {
                 browser::browsing_area(&self.browser, window, cx)
             })
-            .child(self.render_lyrics_layer(expansion_progress, window, cx))
-            .child(self.render_player_bar(waiting, small_cover, window, cx))
+            .child(self.render_lyrics_layer(available_height, revealed_height, cx))
+            .child(self.render_player_bar(waiting, small_cover, time_foreground, window, cx))
             .when(popover_open, |this| {
                 this.child(
                     deferred(
@@ -972,7 +1003,14 @@ impl LyruneView {
                 )
             })
             .when(client_decorations, |this| {
-                this.child(deferred(self.render_window_controls(window, cx)).with_priority(20))
+                let foreground = overlay_foreground(
+                    theme.foreground,
+                    px(WINDOW_CONTROL_TOP),
+                    px(WINDOW_CONTROL_SIZE),
+                );
+                this.child(
+                    deferred(self.render_window_controls(foreground, window, cx)).with_priority(20),
+                )
             })
             .into_any_element()
     }
@@ -1016,7 +1054,11 @@ impl Render for LyruneView {
                 .child(self.render_login(window, cx))
                 .child(notification_layer)
                 .when(client_decorations, |this| {
-                    this.child(deferred(self.render_window_controls(window, cx)).with_priority(20))
+                    let foreground = cx.theme().foreground;
+                    this.child(
+                        deferred(self.render_window_controls(foreground, window, cx))
+                            .with_priority(20),
+                    )
                 })
                 .into_any_element()
         }

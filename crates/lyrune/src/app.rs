@@ -343,6 +343,9 @@ impl LyruneView {
                         this.dismiss_popovers(cx);
                     } else if this.cover_backdrop_expanded {
                         this.set_cover_backdrop_expanded(false, window, cx);
+                    } else {
+                        this.browser
+                            .update(cx, |browser, cx| browser.navigate_back(window, cx));
                     }
                 }
             }),

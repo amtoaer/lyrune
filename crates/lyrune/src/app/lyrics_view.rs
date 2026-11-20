@@ -222,15 +222,6 @@ pub(super) fn combined_lyric_frame_interval(
     }
 }
 
-pub(super) fn lyric_position_for_frame_rate(position: Duration, frame_rate: FrameRate) -> Duration {
-    let Some(interval) = frame_rate.frame_interval() else {
-        return position;
-    };
-    let interval_nanos = interval.as_nanos();
-    let quantized_nanos = position.as_nanos() / interval_nanos * interval_nanos;
-    Duration::from_nanos(quantized_nanos.min(u64::MAX as u128) as u64)
-}
-
 fn translation_line_height(narrow: bool, scale: f32) -> Pixels {
     (if narrow { px(18.) } else { px(20.) }) * scale
 }
@@ -1364,7 +1355,7 @@ impl LyricsView {
             {
                 cache.highlight_position
             } else {
-                lyric_position_for_frame_rate(self.position, self.input.highlight_frame_rate)
+                self.position
             };
             let track_duration = self.input.duration;
             let rows = lyrics
@@ -1989,7 +1980,7 @@ mod tests {
             cx.cx.executor().advance_clock(Duration::from_millis(34));
             let next = sample(Duration::from_millis(1150), cx);
             assert!(next.0 > after.0);
-            assert!(next.2 > after.2);
+            assert_eq!(next.2, Duration::from_millis(1150));
             cx.cx.executor().advance_clock(Duration::from_millis(400));
             let settled = sample(Duration::from_millis(1550), cx);
             view.update(cx, |view, _| {

@@ -225,6 +225,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "apcach-rs"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e442e1bbcb762d43bdb83c9502b0b3ce9511a1a1464dd11a15b26116d198e51"
+
+[[package]]
 name = "apple-native-keyring-store"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3965,6 +3971,7 @@ name = "lyrune"
 version = "1.8.0"
 dependencies = [
  "anyhow",
+ "apcach-rs",
  "ashpd",
  "bytes",
  "directories",

@@ -19,9 +19,10 @@ use crate::cache::audio_cache_limit_bytes;
 use crate::design::{self, ColorTheme};
 use crate::settings::{
     AppSettings, ColorThemeMode, FrameRate, MAX_IMAGE_CACHE_CAPACITY,
-    MAX_LYRIC_BACKGROUND_BLUR_PERCENT, MAX_LYRIC_SCALE_PERCENT, MAX_NAVIGATION_HISTORY_LIMIT,
-    MIN_SCALE_PERCENT, TrayIconStyle, WindowDecoration, default_lyric_font_families,
-    default_monospace_font_families, default_ui_font_families, parse_font_families,
+    MAX_LYRIC_BACKGROUND_BLUR_PERCENT, MAX_LYRIC_BACKGROUND_CONTRAST_LC, MAX_LYRIC_SCALE_PERCENT,
+    MAX_NAVIGATION_HISTORY_LIMIT, MIN_SCALE_PERCENT, TrayIconStyle, WindowDecoration,
+    default_lyric_font_families, default_monospace_font_families, default_ui_font_families,
+    parse_font_families,
 };
 
 struct SettingsInputs {
@@ -33,9 +34,10 @@ struct SettingsInputs {
     navigation_history_limit: Entity<InputState>,
     lyric_font_scale: Entity<InputState>,
     lyric_line_spacing: Entity<InputState>,
-    lyric_background_min_overlay: Entity<InputState>,
+    lyric_background_max_delta_e: Entity<InputState>,
     lyric_background_chroma: Entity<InputState>,
-    lyric_background_contrast: Entity<InputState>,
+    lyric_tint: Entity<InputState>,
+    lyric_background_contrast_lc: Entity<InputState>,
     lyric_background_blur: Entity<InputState>,
 }
 
@@ -100,16 +102,16 @@ impl SettingsInputs {
         };
         let lyric_font_scale_input = scale_input(settings.lyric_font_scale, window, cx);
         let lyric_line_spacing_input = scale_input(settings.lyric_line_spacing, window, cx);
-        let lyric_background_min_overlay_input = cx.new(|cx| {
+        let lyric_background_max_delta_e_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .default_value(settings.lyric_background_min_overlay_percent.to_string())
+                .default_value(settings.lyric_background_max_delta_e.to_string())
                 .mask_pattern(MaskPattern::Number {
                     separator: None,
-                    fraction: None,
+                    fraction: Some(2),
                 })
-                .validate(|value, _| value.parse::<u32>().is_ok())
+                .validate(|value, _| value.parse::<f32>().is_ok_and(f32::is_finite))
                 .min(0.)
-                .max(100.)
+                .max(1.)
         });
         let lyric_background_chroma_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -122,16 +124,27 @@ impl SettingsInputs {
                 .min(0.)
                 .max(0.4)
         });
-        let lyric_background_contrast_input = cx.new(|cx| {
+        let lyric_tint_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .default_value(settings.lyric_background_contrast.to_string())
+                .default_value(settings.lyric_tint_percent.to_string())
+                .mask_pattern(MaskPattern::Number {
+                    separator: None,
+                    fraction: None,
+                })
+                .validate(|value, _| value.parse::<u32>().is_ok())
+                .min(0.)
+                .max(100.)
+        });
+        let lyric_background_contrast_lc_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.lyric_background_contrast_lc.to_string())
                 .mask_pattern(MaskPattern::Number {
                     separator: None,
                     fraction: Some(1),
                 })
                 .validate(|value, _| value.parse::<f32>().is_ok_and(f32::is_finite))
-                .min(1.)
-                .max(21.)
+                .min(0.)
+                .max(f64::from(MAX_LYRIC_BACKGROUND_CONTRAST_LC))
         });
         let lyric_background_blur_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -153,9 +166,10 @@ impl SettingsInputs {
             navigation_history_limit: navigation_history_limit_input,
             lyric_font_scale: lyric_font_scale_input,
             lyric_line_spacing: lyric_line_spacing_input,
-            lyric_background_min_overlay: lyric_background_min_overlay_input,
+            lyric_background_max_delta_e: lyric_background_max_delta_e_input,
             lyric_background_chroma: lyric_background_chroma_input,
-            lyric_background_contrast: lyric_background_contrast_input,
+            lyric_tint: lyric_tint_input,
+            lyric_background_contrast_lc: lyric_background_contrast_lc_input,
             lyric_background_blur: lyric_background_blur_input,
         }
     }
@@ -201,8 +215,9 @@ pub(super) enum SettingsAction {
         spacing: u32,
     },
     LyricBackground {
-        min_overlay_percent: u32,
+        max_delta_e: f32,
         chroma: f32,
+        tint_percent: u32,
         contrast: f32,
         blur_percent: u32,
     },
@@ -291,15 +306,16 @@ impl SettingsPage {
             &self.settings_inputs.navigation_history_limit,
             &self.settings_inputs.lyric_font_scale,
             &self.settings_inputs.lyric_line_spacing,
-            &self.settings_inputs.lyric_background_min_overlay,
+            &self.settings_inputs.lyric_background_max_delta_e,
             &self.settings_inputs.lyric_background_chroma,
-            &self.settings_inputs.lyric_background_contrast,
+            &self.settings_inputs.lyric_tint,
+            &self.settings_inputs.lyric_background_contrast_lc,
             &self.settings_inputs.lyric_background_blur,
         ] {
             input.update(cx, |input, cx| input.attach_window(window, cx));
         }
         type ApplyNumberSetting = fn(&mut SettingsPage, &mut Window, &mut Context<SettingsPage>);
-        let numeric_inputs: [(_, _, _, ApplyNumberSetting); 9] = [
+        let numeric_inputs: [(_, _, _, ApplyNumberSetting); _] = [
             (
                 &self.settings_inputs.audio_cache_limit,
                 1.,
@@ -331,8 +347,8 @@ impl SettingsPage {
                 Self::apply_scale_settings,
             ),
             (
-                &self.settings_inputs.lyric_background_min_overlay,
-                5.,
+                &self.settings_inputs.lyric_background_max_delta_e,
+                0.01,
                 0.,
                 Self::apply_lyric_background_settings,
             ),
@@ -343,9 +359,15 @@ impl SettingsPage {
                 Self::apply_lyric_background_settings,
             ),
             (
-                &self.settings_inputs.lyric_background_contrast,
-                0.1,
+                &self.settings_inputs.lyric_tint,
+                5.,
+                0.,
+                Self::apply_lyric_background_settings,
+            ),
+            (
+                &self.settings_inputs.lyric_background_contrast_lc,
                 1.,
+                0.,
                 Self::apply_lyric_background_settings,
             ),
             (
@@ -479,14 +501,16 @@ impl SettingsPage {
 
     fn apply_lyric_background_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let settings = &self.preferences.read(cx).settings;
-        let min_overlay_percent = self
+        let max_delta_e = self
             .settings_inputs
-            .lyric_background_min_overlay
+            .lyric_background_max_delta_e
             .read(cx)
             .value()
-            .parse::<u32>()
-            .unwrap_or(settings.lyric_background_min_overlay_percent)
-            .min(100);
+            .parse::<f32>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .unwrap_or(settings.lyric_background_max_delta_e)
+            .clamp(0., 1.);
         let chroma = self
             .settings_inputs
             .lyric_background_chroma
@@ -497,16 +521,24 @@ impl SettingsPage {
             .filter(|value| value.is_finite())
             .unwrap_or(settings.lyric_background_chroma)
             .clamp(0., 0.4);
+        let tint_percent = self
+            .settings_inputs
+            .lyric_tint
+            .read(cx)
+            .value()
+            .parse::<u32>()
+            .unwrap_or(settings.lyric_tint_percent)
+            .min(100);
         let contrast = self
             .settings_inputs
-            .lyric_background_contrast
+            .lyric_background_contrast_lc
             .read(cx)
             .value()
             .parse::<f32>()
             .ok()
             .filter(|value| value.is_finite())
-            .unwrap_or(settings.lyric_background_contrast)
-            .clamp(1., 21.);
+            .unwrap_or(settings.lyric_background_contrast_lc)
+            .clamp(0., MAX_LYRIC_BACKGROUND_CONTRAST_LC);
         let blur_percent = self
             .settings_inputs
             .lyric_background_blur
@@ -517,15 +549,16 @@ impl SettingsPage {
             .clamp(1, MAX_LYRIC_BACKGROUND_BLUR_PERCENT);
         for (input, value) in [
             (
-                &self.settings_inputs.lyric_background_min_overlay,
-                min_overlay_percent.to_string(),
+                &self.settings_inputs.lyric_background_max_delta_e,
+                max_delta_e.to_string(),
             ),
             (
                 &self.settings_inputs.lyric_background_chroma,
                 chroma.to_string(),
             ),
+            (&self.settings_inputs.lyric_tint, tint_percent.to_string()),
             (
-                &self.settings_inputs.lyric_background_contrast,
+                &self.settings_inputs.lyric_background_contrast_lc,
                 contrast.to_string(),
             ),
             (
@@ -536,8 +569,9 @@ impl SettingsPage {
             input.update(cx, |input, cx| input.set_value(value, window, cx));
         }
         cx.emit(SettingsAction::LyricBackground {
-            min_overlay_percent,
+            max_delta_e,
             chroma,
+            tint_percent,
             contrast,
             blur_percent,
         });
@@ -1040,38 +1074,46 @@ impl Render for SettingsPage {
                                         .pt_4()
                                         .border_t_1()
                                         .border_color(theme.border)
-                                        .child(setting_heading("封面背景", "由当前封面模糊并调色生成，以下参数按顺序作用"))
+                                        .child(setting_heading("歌词配色", "让歌词和背景呼应当前封面，同时保留主题风格；以下选项按流程执行"))
                                         .child(
                                             setting_group()
                                                 .child(number_setting(
-                                                    "模糊程度",
-                                                    "高斯模糊半径占封面边长的比例，数值越大封面细节越少",
+                                                    "背景模糊程度",
+                                                    "高斯模糊半径占歌词背景边长的比例，数值越大背景细节越少",
                                                     &self.settings_inputs.lyric_background_blur,
                                                     "%",
                                                     false,
                                                     true,
                                                 ))
                                                 .child(number_setting(
-                                                    "混色下限",
-                                                    "为封面背景引入主题色调，封面背景至少会混入该比例的主题背景色",
-                                                    &self.settings_inputs.lyric_background_min_overlay,
-                                                    "%",
-                                                    false,
-                                                    true,
-                                                ))
-                                                .child(number_setting(
-                                                    "彩度上限",
-                                                    "封面背景的最高彩度，如果最低混色后彩度高于上限会继续增加混合比例",
+                                                    "背景彩度上限",
+                                                    "歌词背景的整体彩度，数值越小背景颜色越淡；设为 0 时只保留明暗",
                                                     &self.settings_inputs.lyric_background_chroma,
                                                     "",
                                                     false,
                                                     true,
                                                 ))
                                                 .child(number_setting(
+                                                    "背景色差上限",
+                                                    "歌词背景与主题背景色的色差上限，数值越小背景越贴近主题",
+                                                    &self.settings_inputs.lyric_background_max_delta_e,
+                                                    "ΔE",
+                                                    false,
+                                                    true,
+                                                ))
+                                                .child(number_setting(
+                                                    "歌词染色强度",
+                                                    "歌词背景对歌词文字的染色强度，数值越大文字越接近背景色调；设为 0% 时保留原始主题字色",
+                                                    &self.settings_inputs.lyric_tint,
+                                                    "%",
+                                                    false,
+                                                    true,
+                                                ))
+                                                .child(number_setting(
                                                     "文字对比度下限",
-                                                    "混色后若歌词文字对比度低于此值则调整背景明度；实际可达值受主题颜色限制",
-                                                    &self.settings_inputs.lyric_background_contrast,
-                                                    "∶1",
+                                                    "歌词文字和歌词背景的对比度下限，对比度不足会自动压暗或提亮背景；设为 0 时不调整",
+                                                    &self.settings_inputs.lyric_background_contrast_lc,
+                                                    "Lc",
                                                     false,
                                                     true,
                                                 )),
@@ -1187,24 +1229,26 @@ impl LyruneView {
                 self.set_scale_settings(*lyric, *spacing, cx)
             }
             SettingsAction::LyricBackground {
-                min_overlay_percent,
+                max_delta_e,
                 chroma,
+                tint_percent,
                 contrast,
                 blur_percent,
             } => {
                 let settings = &self.preferences.read(cx).settings;
-                if settings.lyric_background_min_overlay_percent == *min_overlay_percent
+                if settings.lyric_background_max_delta_e == *max_delta_e
                     && settings.lyric_background_chroma == *chroma
-                    && settings.lyric_background_contrast == *contrast
+                    && settings.lyric_tint_percent == *tint_percent
+                    && settings.lyric_background_contrast_lc == *contrast
                     && settings.lyric_background_blur_percent == *blur_percent
                 {
                     return;
                 }
                 self.preferences.update(cx, |preferences, cx| {
-                    preferences.settings.lyric_background_min_overlay_percent =
-                        *min_overlay_percent;
+                    preferences.settings.lyric_background_max_delta_e = *max_delta_e;
                     preferences.settings.lyric_background_chroma = *chroma;
-                    preferences.settings.lyric_background_contrast = *contrast;
+                    preferences.settings.lyric_tint_percent = *tint_percent;
+                    preferences.settings.lyric_background_contrast_lc = *contrast;
                     preferences.settings.lyric_background_blur_percent = *blur_percent;
                     cx.notify();
                 });
@@ -1657,45 +1701,52 @@ mod tests {
         let _subscription = cx.update(|_, cx| {
             cx.subscribe(&page, move |_, event: &SettingsAction, _| {
                 if let SettingsAction::LyricBackground {
-                    min_overlay_percent,
+                    max_delta_e,
                     chroma,
+                    tint_percent,
                     contrast,
                     blur_percent,
                 } = event
                 {
                     received.borrow_mut().push((
-                        *min_overlay_percent,
-                        *chroma,
-                        *contrast,
                         *blur_percent,
+                        *max_delta_e,
+                        *chroma,
+                        *tint_percent,
+                        *contrast,
                     ));
                 }
             })
         });
         let inputs = page.read_with(cx, |page, _| {
+            let inputs = &page.settings_inputs;
             [
                 (
-                    page.settings_inputs.lyric_background_min_overlay.clone(),
-                    (45, 0.12, 4., 8),
+                    inputs.lyric_background_blur.clone(),
+                    (11, 0.25, 0.12, 50, 45.),
                 ),
                 (
-                    page.settings_inputs.lyric_background_chroma.clone(),
-                    (45, 0.13, 4., 8),
+                    inputs.lyric_background_chroma.clone(),
+                    (11, 0.25, 0.13, 50, 45.),
                 ),
                 (
-                    page.settings_inputs.lyric_background_contrast.clone(),
-                    (45, 0.13, 4.1, 8),
+                    inputs.lyric_background_max_delta_e.clone(),
+                    (11, 0.26, 0.13, 50, 45.),
                 ),
+                (inputs.lyric_tint.clone(), (11, 0.26, 0.13, 55, 45.)),
                 (
-                    page.settings_inputs.lyric_background_blur.clone(),
-                    (45, 0.13, 4.1, 9),
+                    inputs.lyric_background_contrast_lc.clone(),
+                    (11, 0.26, 0.13, 55, 46.),
                 ),
             ]
         });
+        let mut previous_y = None;
         for (input, expected) in inputs {
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let bounds = input.read_with(cx, |input, _| input.input_bounds());
+            assert!(previous_y.is_none_or(|y| y < bounds.origin.y));
+            previous_y = Some(bounds.origin.y);
             cx.simulate_click(
                 gpui::point(bounds.origin.x + px(92.), bounds.center().y),
                 gpui::Modifiers::none(),
@@ -1703,30 +1754,36 @@ mod tests {
             cx.run_until_parked();
             assert_eq!(actions.borrow().last(), Some(&expected));
         }
+        let blur = page.read_with(cx, |page, _| {
+            page.settings_inputs.lyric_background_blur.clone()
+        });
+        cx.update(|window, cx| blur.update(cx, |input, cx| input.focus(window, cx)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
         actions.borrow_mut().clear();
         cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("3");
         assert!(actions.borrow().is_empty());
         cx.simulate_keystrokes("enter");
-        assert_eq!(actions.borrow().last(), Some(&(45, 0.13, 4.1, 3)));
+        assert_eq!(actions.borrow().last(), Some(&(3, 0.26, 0.13, 55, 46.)));
         cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("6");
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        let min_overlay = page.read_with(cx, |page, cx| {
+        let chroma = page.read_with(cx, |page, cx| {
             assert_eq!(
                 page.settings_inputs.lyric_background_blur.read(cx).value(),
                 "6"
             );
-            page.settings_inputs.lyric_background_min_overlay.clone()
+            page.settings_inputs.lyric_background_chroma.clone()
         });
-        cx.update(|window, cx| min_overlay.update(cx, |input, cx| input.focus(window, cx)));
+        cx.update(|window, cx| chroma.update(cx, |input, cx| input.focus(window, cx)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.run_until_parked();
-        assert_eq!(actions.borrow().last(), Some(&(45, 0.13, 4.1, 6)));
+        assert_eq!(actions.borrow().last(), Some(&(6, 0.26, 0.13, 55, 46.)));
         cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("0");
         cx.simulate_keystrokes("enter");
-        assert_eq!(actions.borrow().last(), Some(&(0, 0.13, 4.1, 6)));
+        assert_eq!(actions.borrow().last(), Some(&(6, 0.26, 0., 55, 46.)));
     }
 
     #[gpui::test]

@@ -10,6 +10,7 @@ release = true
 
 [dependencies]
 anyhow.workspace = true
+apcach-rs.workspace = true
 bytes.workspace = true
 directories.workspace = true
 fast_image_resize.workspace = true

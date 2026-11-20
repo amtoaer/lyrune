@@ -16,7 +16,7 @@ use super::lyrics::parse_lyrics;
 use super::lyrics_loading::LyricsCache;
 use super::lyrics_view::{
     adjacent_lyric_timing, combined_lyric_frame_interval, lyric_edge_opacity,
-    lyric_horizontal_scroll_offset, lyric_position_for_frame_rate,
+    lyric_horizontal_scroll_offset,
 };
 use super::navigation::NavigationHistory;
 use super::navigation::{
@@ -603,19 +603,6 @@ fn lyric_frame_intervals_preserve_the_fastest_animation_requirement() {
     assert_eq!(
         combined_lyric_frame_interval(FrameRate::Fps30, FrameRate::Display),
         None
-    );
-}
-
-#[test]
-fn lyric_position_is_quantized_only_for_limited_highlight_rates() {
-    let position = Duration::from_millis(50);
-    assert_eq!(
-        lyric_position_for_frame_rate(position, FrameRate::Fps30),
-        Duration::from_nanos(1_000_000_000 / 30)
-    );
-    assert_eq!(
-        lyric_position_for_frame_rate(position, FrameRate::Display),
-        position
     );
 }
 

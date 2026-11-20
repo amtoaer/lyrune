@@ -41,6 +41,33 @@
 6. 支持托盘，关闭程序后仍在后台播放；
 7. 完全不依赖 Webview，运行流畅、占用较低。
 
+## 安装
+
+### Arch Linux
+
+Arch Linux 用户可以安装 AUR 里的 [lyrune-bin](https://aur.archlinux.org/packages/lyrune-bin) 包，该包由官方维护。
+
+如通过 `paru`：
+
+```bash
+paru -S lyrune-bin
+```
+
+### NixOS
+
+NixOS 用户（`x86_64-linux`）可以通过社区维护的 [Nix Flake](https://github.com/wuyeyou/nix-packages) 直接运行：
+
+```bash
+nix run github:wuyeyou/nix-packages#lyrune
+```
+
+也支持用户 Profile 安装及 NixOS Flake 声明式安装，详见[安装说明](https://github.com/wuyeyou/nix-packages#安装与使用)。
+
+该 Flake 由社区独立维护，使用 Lyrune 官方发布的 Deb 二进制包，并自动跟踪稳定版本。
+
+### 其它发行版
+
+[Release 页](https://github.com/amtoaer/lyrune/releases) 提供了三类主流发行版（Debian、CentOS、Arch Linux）的安装包和通用的 AppImage 打包、单二进制压缩包，用户可根据个人环境自行选择。
 
 ## 外观
 
@@ -73,20 +100,6 @@
 这是因为该项目使用的 GPUI 框架缺失 Damage Tracking，在高强度重绘的歌词页占用不甚理想。我目前通过自行 fork GPUI 合并上游 [针对 Linux 的 Damage Tracking](https://github.com/zed-industries/zed/pull/62455) 与 [Wayland 渲染改进](https://github.com/zed-industries/zed/pull/60690) 在 Linux 上基本解决了该性能问题，但由于Windows / Mac 没有对应的 Damage Tracking 实现，预期性能较 Linux 差不少。
 
 当然如果非常想用，设置里也提供了歌词页的动画帧率限制，可以以牺牲流畅度为代价大幅改善体验。
-
-## 安装
-
-### NixOS
-
-NixOS 用户（`x86_64-linux`）可以通过社区维护的 [Nix Flake](https://github.com/wuyeyou/nix-packages) 直接运行：
-
-```bash
-nix run github:wuyeyou/nix-packages#lyrune
-```
-
-也支持用户 Profile 安装及 NixOS Flake 声明式安装，详见[安装说明](https://github.com/wuyeyou/nix-packages#安装与使用)。
-
-该 Flake 由社区独立维护，使用 Lyrune 官方发布的 Deb 二进制包，并自动跟踪稳定版本。
 
 ## 参考与致谢
 

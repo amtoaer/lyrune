@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use directories::ProjectDirs;
-use gpui::WindowAppearance;
+use gpui::{Keystroke, WindowAppearance};
 use lyrune_api::{
     CdnCache, Quality, Track, UserPlaylist, UserPlaylistId, UserProfile, new_client_guid,
 };
@@ -22,6 +22,8 @@ pub const DEFAULT_IMAGE_CACHE_CAPACITY: usize = 80;
 pub const DEFAULT_NAVIGATION_HISTORY_LIMIT: usize = 10;
 pub const MAX_IMAGE_CACHE_CAPACITY: usize = 512;
 pub const MAX_NAVIGATION_HISTORY_LIMIT: usize = 100;
+pub const DEFAULT_NAVIGATE_BACK_SHORTCUT: &str = "alt-left";
+pub const DEFAULT_NAVIGATE_FORWARD_SHORTCUT: &str = "alt-right";
 pub const DEFAULT_SCALE_PERCENT: u32 = 100;
 pub const MIN_SCALE_PERCENT: u32 = 50;
 pub const MAX_LYRIC_SCALE_PERCENT: u32 = 300;
@@ -294,6 +296,8 @@ pub struct AppSettings {
     pub audio_cache_limit_gb: u64,
     pub image_cache_capacity: usize,
     pub navigation_history_limit: usize,
+    pub navigate_back_shortcut: String,
+    pub navigate_forward_shortcut: String,
     pub playback_quality: Quality,
     pub shuffle: bool,
     pub repeat_mode: RepeatMode,
@@ -333,6 +337,8 @@ impl Default for AppSettings {
             audio_cache_limit_gb: DEFAULT_AUDIO_CACHE_LIMIT_GB,
             image_cache_capacity: DEFAULT_IMAGE_CACHE_CAPACITY,
             navigation_history_limit: DEFAULT_NAVIGATION_HISTORY_LIMIT,
+            navigate_back_shortcut: DEFAULT_NAVIGATE_BACK_SHORTCUT.to_owned(),
+            navigate_forward_shortcut: DEFAULT_NAVIGATE_FORWARD_SHORTCUT.to_owned(),
             playback_quality: Quality::default(),
             shuffle: false,
             repeat_mode: RepeatMode::Off,
@@ -395,6 +401,10 @@ impl AppSettings {
         self.navigation_history_limit = self
             .navigation_history_limit
             .clamp(1, MAX_NAVIGATION_HISTORY_LIMIT);
+        self.navigate_back_shortcut = parse_shortcut(&self.navigate_back_shortcut)
+            .unwrap_or_else(|| DEFAULT_NAVIGATE_BACK_SHORTCUT.to_owned());
+        self.navigate_forward_shortcut = parse_shortcut(&self.navigate_forward_shortcut)
+            .unwrap_or_else(|| DEFAULT_NAVIGATE_FORWARD_SHORTCUT.to_owned());
         if self.current_playback.as_ref().is_some_and(|playback| {
             playback.track_mid.trim().is_empty()
                 || playback.queue_tracks.is_empty()
@@ -418,6 +428,17 @@ impl AppSettings {
 
 pub(crate) fn default_ui_font_families() -> Vec<String> {
     vec![".SystemUIFont".to_owned()]
+}
+
+/// Returns the canonical form of a single-keystroke shortcut such as `alt-left`.
+pub(crate) fn parse_shortcut(value: &str) -> Option<String> {
+    Keystroke::parse(value.trim()).ok().map(|keystroke| keystroke.unparse())
+}
+
+pub(crate) fn shortcut_matches(shortcut: &str, keystroke: &Keystroke) -> bool {
+    Keystroke::parse(shortcut).is_ok_and(|shortcut| {
+        shortcut.key == keystroke.key && shortcut.modifiers == keystroke.modifiers
+    })
 }
 
 pub(crate) fn default_monospace_font_families() -> Vec<String> {
@@ -829,6 +850,8 @@ mod tests {
             audio_cache_limit_gb: 0,
             image_cache_capacity: 0,
             navigation_history_limit: usize::MAX,
+            navigate_back_shortcut: "alt-left-up".to_owned(),
+            navigate_forward_shortcut: "Alt-Right".to_owned(),
             playback_quality: Quality::High,
             shuffle: false,
             repeat_mode: RepeatMode::Off,
@@ -859,6 +882,23 @@ mod tests {
         assert_eq!(
             settings.navigation_history_limit,
             MAX_NAVIGATION_HISTORY_LIMIT
+        );
+        assert_eq!(
+            settings.navigate_back_shortcut,
+            DEFAULT_NAVIGATE_BACK_SHORTCUT
+        );
+        assert_eq!(settings.navigate_forward_shortcut, "alt-right");
+    }
+
+    #[test]
+    fn shortcuts_match_exact_modifiers() {
+        let pressed = Keystroke::parse("alt-left").unwrap();
+        assert!(shortcut_matches("Alt-Left", &pressed));
+        assert!(!shortcut_matches("left", &pressed));
+        assert!(!shortcut_matches("alt-left-up", &pressed));
+        assert_eq!(
+            parse_shortcut(" Ctrl-Shift-A ").as_deref(),
+            Some("ctrl-shift-a")
         );
     }
 
@@ -906,6 +946,8 @@ mod tests {
             audio_cache_limit_gb: 24,
             image_cache_capacity: 72,
             navigation_history_limit: 16,
+            navigate_back_shortcut: "escape".to_owned(),
+            navigate_forward_shortcut: "ctrl-]".to_owned(),
             playback_quality: Quality::HiRes,
             shuffle: true,
             repeat_mode: RepeatMode::All,
@@ -984,6 +1026,14 @@ mod tests {
         assert_eq!(
             restored.navigation_history_limit,
             expected.navigation_history_limit
+        );
+        assert_eq!(
+            restored.navigate_back_shortcut,
+            expected.navigate_back_shortcut
+        );
+        assert_eq!(
+            restored.navigate_forward_shortcut,
+            expected.navigate_forward_shortcut
         );
         assert_eq!(restored.playback_quality, expected.playback_quality);
         assert_eq!(restored.shuffle, expected.shuffle);

@@ -60,7 +60,9 @@ use crate::icons::{MediaIcon, tinted_media_icon};
 use crate::lyrics_cache::LyricDiskCache;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
-use crate::settings::{AppSettings, CdnCacheStore, PersistedWindowSize, WindowDecoration};
+use crate::settings::{
+    AppSettings, CdnCacheStore, PersistedWindowSize, WindowDecoration, shortcut_matches,
+};
 use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
 
@@ -335,18 +337,32 @@ impl LyruneView {
                 },
             ),
             cx.observe_keystrokes(|this, event, window, cx| {
-                if event.keystroke.key == "escape"
-                    && !event.keystroke.modifiers.modified()
-                    && event.action.is_none()
-                {
+                if event.action.is_some() {
+                    return;
+                }
+                let keystroke = &event.keystroke;
+                if keystroke.key == "escape" && !keystroke.modifiers.modified() {
                     if this.account_menu_open || this.quality_menu_open {
                         this.dismiss_popovers(cx);
-                    } else if this.cover_backdrop_expanded {
-                        this.set_cover_backdrop_expanded(false, window, cx);
-                    } else {
-                        this.browser
-                            .update(cx, |browser, cx| browser.navigate_back(window, cx));
+                        return;
                     }
+                    if this.cover_backdrop_expanded {
+                        this.set_cover_backdrop_expanded(false, window, cx);
+                        return;
+                    }
+                }
+                if this.cover_backdrop_expanded {
+                    return;
+                }
+                let settings = &this.preferences.read(cx).settings;
+                let back = shortcut_matches(&settings.navigate_back_shortcut, keystroke);
+                let forward = shortcut_matches(&settings.navigate_forward_shortcut, keystroke);
+                if back {
+                    this.browser
+                        .update(cx, |browser, cx| browser.navigate_back(window, cx));
+                } else if forward {
+                    this.browser
+                        .update(cx, |browser, cx| browser.navigate_forward(window, cx));
                 }
             }),
             cx.observe_window_appearance(window, |this, window, cx| {

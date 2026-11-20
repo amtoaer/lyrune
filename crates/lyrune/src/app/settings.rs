@@ -22,7 +22,7 @@ use crate::settings::{
     MAX_LYRIC_BACKGROUND_BLUR_PERCENT, MAX_LYRIC_BACKGROUND_CONTRAST_LC, MAX_LYRIC_SCALE_PERCENT,
     MAX_NAVIGATION_HISTORY_LIMIT, MIN_SCALE_PERCENT, TrayIconStyle, WindowDecoration,
     default_lyric_font_families, default_monospace_font_families, default_ui_font_families,
-    parse_font_families,
+    parse_font_families, parse_shortcut,
 };
 
 struct SettingsInputs {
@@ -32,6 +32,8 @@ struct SettingsInputs {
     audio_cache_limit: Entity<InputState>,
     image_cache_capacity: Entity<InputState>,
     navigation_history_limit: Entity<InputState>,
+    navigate_back_shortcut: Entity<InputState>,
+    navigate_forward_shortcut: Entity<InputState>,
     lyric_font_scale: Entity<InputState>,
     lyric_line_spacing: Entity<InputState>,
     lyric_background_max_delta_e: Entity<InputState>,
@@ -101,6 +103,17 @@ impl SettingsInputs {
             })
         };
         let lyric_font_scale_input = scale_input(settings.lyric_font_scale, window, cx);
+        let shortcut_input = |value: &str, window: &mut Window, cx: &mut App| {
+            cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(value.to_owned())
+                    .placeholder("例如：alt-left")
+            })
+        };
+        let navigate_back_shortcut_input =
+            shortcut_input(&settings.navigate_back_shortcut, window, cx);
+        let navigate_forward_shortcut_input =
+            shortcut_input(&settings.navigate_forward_shortcut, window, cx);
         let lyric_line_spacing_input = scale_input(settings.lyric_line_spacing, window, cx);
         let lyric_background_max_delta_e_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -164,6 +177,8 @@ impl SettingsInputs {
             audio_cache_limit: audio_cache_limit_input,
             image_cache_capacity: image_cache_capacity_input,
             navigation_history_limit: navigation_history_limit_input,
+            navigate_back_shortcut: navigate_back_shortcut_input,
+            navigate_forward_shortcut: navigate_forward_shortcut_input,
             lyric_font_scale: lyric_font_scale_input,
             lyric_line_spacing: lyric_line_spacing_input,
             lyric_background_max_delta_e: lyric_background_max_delta_e_input,
@@ -210,6 +225,10 @@ pub(super) enum SettingsAction {
     AudioCacheLimit(u64),
     ImageCacheCapacity(usize),
     HistoryLimit(usize),
+    Shortcuts {
+        back: String,
+        forward: String,
+    },
     Scale {
         lyric: u32,
         spacing: u32,
@@ -304,6 +323,8 @@ impl SettingsPage {
             &self.settings_inputs.audio_cache_limit,
             &self.settings_inputs.image_cache_capacity,
             &self.settings_inputs.navigation_history_limit,
+            &self.settings_inputs.navigate_back_shortcut,
+            &self.settings_inputs.navigate_forward_shortcut,
             &self.settings_inputs.lyric_font_scale,
             &self.settings_inputs.lyric_line_spacing,
             &self.settings_inputs.lyric_background_max_delta_e,
@@ -407,6 +428,20 @@ impl SettingsPage {
                 },
             ));
         }
+        for input in [
+            &self.settings_inputs.navigate_back_shortcut,
+            &self.settings_inputs.navigate_forward_shortcut,
+        ] {
+            self._input_subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.apply_shortcut_settings(window, cx);
+                    }
+                },
+            ));
+        }
     }
 
     fn apply_audio_cache_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -446,6 +481,22 @@ impl SettingsPage {
                 input.set_value(value.to_string(), window, cx)
             });
         cx.emit(SettingsAction::ImageCacheCapacity(value));
+    }
+
+    fn apply_shortcut_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let inputs = &self.settings_inputs;
+        let settings = &self.preferences.read(cx).settings;
+        let back = parse_shortcut(inputs.navigate_back_shortcut.read(cx).value().as_ref())
+            .unwrap_or_else(|| settings.navigate_back_shortcut.clone());
+        let forward = parse_shortcut(inputs.navigate_forward_shortcut.read(cx).value().as_ref())
+            .unwrap_or_else(|| settings.navigate_forward_shortcut.clone());
+        for (input, value) in [
+            (&inputs.navigate_back_shortcut, &back),
+            (&inputs.navigate_forward_shortcut, &forward),
+        ] {
+            input.update(cx, |input, cx| input.set_value(value.clone(), window, cx));
+        }
+        cx.emit(SettingsAction::Shortcuts { back, forward });
     }
 
     fn apply_navigation_history_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1155,6 +1206,27 @@ impl Render for SettingsPage {
                                 ))
                                 .when(tab == SettingsTab::Other, |this| this.child(
                                     v_flex()
+                                        .gap_3()
+                                        .pb_4()
+                                        .border_b_1()
+                                        .border_color(theme.border)
+                                        .child(setting_heading(
+                                            "快捷键",
+                                            "格式如 alt-left、ctrl-[、escape，按回车或离开输入框后生效；无效输入会恢复原值",
+                                        ))
+                                        .child(font_field(
+                                            "后退",
+                                            "返回上一个页面",
+                                            &self.settings_inputs.navigate_back_shortcut,
+                                        ))
+                                        .child(font_field(
+                                            "前进",
+                                            "前往下一个页面",
+                                            &self.settings_inputs.navigate_forward_shortcut,
+                                        )),
+                                ))
+                                .when(tab == SettingsTab::Other, |this| this.child(
+                                    v_flex()
                                         .gap_2()
                                         .child(setting_heading("更新", "启动时在后台检查新版本，不会影响正常使用"))
                                         .child(
@@ -1225,6 +1297,9 @@ impl LyruneView {
             SettingsAction::AudioCacheLimit(value) => self.set_audio_cache_limit(*value, cx),
             SettingsAction::ImageCacheCapacity(value) => self.set_image_cache_capacity(*value, cx),
             SettingsAction::HistoryLimit(value) => self.set_navigation_history_limit(*value, cx),
+            SettingsAction::Shortcuts { back, forward } => {
+                self.set_navigate_shortcuts(back.clone(), forward.clone(), cx)
+            }
             SettingsAction::Scale { lyric, spacing } => {
                 self.set_scale_settings(*lyric, *spacing, cx)
             }
@@ -1424,6 +1499,21 @@ impl LyruneView {
         });
         self.preferences.read(cx).save();
         cx.notify();
+    }
+
+    fn set_navigate_shortcuts(&mut self, back: String, forward: String, cx: &mut Context<Self>) {
+        let settings = &self.preferences.read(cx).settings;
+        if back == settings.navigate_back_shortcut && forward == settings.navigate_forward_shortcut
+        {
+            return;
+        }
+
+        self.preferences.update(cx, |preferences, cx| {
+            preferences.settings.navigate_back_shortcut = back;
+            preferences.settings.navigate_forward_shortcut = forward;
+            cx.notify();
+        });
+        self.preferences.read(cx).save();
     }
 
     fn set_scale_settings(&mut self, lyric: u32, spacing: u32, cx: &mut Context<Self>) {

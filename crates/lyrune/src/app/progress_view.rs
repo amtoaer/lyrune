@@ -18,6 +18,8 @@ use super::progress_fraction;
 use crate::player::AudioPlayer;
 use crate::settings::FrameRate;
 
+pub(super) const EDGE_TIME_LABEL_OFFSET: f32 = 27.;
+
 #[derive(PartialEq)]
 pub(super) struct ProgressInput {
     pub(super) duration: Option<Duration>,
@@ -416,7 +418,7 @@ impl Render for PlaybackProgressView {
                         .child(
                             div()
                                 .absolute()
-                                .top(px(-27.))
+                                .top(px(-EDGE_TIME_LABEL_OFFSET))
                                 .left_0()
                                 .w(px(64.))
                                 .text_center()
@@ -428,7 +430,7 @@ impl Render for PlaybackProgressView {
                         .child(
                             div()
                                 .absolute()
-                                .top(px(-27.))
+                                .top(px(-EDGE_TIME_LABEL_OFFSET))
                                 .right_0()
                                 .w(px(64.))
                                 .text_center()

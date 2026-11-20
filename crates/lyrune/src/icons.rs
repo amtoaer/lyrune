@@ -1,6 +1,6 @@
 use std::sync::{Arc, LazyLock, Mutex};
 
-use gpui::{AnyElement, Hsla, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, img};
+use gpui::{AnyElement, Hsla, Image, ImageFormat, IntoElement as _, Pixels, Styled as _, img, svg};
 use hashbrown::HashMap;
 
 use crate::design::ColorTheme;
@@ -186,17 +186,32 @@ pub fn media_icon_hsla(icon: MediaIcon, color: Hsla, size: Pixels) -> AnyElement
     render_media_icon(icon, rgba, size)
 }
 
+pub fn tinted_media_icon(icon: MediaIcon, color: Hsla, size: Pixels) -> AnyElement {
+    svg()
+        .data(&media_icon_svg(icon, 0x000000ff))
+        .text_color(color)
+        .size(size)
+        .into_any_element()
+}
+
+fn media_icon_svg(icon: MediaIcon, color: u32) -> Vec<u8> {
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" color="#{color:08x}" stroke="#{color:08x}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{}</svg>"##,
+        icon.body()
+    )
+    .into_bytes()
+}
+
 fn render_media_icon(icon: MediaIcon, color: u32, size: Pixels) -> AnyElement {
     let image = {
         let mut icons = MEDIA_ICONS.lock().expect("media icon cache lock poisoned");
         icons
             .entry((icon, color))
             .or_insert_with(|| {
-                let svg = format!(
-                    r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" color="#{color:08x}" stroke="#{color:08x}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{}</svg>"##,
-                    icon.body()
-                );
-                Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()))
+                Arc::new(Image::from_bytes(
+                    ImageFormat::Svg,
+                    media_icon_svg(icon, color),
+                ))
             })
             .clone()
     };

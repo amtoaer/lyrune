@@ -11,6 +11,7 @@ use lyrune_api::{
 
 use super::account::Account;
 use super::animation::frame_is_due;
+use super::backdrop_coverage;
 use super::home::HomePageState;
 use super::lyrics::parse_lyrics;
 use super::lyrics_loading::LyricsCache;
@@ -64,6 +65,17 @@ fn track(mid: &str) -> Track {
 
 fn mids(tracks: &[Arc<Track>]) -> Vec<&str> {
     tracks.iter().map(|track| track.mid.as_str()).collect()
+}
+
+#[test]
+fn test_backdrop_reveal_reaches_time_before_window_controls() {
+    let controls = |edge| backdrop_coverage(px(edge), px(18.), px(36.));
+    let time = |edge| backdrop_coverage(px(edge), px(573.), px(20.));
+
+    assert_eq!((controls(600.), time(600.)), (0., 0.));
+    assert_eq!((controls(583.), time(583.)), (0., 0.5));
+    assert_eq!((controls(36.), time(36.)), (0.5, 1.));
+    assert_eq!((controls(0.), time(0.)), (1., 1.));
 }
 
 #[test]

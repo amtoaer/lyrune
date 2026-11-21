@@ -61,7 +61,7 @@ use crate::lyrics_cache::LyricDiskCache;
 use crate::player::AudioPlayer;
 use crate::runtime::RUNTIME;
 use crate::settings::{
-    AppSettings, CdnCacheStore, PersistedWindowSize, WindowDecoration, shortcut_matches,
+    AppSettings, CdnCacheStore, PersistedWindowSize, ShortcutAction, Shortcuts, WindowDecoration,
 };
 use crate::singleflight::SingleFlight;
 use crate::update::AvailableUpdate;
@@ -74,6 +74,39 @@ const LIBRARY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const PLAYER_BAR_HEIGHT: f32 = 112.;
 const WINDOW_CONTROL_TOP: f32 = 18.;
 const WINDOW_CONTROL_SIZE: f32 = 36.;
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = lyrune, no_json)]
+struct RunShortcut(ShortcutAction);
+
+fn bind_shortcuts(shortcuts: &Shortcuts, previous: Option<&Shortcuts>, cx: &mut App) {
+    let mut unbind = Vec::new();
+    let mut bind = Vec::new();
+    for action in ShortcutAction::ALL {
+        let context = Some(match action {
+            ShortcutAction::NavigateBack | ShortcutAction::NavigateForward => {
+                "LyruneShortcuts && Browsing && !Input && !ShortcutRecorder"
+            }
+            _ => "LyruneShortcuts && !Input && !ShortcutRecorder",
+        });
+        let previous = previous.and_then(|shortcuts| shortcuts.binding(action));
+        let binding = shortcuts.binding(action);
+        if binding == previous {
+            continue;
+        }
+        let action = RunShortcut(action);
+        if let Some(previous) = previous {
+            unbind.push(KeyBinding::new(
+                previous,
+                Unbind(action.name().into()),
+                context,
+            ));
+        }
+        if let Some(binding) = binding {
+            bind.push(KeyBinding::new(binding, action, context));
+        }
+    }
+    cx.bind_keys(unbind.into_iter().chain(bind));
+}
 
 fn backdrop_coverage(backdrop_top: Pixels, top: Pixels, height: Pixels) -> f32 {
     ((top + height - backdrop_top) / height).clamp(0., 1.)
@@ -133,6 +166,7 @@ pub struct LyruneView {
     update_check_in_progress: bool,
 
     window_handle: AnyWindowHandle,
+    window_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
     // 窗口关闭不销毁应用实体；所有 subscribe_in 订阅都在重开时重新绑定。
     _window_subscriptions: Vec<Subscription>,
@@ -145,6 +179,7 @@ impl LyruneView {
         fonts: AppFonts,
         cx: &mut Context<Self>,
     ) -> Self {
+        bind_shortcuts(&settings.shortcuts, None, cx);
         let mut initial_errors = Vec::new();
         let audio = match AudioPlayer::new() {
             Ok(player) => {
@@ -286,6 +321,7 @@ impl LyruneView {
             preferences,
             update_check_in_progress: false,
             window_handle: window.window_handle(),
+            window_focus: cx.focus_handle(),
             _subscriptions: subscriptions,
             _window_subscriptions: Vec::new(),
         };
@@ -328,7 +364,11 @@ impl LyruneView {
         window.set_inactive_frame_interval(self.inactive_window_frame_interval(cx));
         self.settings_page
             .update(cx, |page, cx| page.attach_window(window, cx));
+        self.window_focus.focus(window, cx);
         self._window_subscriptions = vec![
+            cx.on_focus_lost(window, |this, window, cx| {
+                this.window_focus.focus(window, cx)
+            }),
             cx.subscribe_in(
                 &self.lyrics_view,
                 window,
@@ -337,32 +377,15 @@ impl LyruneView {
                 },
             ),
             cx.observe_keystrokes(|this, event, window, cx| {
-                if event.action.is_some() {
-                    return;
-                }
-                let keystroke = &event.keystroke;
-                if keystroke.key == "escape" && !keystroke.modifiers.modified() {
+                if event.keystroke.key == "escape"
+                    && !event.keystroke.modifiers.modified()
+                    && event.action.is_none()
+                {
                     if this.account_menu_open || this.quality_menu_open {
                         this.dismiss_popovers(cx);
-                        return;
-                    }
-                    if this.cover_backdrop_expanded {
+                    } else if this.cover_backdrop_expanded {
                         this.set_cover_backdrop_expanded(false, window, cx);
-                        return;
                     }
-                }
-                if this.cover_backdrop_expanded {
-                    return;
-                }
-                let settings = &this.preferences.read(cx).settings;
-                let back = shortcut_matches(&settings.navigate_back_shortcut, keystroke);
-                let forward = shortcut_matches(&settings.navigate_forward_shortcut, keystroke);
-                if back {
-                    this.browser
-                        .update(cx, |browser, cx| browser.navigate_back(window, cx));
-                } else if forward {
-                    this.browser
-                        .update(cx, |browser, cx| browser.navigate_forward(window, cx));
                 }
             }),
             cx.observe_window_appearance(window, |this, window, cx| {
@@ -1061,6 +1084,52 @@ impl Render for LyruneView {
             div()
                 .relative()
                 .size_full()
+                .track_focus(&self.window_focus)
+                .when(!self.account_menu_open && !self.quality_menu_open, |this| {
+                    this.key_context(if self.cover_backdrop_expanded {
+                        "LyruneShortcuts"
+                    } else {
+                        "LyruneShortcuts Browsing"
+                    })
+                })
+                .on_action(cx.listener(|this, action: &RunShortcut, window, cx| {
+                    let binding = this
+                        .preferences
+                        .read(cx)
+                        .settings
+                        .shortcuts
+                        .binding(action.0);
+                    if (binding == Some("escape") && this.cover_backdrop_expanded)
+                        || (matches!(binding, Some("space" | "enter"))
+                            && !this.window_focus.is_focused(window))
+                    {
+                        cx.propagate();
+                        return;
+                    }
+                    match action.0 {
+                        ShortcutAction::NavigateBack => this
+                            .browser
+                            .update(cx, |browser, cx| browser.navigate_back(window, cx)),
+                        ShortcutAction::NavigateForward => this
+                            .browser
+                            .update(cx, |browser, cx| browser.navigate_forward(window, cx)),
+                        ShortcutAction::TogglePlayback => this
+                            .playback
+                            .update(cx, |playback, cx| playback.toggle_playback(cx)),
+                        ShortcutAction::PreviousTrack => this
+                            .playback
+                            .update(cx, |playback, cx| playback.play_previous(cx)),
+                        ShortcutAction::NextTrack => this
+                            .playback
+                            .update(cx, |playback, cx| playback.play_next(false, cx)),
+                        ShortcutAction::SeekBackward | ShortcutAction::SeekForward => {
+                            this.playback.update(cx, |playback, cx| {
+                                playback
+                                    .seek_by_shortcut(action.0 == ShortcutAction::SeekForward, cx)
+                            })
+                        }
+                    }
+                }))
                 .child(self.render_main(expansion_progress, waiting, small_cover, window, cx))
                 .child(notification_layer)
                 .into_any_element()
@@ -1070,6 +1139,7 @@ impl Render for LyruneView {
             div()
                 .relative()
                 .size_full()
+                .track_focus(&self.window_focus)
                 .child(self.render_login(window, cx))
                 .child(notification_layer)
                 .when(client_decorations, |this| {

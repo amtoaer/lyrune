@@ -22,8 +22,6 @@ pub const DEFAULT_IMAGE_CACHE_CAPACITY: usize = 80;
 pub const DEFAULT_NAVIGATION_HISTORY_LIMIT: usize = 10;
 pub const MAX_IMAGE_CACHE_CAPACITY: usize = 512;
 pub const MAX_NAVIGATION_HISTORY_LIMIT: usize = 100;
-pub const DEFAULT_NAVIGATE_BACK_SHORTCUT: &str = "alt-left";
-pub const DEFAULT_NAVIGATE_FORWARD_SHORTCUT: &str = "alt-right";
 pub const DEFAULT_SCALE_PERCENT: u32 = 100;
 pub const MIN_SCALE_PERCENT: u32 = 50;
 pub const MAX_LYRIC_SCALE_PERCENT: u32 = 300;
@@ -270,6 +268,107 @@ impl PersistedPlayback {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShortcutAction {
+    NavigateBack,
+    NavigateForward,
+    TogglePlayback,
+    SeekBackward,
+    SeekForward,
+    PreviousTrack,
+    NextTrack,
+}
+
+impl ShortcutAction {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::NavigateBack,
+        Self::NavigateForward,
+        Self::TogglePlayback,
+        Self::SeekBackward,
+        Self::SeekForward,
+        Self::PreviousTrack,
+        Self::NextTrack,
+    ];
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub(crate) struct Shortcuts {
+    navigate_back_shortcut: Option<String>,
+    navigate_forward_shortcut: Option<String>,
+    toggle_playback_shortcut: Option<String>,
+    seek_backward_shortcut: Option<String>,
+    seek_forward_shortcut: Option<String>,
+    previous_track_shortcut: Option<String>,
+    next_track_shortcut: Option<String>,
+}
+
+impl Default for Shortcuts {
+    fn default() -> Self {
+        let track_modifier = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        Self {
+            navigate_back_shortcut: Some("alt-left".into()),
+            navigate_forward_shortcut: Some("alt-right".into()),
+            toggle_playback_shortcut: Some("space".into()),
+            seek_backward_shortcut: Some("left".into()),
+            seek_forward_shortcut: Some("right".into()),
+            previous_track_shortcut: Some(format!("{track_modifier}-left")),
+            next_track_shortcut: Some(format!("{track_modifier}-right")),
+        }
+    }
+}
+
+impl Shortcuts {
+    pub(crate) fn binding(&self, action: ShortcutAction) -> Option<&str> {
+        match action {
+            ShortcutAction::NavigateBack => &self.navigate_back_shortcut,
+            ShortcutAction::NavigateForward => &self.navigate_forward_shortcut,
+            ShortcutAction::TogglePlayback => &self.toggle_playback_shortcut,
+            ShortcutAction::SeekBackward => &self.seek_backward_shortcut,
+            ShortcutAction::SeekForward => &self.seek_forward_shortcut,
+            ShortcutAction::PreviousTrack => &self.previous_track_shortcut,
+            ShortcutAction::NextTrack => &self.next_track_shortcut,
+        }
+        .as_deref()
+    }
+
+    pub(crate) fn set_binding(&mut self, action: ShortcutAction, binding: Option<String>) {
+        *match action {
+            ShortcutAction::NavigateBack => &mut self.navigate_back_shortcut,
+            ShortcutAction::NavigateForward => &mut self.navigate_forward_shortcut,
+            ShortcutAction::TogglePlayback => &mut self.toggle_playback_shortcut,
+            ShortcutAction::SeekBackward => &mut self.seek_backward_shortcut,
+            ShortcutAction::SeekForward => &mut self.seek_forward_shortcut,
+            ShortcutAction::PreviousTrack => &mut self.previous_track_shortcut,
+            ShortcutAction::NextTrack => &mut self.next_track_shortcut,
+        } = binding;
+    }
+
+    fn normalize(&mut self) {
+        let defaults = Self::default();
+        let mut used = Vec::new();
+        for action in ShortcutAction::ALL {
+            let Some(binding) = self.binding(action) else {
+                continue;
+            };
+            let binding = parse_shortcut(binding)
+                .filter(|binding| !used.contains(binding))
+                .or_else(|| {
+                    defaults
+                        .binding(action)
+                        .map(str::to_owned)
+                        .filter(|key| !used.contains(key))
+                });
+            used.extend(binding.iter().cloned());
+            self.set_binding(action, binding);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -296,8 +395,8 @@ pub struct AppSettings {
     pub audio_cache_limit_gb: u64,
     pub image_cache_capacity: usize,
     pub navigation_history_limit: usize,
-    pub navigate_back_shortcut: String,
-    pub navigate_forward_shortcut: String,
+    #[serde(flatten)]
+    pub(crate) shortcuts: Shortcuts,
     pub playback_quality: Quality,
     pub shuffle: bool,
     pub repeat_mode: RepeatMode,
@@ -337,8 +436,7 @@ impl Default for AppSettings {
             audio_cache_limit_gb: DEFAULT_AUDIO_CACHE_LIMIT_GB,
             image_cache_capacity: DEFAULT_IMAGE_CACHE_CAPACITY,
             navigation_history_limit: DEFAULT_NAVIGATION_HISTORY_LIMIT,
-            navigate_back_shortcut: DEFAULT_NAVIGATE_BACK_SHORTCUT.to_owned(),
-            navigate_forward_shortcut: DEFAULT_NAVIGATE_FORWARD_SHORTCUT.to_owned(),
+            shortcuts: Shortcuts::default(),
             playback_quality: Quality::default(),
             shuffle: false,
             repeat_mode: RepeatMode::Off,
@@ -401,10 +499,7 @@ impl AppSettings {
         self.navigation_history_limit = self
             .navigation_history_limit
             .clamp(1, MAX_NAVIGATION_HISTORY_LIMIT);
-        self.navigate_back_shortcut = parse_shortcut(&self.navigate_back_shortcut)
-            .unwrap_or_else(|| DEFAULT_NAVIGATE_BACK_SHORTCUT.to_owned());
-        self.navigate_forward_shortcut = parse_shortcut(&self.navigate_forward_shortcut)
-            .unwrap_or_else(|| DEFAULT_NAVIGATE_FORWARD_SHORTCUT.to_owned());
+        self.shortcuts.normalize();
         if self.current_playback.as_ref().is_some_and(|playback| {
             playback.track_mid.trim().is_empty()
                 || playback.queue_tracks.is_empty()
@@ -430,15 +525,49 @@ pub(crate) fn default_ui_font_families() -> Vec<String> {
     vec![".SystemUIFont".to_owned()]
 }
 
-/// Returns the canonical form of a single-keystroke shortcut such as `alt-left`.
+/// 将可录制的单次按键转换为 GPUI 快捷键的规范格式。
 pub(crate) fn parse_shortcut(value: &str) -> Option<String> {
-    Keystroke::parse(value.trim()).ok().map(|keystroke| keystroke.unparse())
-}
-
-pub(crate) fn shortcut_matches(shortcut: &str, keystroke: &Keystroke) -> bool {
-    Keystroke::parse(shortcut).is_ok_and(|shortcut| {
-        shortcut.key == keystroke.key && shortcut.modifiers == keystroke.modifiers
-    })
+    let value = value.trim();
+    let key = Keystroke::parse(value).ok()?;
+    if key.key_char.is_some() {
+        return None;
+    }
+    if key.key == "-" && value != "-" {
+        let modifiers = value.strip_suffix("--")?.to_ascii_lowercase();
+        if !modifiers.split('-').all(|modifier| {
+            matches!(
+                modifier,
+                "ctrl" | "alt" | "shift" | "cmd" | "super" | "win" | "fn" | "secondary"
+            )
+        }) {
+            return None;
+        }
+    }
+    let supported = matches!(key.key.as_bytes(), [byte] if byte.is_ascii_graphic())
+        || matches!(
+            key.key.as_str(),
+            "escape"
+                | "enter"
+                | "space"
+                | "tab"
+                | "backspace"
+                | "delete"
+                | "insert"
+                | "left"
+                | "right"
+                | "up"
+                | "down"
+                | "home"
+                | "end"
+                | "pageup"
+                | "pagedown"
+        )
+        || key.key.strip_prefix('f').is_some_and(|suffix| {
+            suffix
+                .parse::<u8>()
+                .is_ok_and(|n| (1..=24).contains(&n) && n.to_string() == suffix)
+        });
+    supported.then(|| key.unparse())
 }
 
 pub(crate) fn default_monospace_font_families() -> Vec<String> {
@@ -727,6 +856,7 @@ mod tests {
     #[test]
     fn missing_settings_fields_use_defaults() {
         let settings: AppSettings = serde_json::from_str("{}").expect("deserialize defaults");
+        assert_eq!(settings.shortcuts, Shortcuts::default());
         assert_eq!(settings.volume, 1.);
         assert_eq!(settings.last_nonzero_volume, 1.);
         assert_eq!(settings.color_theme_mode, ColorThemeMode::Auto);
@@ -850,8 +980,11 @@ mod tests {
             audio_cache_limit_gb: 0,
             image_cache_capacity: 0,
             navigation_history_limit: usize::MAX,
-            navigate_back_shortcut: "alt-left-up".to_owned(),
-            navigate_forward_shortcut: "Alt-Right".to_owned(),
+            shortcuts: Shortcuts {
+                navigate_back_shortcut: Some("alt-left-up".into()),
+                navigate_forward_shortcut: Some("Alt-Right".into()),
+                ..Shortcuts::default()
+            },
             playback_quality: Quality::High,
             shuffle: false,
             repeat_mode: RepeatMode::Off,
@@ -883,22 +1016,52 @@ mod tests {
             settings.navigation_history_limit,
             MAX_NAVIGATION_HISTORY_LIMIT
         );
-        assert_eq!(
-            settings.navigate_back_shortcut,
-            DEFAULT_NAVIGATE_BACK_SHORTCUT
-        );
-        assert_eq!(settings.navigate_forward_shortcut, "alt-right");
+        assert_eq!(settings.shortcuts, Shortcuts::default());
     }
 
     #[test]
-    fn shortcuts_match_exact_modifiers() {
-        let pressed = Keystroke::parse("alt-left").unwrap();
-        assert!(shortcut_matches("Alt-Left", &pressed));
-        assert!(!shortcut_matches("left", &pressed));
-        assert!(!shortcut_matches("alt-left-up", &pressed));
+    fn test_shortcut_key_names() {
+        for invalid in [
+            "",
+            "alt+left",
+            "ctrl-lefft",
+            "ctrl-",
+            "bogus--",
+            "a b",
+            "a->b",
+            "f01",
+        ] {
+            assert_eq!(parse_shortcut(invalid), None, "{invalid:?}");
+        }
+        for (input, canonical) in [
+            (" Alt-Left ", "alt-left"),
+            ("Ctrl-[", "ctrl-["),
+            ("Ctrl--", "ctrl--"),
+            ("F12", "f12"),
+        ] {
+            assert_eq!(parse_shortcut(input).as_deref(), Some(canonical));
+        }
+    }
+
+    #[test]
+    fn test_shortcut_defaults_preserve_existing_navigation() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"navigate_back_shortcut":"space","navigate_forward_shortcut":" SPACE "}"#,
+        )
+        .unwrap();
+        let shortcuts = settings.normalized().shortcuts;
         assert_eq!(
-            parse_shortcut(" Ctrl-Shift-A ").as_deref(),
-            Some("ctrl-shift-a")
+            shortcuts.binding(ShortcutAction::NavigateBack),
+            Some("space")
+        );
+        assert_eq!(
+            shortcuts.binding(ShortcutAction::NavigateForward),
+            Some("alt-right")
+        );
+        assert_eq!(shortcuts.binding(ShortcutAction::TogglePlayback), None);
+        assert_eq!(
+            shortcuts.binding(ShortcutAction::SeekForward),
+            Some("right")
         );
     }
 
@@ -946,8 +1109,15 @@ mod tests {
             audio_cache_limit_gb: 24,
             image_cache_capacity: 72,
             navigation_history_limit: 16,
-            navigate_back_shortcut: "escape".to_owned(),
-            navigate_forward_shortcut: "ctrl-]".to_owned(),
+            shortcuts: Shortcuts {
+                navigate_back_shortcut: Some("escape".into()),
+                navigate_forward_shortcut: Some("ctrl-]".into()),
+                toggle_playback_shortcut: Some("ctrl-space".into()),
+                seek_backward_shortcut: None,
+                seek_forward_shortcut: Some("shift-right".into()),
+                previous_track_shortcut: Some("shift-left".into()),
+                next_track_shortcut: Some("ctrl-;".into()),
+            },
             playback_quality: Quality::HiRes,
             shuffle: true,
             repeat_mode: RepeatMode::All,
@@ -1027,14 +1197,7 @@ mod tests {
             restored.navigation_history_limit,
             expected.navigation_history_limit
         );
-        assert_eq!(
-            restored.navigate_back_shortcut,
-            expected.navigate_back_shortcut
-        );
-        assert_eq!(
-            restored.navigate_forward_shortcut,
-            expected.navigate_forward_shortcut
-        );
+        assert_eq!(restored.shortcuts, expected.shortcuts);
         assert_eq!(restored.playback_quality, expected.playback_quality);
         assert_eq!(restored.shuffle, expected.shuffle);
         assert_eq!(restored.repeat_mode, expected.repeat_mode);

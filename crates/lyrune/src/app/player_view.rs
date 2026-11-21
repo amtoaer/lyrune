@@ -21,7 +21,7 @@ use crate::icons::{MediaIcon, media_icon, media_icon_hsla};
 use crate::library::format_duration;
 use crate::settings::RepeatMode;
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(super) struct PlayerInput {
     pub(super) liked: Option<bool>,
     pub(super) cover: Option<Arc<RenderImage>>,
@@ -138,7 +138,10 @@ impl PlayerControlsView {
         }
         self.track = track;
         self.input = input;
-        cx.notify();
+        let view = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = view.update(cx, |_, cx| cx.notify());
+        });
     }
 
     pub(super) fn set_queue(
@@ -1021,17 +1024,22 @@ mod tests {
     use gpui_component::ActiveTheme as _;
     use lyrune_api::Quality;
 
-    use super::{PlayerControlsView, player_bar};
+    use super::{PlayerControlsView, PlayerInput, player_bar};
     use crate::app::progress_view::PlaybackProgressView;
     use crate::design::ColorTheme;
 
     struct TestPlayerBar {
         progress: Entity<PlaybackProgressView>,
         controls: Entity<PlayerControlsView>,
+        next_input: Option<PlayerInput>,
     }
 
     impl Render for TestPlayerBar {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if let Some(input) = self.next_input.take() {
+                self.controls
+                    .update(cx, |view, cx| view.set_input(None, input, cx));
+            }
             player_bar(&self.progress, &self.controls, cx.theme().group_box)
         }
     }
@@ -1054,6 +1062,7 @@ mod tests {
         let (_, cx) = cx.add_window_view(|_, _| TestPlayerBar {
             progress,
             controls: controls.clone(),
+            next_input: None,
         });
         let tracks = (0..200)
             .map(|index| {
@@ -1130,6 +1139,7 @@ mod tests {
         let (_, cx) = cx.add_window_view(|_, _| TestPlayerBar {
             progress,
             controls: controls.clone(),
+            next_input: None,
         });
         controls.update(cx, |view, cx| {
             let track = serde_json::from_value(serde_json::json!({
@@ -1157,9 +1167,10 @@ mod tests {
         let progress = cx.new(|cx| PlaybackProgressView::new(None, font(".SystemUIFont"), cx));
         let controls = cx
             .new(|cx| PlayerControlsView::new(0.5, ColorTheme::default(), Quality::default(), cx));
-        let (_, cx) = cx.add_window_view(|_, _| TestPlayerBar {
+        let (bar, cx) = cx.add_window_view(|_, _| TestPlayerBar {
             progress: progress.clone(),
             controls: controls.clone(),
+            next_input: None,
         });
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1171,14 +1182,27 @@ mod tests {
         }
         assert_eq!(controls.read_with(cx, |view, _| view.render_count), before);
 
-        controls.update(cx, |view, cx| {
-            view.input.quality_menu_open = true;
-            cx.notify();
-        });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert_eq!(
-            controls.read_with(cx, |view, _| view.render_count),
-            before + 1
-        );
+        let notified = std::rc::Rc::new(std::cell::Cell::new(false));
+        let received = notified.clone();
+        let _subscription =
+            cx.update(|_, cx| cx.observe(&controls, move |_, _| received.set(true)));
+        for show_pause in [true, false] {
+            let before = controls.read_with(cx, |view, _| view.render_count);
+            let input = controls.read_with(cx, |view, _| PlayerInput {
+                show_pause,
+                ..view.input.clone()
+            });
+            bar.update(cx, |bar, cx| {
+                bar.next_input = Some(input);
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert!(
+                notified.replace(false),
+                "the updated controls must request a redraw"
+            );
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert!(controls.read_with(cx, |view, _| view.render_count) > before);
+        }
     }
 }

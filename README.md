@@ -65,6 +65,19 @@ nix run github:wuyeyou/nix-packages#lyrune
 
 该 Flake 由社区独立维护，使用 Lyrune 官方发布的 Deb 二进制包，并自动跟踪稳定版本。
 
+### Fedora / Nobara
+
+Fedora 系用户（`x86_64` / `aarch64`）可以添加社区维护的 [dnf 仓库](https://github.com/LangYa466/rpm-packages)：
+
+```bash
+sudo curl -fsSL -o /etc/yum.repos.d/langya466.repo https://langya466.github.io/rpm-packages/langya466.repo
+sudo dnf install lyrune
+```
+
+之后通过 `sudo dnf upgrade` 即可更新。
+
+该仓库由社区独立维护，直接分发 Lyrune 官方发布的 RPM 包（仓库元数据经 GPG 签名），每小时自动跟踪稳定版本。
+
 ### 其它发行版
 
 [Release 页](https://github.com/amtoaer/lyrune/releases) 提供了三类主流发行版（Debian、CentOS、Arch Linux）的安装包和通用的 AppImage 打包、单二进制压缩包，用户可根据个人环境自行选择。

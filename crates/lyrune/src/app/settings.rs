@@ -1311,9 +1311,6 @@ impl Render for SettingsPage {
                                 .when(tab == SettingsTab::Other, |this| this.child(
                                     v_flex()
                                         .gap_3()
-                                        .pb_4()
-                                        .border_b_1()
-                                        .border_color(theme.border)
                                         .track_focus(&self.shortcut_focus)
                                         .key_context("ShortcutRecorder")
                                         .on_mouse_down_out(cx.listener(|this, _, window, cx| {
@@ -1321,28 +1318,33 @@ impl Render for SettingsPage {
                                                 window.blur(cx);
                                             }
                                         }))
-                                        .child(setting_heading("快捷键", "点击按键即可录制，再次点击取消。"))
-                                        .child(h_flex()
-                                            .w_full()
-                                            .items_start()
-                                            .flex_wrap()
-                                            .gap_x_10()
-                                            .gap_y_6()
-                                            .child(shortcut_group("播放控制", &[
-                                                ShortcutAction::TogglePlayback,
-                                                ShortcutAction::PreviousTrack,
-                                                ShortcutAction::NextTrack,
-                                                ShortcutAction::SeekBackward,
-                                                ShortcutAction::SeekForward,
-                                            ]))
-                                            .child(shortcut_group("页面导航", &[
-                                                ShortcutAction::NavigateBack,
-                                                ShortcutAction::NavigateForward,
-                                            ]))),
+                                        .child(setting_heading("快捷键", "点击按键即可录制，再次点击取消"))
+                                        .child(setting_group().child(
+                                            h_flex()
+                                                .w_full()
+                                                .items_start()
+                                                .flex_wrap()
+                                                .gap_x_10()
+                                                .gap_y_6()
+                                                .child(shortcut_group("播放控制", &[
+                                                    ShortcutAction::TogglePlayback,
+                                                    ShortcutAction::PreviousTrack,
+                                                    ShortcutAction::NextTrack,
+                                                    ShortcutAction::SeekBackward,
+                                                    ShortcutAction::SeekForward,
+                                                ]))
+                                                .child(shortcut_group("页面导航", &[
+                                                    ShortcutAction::NavigateBack,
+                                                    ShortcutAction::NavigateForward,
+                                                ]))
+                                        )),
                                 ))
                                 .when(tab == SettingsTab::Other, |this| this.child(
                                     v_flex()
                                         .gap_2()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
                                         .child(setting_heading("更新", "启动时在后台检查新版本，不会影响正常使用"))
                                         .child(
                                             Button::new("check-updates-on-startup")

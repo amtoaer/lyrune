@@ -3,7 +3,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui::{AppContext as _, Pixels, TestAppContext, font, px};
+use gpui::{
+    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, TestAppContext, Window, div, font, px,
+};
+use gpui_component::input::{Input, InputState};
 use lyrune_api::{
     PlaylistPage, Quality, RecommendationKind, SearchAlbum, SearchPage, SearchResults, Track,
     UserPlaylist, UserPlaylistId,
@@ -11,7 +15,6 @@ use lyrune_api::{
 
 use super::account::Account;
 use super::animation::frame_is_due;
-use super::backdrop_coverage;
 use super::home::HomePageState;
 use super::lyrics::parse_lyrics;
 use super::lyrics_loading::LyricsCache;
@@ -33,10 +36,11 @@ use super::queue::{
     PlaybackQueue, canonical_queue_track_index, insert_external_track_after_current,
     insert_track_after_current,
 };
+use super::{RunShortcut, backdrop_coverage, bind_shortcuts};
 use crate::design::{AppFonts, ColorTheme};
 use crate::settings::{
     AppSettings, DEFAULT_NAVIGATION_HISTORY_LIMIT, FrameRate, PersistedQueueContinuation,
-    RepeatMode,
+    RepeatMode, ShortcutAction, Shortcuts,
 };
 use crate::singleflight::SingleFlight;
 
@@ -65,6 +69,94 @@ fn track(mid: &str) -> Track {
 
 fn mids(tracks: &[Arc<Track>]) -> Vec<&str> {
     tracks.iter().map(|track| track.mid.as_str()).collect()
+}
+
+#[gpui::test]
+fn test_shortcut_dispatch(cx: &mut TestAppContext) {
+    struct View {
+        focus: FocusHandle,
+        input: Entity<InputState>,
+        actions: Vec<ShortcutAction>,
+        browsing: bool,
+    }
+
+    impl Render for View {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .track_focus(&self.focus)
+                .key_context(if self.browsing {
+                    "LyruneShortcuts Browsing"
+                } else {
+                    "LyruneShortcuts"
+                })
+                .on_action(
+                    cx.listener(|this, action: &RunShortcut, _, _| this.actions.push(action.0)),
+                )
+                .child(Input::new(&self.input))
+        }
+    }
+
+    let defaults = Shortcuts::default();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        bind_shortcuts(&defaults, None, cx);
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        cx.on_focus_lost(window, |this: &mut View, window, cx| {
+            this.focus.focus(window, cx)
+        })
+        .detach();
+        View {
+            focus,
+            input: cx.new(|cx| InputState::new(window, cx)),
+            actions: Vec::new(),
+            browsing: true,
+        }
+    });
+    use ShortcutAction::*;
+    let track_keys = if cfg!(target_os = "macos") {
+        "cmd-left cmd-right"
+    } else {
+        "ctrl-left ctrl-right"
+    };
+    cx.simulate_keystrokes(&format!("alt-left alt-right space left right {track_keys}"));
+    let mut custom = defaults.clone();
+    custom.set_binding(NavigateBack, Some("a".into()));
+    custom.set_binding(TogglePlayback, Some("b".into()));
+    cx.update(|_, cx| bind_shortcuts(&custom, Some(&defaults), cx));
+    cx.simulate_keystrokes("alt-left space a");
+
+    let input = view.read_with(cx, |view, _| view.input.clone());
+    cx.update(|window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+    cx.simulate_keystrokes(&format!("a b {track_keys}"));
+    assert_eq!(input.read_with(cx, |input, _| input.value()), "ab");
+    cx.update(|window, cx| {
+        window.blur(cx);
+        view.update(cx, |view, cx| {
+            view.browsing = false;
+            cx.notify();
+        });
+    });
+    cx.simulate_keystrokes(&format!("a b left {track_keys}"));
+    assert_eq!(
+        view.read_with(cx, |view, _| view.actions.clone()),
+        [
+            NavigateBack,
+            NavigateForward,
+            TogglePlayback,
+            SeekBackward,
+            SeekForward,
+            PreviousTrack,
+            NextTrack,
+            NavigateBack,
+            TogglePlayback,
+            SeekBackward,
+            PreviousTrack,
+            NextTrack,
+        ]
+    );
 }
 
 #[test]

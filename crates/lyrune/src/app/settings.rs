@@ -6,6 +6,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, MaskPattern, NumberInput, NumberInputEvent},
+    kbd::Kbd,
     menu::{DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
     tab::{Tab, TabBar},
@@ -14,15 +15,15 @@ use gpui_component::{
 use lyrune_api::Quality;
 
 use super::preferences::Preferences;
-use super::{LyruneView, home_content_width, page_horizontal_padding};
+use super::{LyruneView, bind_shortcuts, home_content_width, page_horizontal_padding};
 use crate::cache::audio_cache_limit_bytes;
 use crate::design::{self, ColorTheme};
 use crate::settings::{
     AppSettings, ColorThemeMode, FrameRate, MAX_IMAGE_CACHE_CAPACITY,
     MAX_LYRIC_BACKGROUND_BLUR_PERCENT, MAX_LYRIC_BACKGROUND_CONTRAST_LC, MAX_LYRIC_SCALE_PERCENT,
-    MAX_NAVIGATION_HISTORY_LIMIT, MIN_SCALE_PERCENT, TrayIconStyle, WindowDecoration,
-    default_lyric_font_families, default_monospace_font_families, default_ui_font_families,
-    parse_font_families,
+    MAX_NAVIGATION_HISTORY_LIMIT, MIN_SCALE_PERCENT, ShortcutAction, Shortcuts, TrayIconStyle,
+    WindowDecoration, default_lyric_font_families, default_monospace_font_families,
+    default_ui_font_families, parse_font_families, parse_shortcut,
 };
 
 struct SettingsInputs {
@@ -210,6 +211,7 @@ pub(super) enum SettingsAction {
     AudioCacheLimit(u64),
     ImageCacheCapacity(usize),
     HistoryLimit(usize),
+    Shortcuts(Shortcuts),
     Scale {
         lyric: u32,
         spacing: u32,
@@ -258,11 +260,28 @@ impl SettingsTab {
     }
 }
 
+impl ShortcutAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NavigateBack => "历史后退",
+            Self::NavigateForward => "历史前进",
+            Self::TogglePlayback => "播放／暂停",
+            Self::SeekBackward => "快退 5 秒",
+            Self::SeekForward => "快进 5 秒",
+            Self::PreviousTrack => "上一首",
+            Self::NextTrack => "下一首",
+        }
+    }
+}
+
 pub(super) struct SettingsPage {
     preferences: Entity<Preferences>,
     settings_inputs: SettingsInputs,
     settings_scroll_handle: ScrollHandle,
     tab: SettingsTab,
+    shortcut_focus: FocusHandle,
+    shortcut_recording: Option<(ShortcutAction, Subscription)>,
+    shortcut_error: Option<(ShortcutAction, String)>,
     pub(super) update_check_in_progress: bool,
     _preferences_subscription: Subscription,
     _input_subscriptions: Vec<Subscription>,
@@ -287,6 +306,9 @@ impl SettingsPage {
             settings_inputs,
             settings_scroll_handle: ScrollHandle::new(),
             tab: SettingsTab::Appearance,
+            shortcut_focus: cx.focus_handle(),
+            shortcut_recording: None,
+            shortcut_error: None,
             update_check_in_progress: false,
             _preferences_subscription: subscription,
             _input_subscriptions: Vec::new(),
@@ -297,6 +319,13 @@ impl SettingsPage {
 
     pub(super) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._input_subscriptions.clear();
+        self.shortcut_recording = None;
+        self._input_subscriptions
+            .push(cx.on_blur(&self.shortcut_focus, window, |this, _, cx| {
+                if this.shortcut_recording.take().is_some() {
+                    cx.notify();
+                }
+            }));
         for input in [
             &self.settings_inputs.ui_font,
             &self.settings_inputs.monospace_font,
@@ -446,6 +475,61 @@ impl SettingsPage {
                 input.set_value(value.to_string(), window, cx)
             });
         cx.emit(SettingsAction::ImageCacheCapacity(value));
+    }
+
+    fn toggle_shortcut_recording(
+        &mut self,
+        action: ShortcutAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shortcut_error = None;
+        if self
+            .shortcut_recording
+            .take()
+            .is_some_and(|(recording, _)| recording == action)
+        {
+            window.blur(cx);
+            cx.notify();
+            return;
+        }
+        self.shortcut_focus.focus(window, cx);
+        let focus = self.shortcut_focus.clone();
+        let page = cx.weak_entity();
+        let subscription = cx.intercept_keystrokes(move |event, window, cx| {
+            if !focus.is_focused(window) {
+                return;
+            }
+            cx.stop_propagation();
+            let key = &event.keystroke;
+            if matches!(
+                key.key.as_str(),
+                "shift" | "control" | "alt" | "platform" | "function"
+            ) {
+                return;
+            }
+            window.blur(cx);
+            let _ = page.update(cx, |this, cx| {
+                this.shortcut_recording = None;
+                if let Some(binding) = parse_shortcut(&key.unparse()) {
+                    let mut shortcuts = this.preferences.read(cx).settings.shortcuts.clone();
+                    if let Some(conflict) = ShortcutAction::ALL.into_iter().find(|&other| {
+                        other != action && shortcuts.binding(other) == Some(binding.as_str())
+                    }) {
+                        this.shortcut_error =
+                            Some((action, format!("此按键已用于「{}」", conflict.label())));
+                    } else {
+                        shortcuts.set_binding(action, Some(binding));
+                        cx.emit(SettingsAction::Shortcuts(shortcuts));
+                    }
+                } else {
+                    this.shortcut_error = Some((action, "不支持这个按键".into()));
+                }
+                cx.notify();
+            });
+        });
+        self.shortcut_recording = Some((action, subscription));
+        cx.notify();
     }
 
     fn apply_navigation_history_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -705,6 +789,77 @@ impl Render for SettingsPage {
                         .text_color(theme.muted_foreground)
                         .child(detail),
                 )
+        };
+        let shortcut_group = |title: &'static str, actions: &[ShortcutAction]| {
+            v_flex()
+                .flex_1()
+                .flex_basis(px(256.))
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_medium()
+                        .text_color(theme.muted_foreground)
+                        .child(title),
+                )
+                .children(actions.iter().copied().map(|action| {
+                    let recording = self
+                        .shortcut_recording
+                        .as_ref()
+                        .is_some_and(|(current, _)| *current == action);
+                    let label = if recording {
+                        "按下按键…".into()
+                    } else {
+                        settings
+                            .shortcuts
+                            .binding(action)
+                            .and_then(|key| Keystroke::parse(key).ok())
+                            .map_or_else(|| "未绑定".into(), |key| Kbd::format(&key))
+                    };
+                    let error = self
+                        .shortcut_error
+                        .as_ref()
+                        .filter(|(current, _)| *current == action)
+                        .map(|(_, error)| error.clone());
+                    h_flex()
+                        .h(px(36.))
+                        .gap_3()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().line_height(px(18.)).child(action.label()))
+                                .when_some(error, |this, error| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .line_height(px(15.))
+                                            .text_color(theme.danger)
+                                            .child(error),
+                                    )
+                                }),
+                        )
+                        .child(
+                            Button::new(action.label())
+                                .debug_selector(move || action.label().to_owned())
+                                .accessibility_label(format!("{}：{}", action.label(), label))
+                                .tooltip(if recording {
+                                    "再次点击可取消录制".into()
+                                } else {
+                                    label.clone()
+                                })
+                                .label(label)
+                                .w(px(144.))
+                                .h(px(30.))
+                                .flex_none()
+                                .outline()
+                                .selected(recording)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.toggle_shortcut_recording(action, window, cx);
+                                })),
+                        )
+                }))
         };
         let setting_group = || {
             v_flex()
@@ -1155,7 +1310,41 @@ impl Render for SettingsPage {
                                 ))
                                 .when(tab == SettingsTab::Other, |this| this.child(
                                     v_flex()
+                                        .gap_3()
+                                        .track_focus(&self.shortcut_focus)
+                                        .key_context("ShortcutRecorder")
+                                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                                            if this.shortcut_focus.is_focused(window) {
+                                                window.blur(cx);
+                                            }
+                                        }))
+                                        .child(setting_heading("快捷键", "点击按键即可录制，再次点击取消"))
+                                        .child(setting_group().child(
+                                            h_flex()
+                                                .w_full()
+                                                .items_start()
+                                                .flex_wrap()
+                                                .gap_x_10()
+                                                .gap_y_6()
+                                                .child(shortcut_group("播放控制", &[
+                                                    ShortcutAction::TogglePlayback,
+                                                    ShortcutAction::PreviousTrack,
+                                                    ShortcutAction::NextTrack,
+                                                    ShortcutAction::SeekBackward,
+                                                    ShortcutAction::SeekForward,
+                                                ]))
+                                                .child(shortcut_group("页面导航", &[
+                                                    ShortcutAction::NavigateBack,
+                                                    ShortcutAction::NavigateForward,
+                                                ]))
+                                        )),
+                                ))
+                                .when(tab == SettingsTab::Other, |this| this.child(
+                                    v_flex()
                                         .gap_2()
+                                        .pt_4()
+                                        .border_t_1()
+                                        .border_color(theme.border)
                                         .child(setting_heading("更新", "启动时在后台检查新版本，不会影响正常使用"))
                                         .child(
                                             Button::new("check-updates-on-startup")
@@ -1225,6 +1414,18 @@ impl LyruneView {
             SettingsAction::AudioCacheLimit(value) => self.set_audio_cache_limit(*value, cx),
             SettingsAction::ImageCacheCapacity(value) => self.set_image_cache_capacity(*value, cx),
             SettingsAction::HistoryLimit(value) => self.set_navigation_history_limit(*value, cx),
+            SettingsAction::Shortcuts(shortcuts) => {
+                let previous = &self.preferences.read(cx).settings.shortcuts;
+                if previous != shortcuts {
+                    let previous = previous.clone();
+                    bind_shortcuts(shortcuts, Some(&previous), cx);
+                    self.preferences.update(cx, |preferences, cx| {
+                        preferences.settings.shortcuts = shortcuts.clone();
+                        cx.notify();
+                    });
+                    self.preferences.read(cx).save();
+                }
+            }
             SettingsAction::Scale { lyric, spacing } => {
                 self.set_scale_settings(*lyric, *spacing, cx)
             }
@@ -1544,24 +1745,40 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::{
-        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, StyleRefinement,
-        Styled as _, TestAppContext, Window, div, font, px,
+        AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+        ParentElement as _, Render, StyleRefinement, Styled as _, TestAppContext, Window, div,
+        font, prelude::FluentBuilder as _, px,
     };
-    use gpui_component::{input::InputEvent, v_flex};
+    use gpui_component::{
+        input::{InputEvent, InputState},
+        v_flex,
+    };
 
     use super::{Preferences, SettingsAction, SettingsPage, SettingsTab};
+    use crate::app::{
+        RunShortcut, account::Account, bind_shortcuts, navigation_view::NavigationView,
+    };
     use crate::design::{AppFonts, ColorTheme};
-    use crate::settings::AppSettings;
+    use crate::settings::{AppSettings, ShortcutAction, Shortcuts};
 
     struct TestSettingsPage {
         page: Entity<SettingsPage>,
+        navigation: Option<Entity<NavigationView>>,
+        window_focus: Option<FocusHandle>,
     }
 
     impl Render for TestSettingsPage {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             v_flex()
                 .size_full()
-                .child(div().h(px(72.)).flex_shrink_0())
+                .when_some(self.window_focus.as_ref(), |this, focus| {
+                    this.track_focus(focus)
+                        .key_context("LyruneShortcuts Browsing")
+                })
+                .child(self.navigation.clone().map_or_else(
+                    || div().h(px(72.)).flex_shrink_0().into_any_element(),
+                    IntoElement::into_any_element,
+                ))
                 .child(
                     self.page
                         .clone()
@@ -1569,6 +1786,104 @@ mod tests {
                 )
                 .child(div().h(px(112.)).flex_shrink_0())
         }
+    }
+
+    #[gpui::test]
+    fn test_record_shortcut(cx: &mut TestAppContext) {
+        let defaults = Shortcuts::default();
+        let dispatched = Rc::new(Cell::new(None));
+        let pressed = dispatched.clone();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            bind_shortcuts(&defaults, None, cx);
+            cx.on_action(move |action: &RunShortcut, _| pressed.set(Some(action.0)));
+        });
+        let preferences = cx.new(|_| Preferences {
+            settings: AppSettings::default(),
+            fonts: AppFonts {
+                ui: font(".SystemUIFont"),
+                monospace: font(".SystemUIFont"),
+                lyrics: font(".SystemUIFont"),
+            },
+            color_theme: ColorTheme::default(),
+            writer: None,
+        });
+        let account = cx.new(|_| Account::new(None, String::new()));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let search = cx.new(|cx| InputState::new(window, cx));
+            let window_focus = cx.focus_handle();
+            window_focus.focus(window, cx);
+            let focus = window_focus.clone();
+            cx.on_focus_lost(window, move |_, window, cx| focus.focus(window, cx))
+                .detach();
+            TestSettingsPage {
+                window_focus: Some(window_focus),
+                navigation: Some(cx.new(|cx| NavigationView::new(account, search, cx))),
+                page: cx.new(|cx| {
+                    let mut page = SettingsPage::new(preferences, window, cx);
+                    page.attach_window(window, cx);
+                    page.tab = SettingsTab::Other;
+                    page
+                }),
+            }
+        });
+        let page = host.read_with(cx, |host, _| host.page.clone());
+        let changes = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let received = changes.clone();
+        let previous = defaults.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&page, move |_, event: &SettingsAction, cx| {
+                if let SettingsAction::Shortcuts(shortcuts) = event {
+                    bind_shortcuts(shortcuts, Some(&previous), cx);
+                    received.borrow_mut().push(shortcuts.clone());
+                }
+            })
+        });
+        cx.simulate_resize(gpui::size(px(1080.), px(2400.)));
+        let action = ShortcutAction::NextTrack;
+        let bounds = cx.debug_bounds(action.label()).unwrap();
+        let recorder = page.read_with(cx, |page, _| page.shortcut_focus.clone());
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        assert!(page.read_with(cx, |page, _| page.shortcut_recording.is_some()));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_down(
+            bounds.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        assert!(cx.update(|window, _| recorder.is_focused(window)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_up(
+            bounds.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        assert!(page.read_with(cx, |page, _| page.shortcut_recording.is_none()));
+        assert!(!cx.update(|window, _| recorder.is_focused(window)));
+        cx.simulate_keystrokes(defaults.binding(action).unwrap());
+        assert_eq!(dispatched.take(), Some(action));
+        assert!(changes.borrow().is_empty());
+
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.simulate_keystrokes("left");
+        assert!(changes.borrow().is_empty());
+        assert!(page.read_with(cx, |page, _| {
+            page.shortcut_error
+                .as_ref()
+                .is_some_and(|(target, _)| *target == action)
+        }));
+        assert_eq!(cx.debug_bounds(action.label()), Some(bounds));
+
+        let button = bounds.center();
+        cx.simulate_click(button, gpui::Modifiers::none());
+        cx.simulate_keystrokes("ctrl-k");
+        assert_eq!(dispatched.get(), None);
+        assert_eq!(changes.borrow().len(), 1);
+        assert_eq!(changes.borrow()[0].binding(action), Some("ctrl-k"));
+
+        cx.simulate_keystrokes("ctrl-k");
+        assert_eq!(dispatched.get(), Some(action));
+        assert_eq!(changes.borrow().len(), 1);
     }
 
     #[gpui::test]
@@ -1801,6 +2116,8 @@ mod tests {
         });
         let (host, cx) = cx.add_window_view(|window, cx| TestSettingsPage {
             page: cx.new(|cx| SettingsPage::new(preferences.clone(), window, cx)),
+            navigation: None,
+            window_focus: None,
         });
         let page = host.read_with(cx, |host, _| host.page.clone());
         cx.run_until_parked();
@@ -1881,7 +2198,11 @@ mod tests {
         let (_, cx) = cx.cx.add_window_view(|window, cx| {
             page.update(cx, |page, cx| page.attach_window(window, cx));
             window.activate_window();
-            TestSettingsPage { page: page.clone() }
+            TestSettingsPage {
+                page: page.clone(),
+                navigation: None,
+                window_focus: None,
+            }
         });
         cx.simulate_resize(gpui::size(px(1080.), px(2400.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));

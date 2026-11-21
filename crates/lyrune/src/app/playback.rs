@@ -811,6 +811,31 @@ impl Playback {
         self.sync_inhibit();
     }
 
+    pub(super) fn seek_by_shortcut(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.state.load.track.is_some() || !self.state.started {
+            return;
+        }
+        let Some(duration) = self.state.duration() else {
+            return;
+        };
+        let position = self
+            .state
+            .audio
+            .as_deref()
+            .map_or(self.state.position, AudioPlayer::position);
+        let step = Duration::from_secs(5);
+        let target = if forward {
+            position
+                .saturating_add(step)
+                .min(duration.saturating_sub(Duration::from_millis(1)))
+        } else {
+            position.saturating_sub(step)
+        };
+        if target != position {
+            self.seek_to(target, cx);
+        }
+    }
+
     #[cfg(target_os = "linux")]
     pub(super) fn seek_by(&mut self, offset_micros: i64, cx: &mut Context<Self>) {
         if self.state.load.track.is_some() || !self.state.started {

@@ -508,6 +508,7 @@ impl SettingsPage {
             ) {
                 return;
             }
+            window.blur(cx);
             let _ = page.update(cx, |this, cx| {
                 this.shortcut_recording = None;
                 if let Some(binding) = parse_shortcut(&key.unparse()) {
@@ -1742,8 +1743,9 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::{
-        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, StyleRefinement,
-        Styled as _, TestAppContext, Window, div, font, px,
+        AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+        ParentElement as _, Render, StyleRefinement, Styled as _, TestAppContext, Window, div,
+        font, prelude::FluentBuilder as _, px,
     };
     use gpui_component::{
         input::{InputEvent, InputState},
@@ -1751,19 +1753,26 @@ mod tests {
     };
 
     use super::{Preferences, SettingsAction, SettingsPage, SettingsTab};
-    use crate::app::{account::Account, navigation_view::NavigationView};
+    use crate::app::{
+        RunShortcut, account::Account, bind_shortcuts, navigation_view::NavigationView,
+    };
     use crate::design::{AppFonts, ColorTheme};
-    use crate::settings::{AppSettings, ShortcutAction};
+    use crate::settings::{AppSettings, ShortcutAction, Shortcuts};
 
     struct TestSettingsPage {
         page: Entity<SettingsPage>,
         navigation: Option<Entity<NavigationView>>,
+        window_focus: Option<FocusHandle>,
     }
 
     impl Render for TestSettingsPage {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             v_flex()
                 .size_full()
+                .when_some(self.window_focus.as_ref(), |this, focus| {
+                    this.track_focus(focus)
+                        .key_context("LyruneShortcuts Browsing")
+                })
                 .child(self.navigation.clone().map_or_else(
                     || div().h(px(72.)).flex_shrink_0().into_any_element(),
                     IntoElement::into_any_element,
@@ -1779,13 +1788,13 @@ mod tests {
 
     #[gpui::test]
     fn test_record_shortcut(cx: &mut TestAppContext) {
-        gpui::actions!(test, [ExistingShortcut]);
-        let dispatched = Rc::new(Cell::new(false));
+        let defaults = Shortcuts::default();
+        let dispatched = Rc::new(Cell::new(None));
         let pressed = dispatched.clone();
         cx.update(|cx| {
             gpui_component::init(cx);
-            cx.bind_keys([gpui::KeyBinding::new("ctrl-k", ExistingShortcut, None)]);
-            cx.on_action(move |_: &ExistingShortcut, _| pressed.set(true));
+            bind_shortcuts(&defaults, None, cx);
+            cx.on_action(move |action: &RunShortcut, _| pressed.set(Some(action.0)));
         });
         let preferences = cx.new(|_| Preferences {
             settings: AppSettings::default(),
@@ -1800,7 +1809,13 @@ mod tests {
         let account = cx.new(|_| Account::new(None, String::new()));
         let (host, cx) = cx.add_window_view(|window, cx| {
             let search = cx.new(|cx| InputState::new(window, cx));
+            let window_focus = cx.focus_handle();
+            window_focus.focus(window, cx);
+            let focus = window_focus.clone();
+            cx.on_focus_lost(window, move |_, window, cx| focus.focus(window, cx))
+                .detach();
             TestSettingsPage {
+                window_focus: Some(window_focus),
                 navigation: Some(cx.new(|cx| NavigationView::new(account, search, cx))),
                 page: cx.new(|cx| {
                     let mut page = SettingsPage::new(preferences, window, cx);
@@ -1813,9 +1828,11 @@ mod tests {
         let page = host.read_with(cx, |host, _| host.page.clone());
         let changes = Rc::new(std::cell::RefCell::new(Vec::new()));
         let received = changes.clone();
+        let previous = defaults.clone();
         let _subscription = cx.update(|_, cx| {
-            cx.subscribe(&page, move |_, event: &SettingsAction, _| {
+            cx.subscribe(&page, move |_, event: &SettingsAction, cx| {
                 if let SettingsAction::Shortcuts(shortcuts) = event {
+                    bind_shortcuts(shortcuts, Some(&previous), cx);
                     received.borrow_mut().push(shortcuts.clone());
                 }
             })
@@ -1841,8 +1858,8 @@ mod tests {
         );
         assert!(page.read_with(cx, |page, _| page.shortcut_recording.is_none()));
         assert!(!cx.update(|window, _| recorder.is_focused(window)));
-        cx.simulate_keystrokes("ctrl-k");
-        assert!(dispatched.replace(false));
+        cx.simulate_keystrokes(defaults.binding(action).unwrap());
+        assert_eq!(dispatched.take(), Some(action));
         assert!(changes.borrow().is_empty());
 
         cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -1858,12 +1875,12 @@ mod tests {
         let button = bounds.center();
         cx.simulate_click(button, gpui::Modifiers::none());
         cx.simulate_keystrokes("ctrl-k");
-        assert!(!dispatched.get());
+        assert_eq!(dispatched.get(), None);
         assert_eq!(changes.borrow().len(), 1);
         assert_eq!(changes.borrow()[0].binding(action), Some("ctrl-k"));
 
         cx.simulate_keystrokes("ctrl-k");
-        assert!(dispatched.get());
+        assert_eq!(dispatched.get(), Some(action));
         assert_eq!(changes.borrow().len(), 1);
     }
 
@@ -2098,6 +2115,7 @@ mod tests {
         let (host, cx) = cx.add_window_view(|window, cx| TestSettingsPage {
             page: cx.new(|cx| SettingsPage::new(preferences.clone(), window, cx)),
             navigation: None,
+            window_focus: None,
         });
         let page = host.read_with(cx, |host, _| host.page.clone());
         cx.run_until_parked();
@@ -2181,6 +2199,7 @@ mod tests {
             TestSettingsPage {
                 page: page.clone(),
                 navigation: None,
+                window_focus: None,
             }
         });
         cx.simulate_resize(gpui::size(px(1080.), px(2400.)));

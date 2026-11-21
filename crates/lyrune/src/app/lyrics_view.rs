@@ -937,6 +937,7 @@ pub(super) struct LyricsInput {
     pub(super) background_blur_percent: u32,
     pub(super) highlight_frame_rate: FrameRate,
     pub(super) scroll_frame_rate: FrameRate,
+    pub(super) waiting: bool,
     pub(super) advancing: bool,
     pub(super) expanded: bool,
     pub(super) visible: bool,
@@ -1048,6 +1049,7 @@ impl LyricsView {
                 background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
                 highlight_frame_rate: FrameRate::Fps60,
                 scroll_frame_rate: FrameRate::Fps60,
+                waiting: false,
                 advancing: false,
                 expanded: false,
                 visible: false,
@@ -1099,12 +1101,15 @@ impl LyricsView {
         } else if !input.visible || input.cover_image.is_none() {
             self.previous_cover = None;
         }
+        let waiting_changed = self.input.waiting != input.waiting;
         // 与背景一致：初次可见时直接定位，持续可见时位置变化一律滚动。
-        if (input.visible && !self.input.visible) || self.input.mid != input.mid {
+        if waiting_changed || (input.visible && !self.input.visible) || self.input.mid != input.mid
+        {
             self.lyric_motion_state = None;
         }
-        let position_changed = self.position != position && !input.advancing;
+        let position_changed = !input.waiting && self.position != position && !input.advancing;
         if position_changed
+            || waiting_changed
             || self.input.visible != input.visible
             || self.input.highlight_frame_rate != input.highlight_frame_rate
             || self.input.scroll_frame_rate != input.scroll_frame_rate
@@ -1113,7 +1118,9 @@ impl LyricsView {
         }
         let changed = self.input != input;
         self.input = input;
-        self.position = position;
+        if !self.input.waiting {
+            self.position = position;
+        }
         if changed || position_changed {
             cx.notify();
         }
@@ -1327,11 +1334,14 @@ impl LyricsView {
                 .cached_lyrics_panel
                 .as_ref()
                 .is_none_or(|cache| cache.render_distance != render_distance);
-        if cache_invalid || self.lyric_highlight_frame_pending || self.lyric_scroll_frame_pending {
+        if cache_invalid
+            || !self.input.waiting
+                && (self.lyric_highlight_frame_pending || self.lyric_scroll_frame_pending)
+        {
             let active = Some(anchor);
             let now = cx.background_executor().now();
             // 暂停或拖动后音频加载期间也要滚动，不以 advancing 为条件。
-            let motion_enabled = self.input.visible && !cx.reduce_motion();
+            let motion_enabled = self.input.visible && !self.input.waiting && !cx.reduce_motion();
             let (scroll_anchor, style_anchor) =
                 self.lyric_motion_anchors(mid, anchor, motion_enabled, now);
             // 一个通道到期只更新自己的采样；不能因另一通道更快而越过其帧率上限。
@@ -2033,6 +2043,53 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_lyrics_freeze_while_waiting_for_track(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, _| LyricsView::new(None, font(".SystemUIFont")));
+        let lyrics = Arc::new(lyrics::parse_lyrics(
+            "[00:00.00]first\n[00:01.00]second",
+            None,
+            None,
+        ));
+        let render = |mid: &str, waiting, position, cx: &mut VisualTestContext| {
+            view.update(cx, |view, cx| {
+                let input = LyricsInput {
+                    mid: mid.into(),
+                    content: LyricsContent::Ready(lyrics.clone()),
+                    waiting,
+                    visible: true,
+                    ..LyricsView::new(None, font(".SystemUIFont")).input
+                };
+                view.set_input(input, Duration::from_millis(position), cx);
+            });
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                let cache = view.cached_lyrics_panel.as_ref().unwrap();
+                (
+                    cache.scroll_offset,
+                    cache.style_anchor,
+                    cache.highlight_position,
+                )
+            })
+        };
+        render("old", false, 0, cx);
+        render("old", false, 1000, cx);
+        cx.cx.executor().advance_clock(LYRIC_SCROLL_DURATION / 3);
+        let before = render("old", false, 1120, cx);
+        assert!(before.1 > 0. && before.1 < 1., "{before:?}");
+
+        assert_eq!(render("old", true, 0, cx), before);
+        cx.cx.executor().advance_clock(LYRIC_SCROLL_DURATION);
+        assert_eq!(render("old", true, 0, cx), before);
+
+        let next = render("new", false, 1300, cx);
+        assert!(next.0 > before.0);
+        assert_eq!(next.1, 1.);
+        assert_eq!(next.2, Duration::from_millis(1300));
+    }
+
+    #[gpui::test]
     fn test_long_lyric_jump_starts_near_target(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (view, cx) = cx.add_window_view(|_, _| LyricsView::new(None, font(".SystemUIFont")));
@@ -2113,6 +2170,7 @@ mod tests {
             background_blur_percent: DEFAULT_LYRIC_BACKGROUND_BLUR_PERCENT,
             highlight_frame_rate: FrameRate::Display,
             scroll_frame_rate: FrameRate::Display,
+            waiting: false,
             advancing: false,
             expanded: true,
             visible: true,

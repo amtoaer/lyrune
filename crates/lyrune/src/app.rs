@@ -842,15 +842,12 @@ impl LyruneView {
                 .settings
                 .lyric_highlight_frame_rate,
             scroll_frame_rate: self.preferences.read(cx).settings.lyric_scroll_frame_rate,
+            waiting,
             advancing: !waiting && self.playback.read(cx).state.is_advancing(),
             expanded: self.cover_backdrop_expanded,
             visible: self.cover_backdrop_visible,
         };
-        let position = if waiting {
-            self.progress.read(cx).position()
-        } else {
-            self.playback.read(cx).state.position
-        };
+        let position = self.playback.read(cx).state.position;
         self.lyrics_view
             .update(cx, |view, cx| view.set_input(input, position, cx));
     }

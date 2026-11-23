@@ -25,6 +25,8 @@ overrides:
       - libxkbcommon0
       - libxkbcommon-x11-0
       - libvulkan1
+    suggests:
+      - "pipewire-alsa | pulseaudio"
   rpm:
     depends:
       - glibc >= ${GLIBC_VERSION}

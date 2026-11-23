@@ -33,7 +33,7 @@
 
 包含了我对音乐播放器的全部需求。
 
-1. 扫码登录，加载“我喜欢”和用户歌单，双击播放；
+1. 扫码、快捷登录，加载“我喜欢”和用户歌单，双击播放；
 2. 自由选择音质，缓存播过的曲目防止多次请求；
 3. 支持某种程度的智能歌单（QQ 音乐的“专属雷达”、“猜你喜欢”）；
 4. 支持搜索，查看单曲、歌单、专辑、歌手；
@@ -43,44 +43,18 @@
 
 ## 安装
 
-### Arch Linux
+> [!NOTE]
+> Lyrune 通过 ALSA 播放音频。如果使用 PipeWire / PulseAudio 时遇到播放无声，请确认是否安装了对应的 ALSA 插件。
 
-Arch Linux 用户可以安装 AUR 里的 [lyrune-bin](https://aur.archlinux.org/packages/lyrune-bin) 包，该包由官方维护。
+按发行版选择安装方式，需要手动安装的文件可从 [GitHub Releases](https://github.com/amtoaer/lyrune/releases) 下载。
 
-如通过 `paru`：
-
-```bash
-paru -S lyrune-bin
-```
-
-### NixOS
-
-NixOS 用户（`x86_64-linux`）可以通过社区维护的 [Nix Flake](https://github.com/wuyeyou/nix-packages) 直接运行：
-
-```bash
-nix run github:wuyeyou/nix-packages#lyrune
-```
-
-也支持用户 Profile 安装及 NixOS Flake 声明式安装，详见[安装说明](https://github.com/wuyeyou/nix-packages#安装与使用)。
-
-该 Flake 由社区独立维护，使用 Lyrune 官方发布的 Deb 二进制包，并自动跟踪稳定版本。
-
-### Fedora / Nobara
-
-Fedora 系用户（`x86_64` / `aarch64`）可以添加社区维护的 [dnf 仓库](https://github.com/LangYa466/rpm-packages)：
-
-```bash
-sudo curl -fsSL -o /etc/yum.repos.d/langya466.repo https://langya466.github.io/rpm-packages/langya466.repo
-sudo dnf install lyrune
-```
-
-之后通过 `sudo dnf upgrade` 即可更新。
-
-该仓库由社区独立维护，直接分发 Lyrune 官方发布的 RPM 包（仓库元数据经 GPG 签名），每小时自动跟踪稳定版本。
-
-### 其它发行版
-
-[Release 页](https://github.com/amtoaer/lyrune/releases) 提供了三类主流发行版（Debian、CentOS、Arch Linux）的安装包和通用的 AppImage 打包、单二进制压缩包，用户可根据个人环境自行选择。
+| 发行版 | 安装方式 |
+| --- | --- |
+| Arch Linux | `paru -S lyrune-bin`（[官方维护的 AUR 包](https://aur.archlinux.org/packages/lyrune-bin)），或下载 `.pkg.tar.zst` 后用 `pacman -U` 安装 |
+| NixOS（`x86_64-linux`） | `nix run github:wuyeyou/nix-packages#lyrune`，也可用 Profile 或 Flake 安装，见[社区说明](https://github.com/wuyeyou/nix-packages#安装与使用) |
+| Debian / Ubuntu | 下载 `.deb` 后用 `apt install` 安装 |
+| Fedora / Nobara | 按[社区说明](https://github.com/LangYa466/rpm-packages#安裝)从仓库安装，或下载 `.rpm` 手动安装 |
+| 其他 Linux | 下载 `.AppImage`，赋予执行权限后运行；或下载 `.tar.gz`，解压后运行 `lyrune` |
 
 ## 外观
 
